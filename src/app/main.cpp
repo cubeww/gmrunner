@@ -2,6 +2,7 @@
 #include "base/log.h"
 #include "base/math.h"
 #include "graphics/gl_graphics_device.h"
+#include "loader/exe_loader.h"
 #include "platform/clock.h"
 #include "platform/platform.h"
 #include "platform/vfs.h"
@@ -90,23 +91,20 @@ int main(int argc, char** argv) {
     }
     gm::Logger::set_trace_flags(opts.trace);
 
-    GM_LOG_INFO("app", "gmrunner Phase 0 (version_override=%s, codepage=%u)",
+    GM_LOG_INFO("app", "gmrunner Phase 1 (version_override=%s, codepage=%u)",
                 std::string(gm::version_mode_name(opts.version_override)).c_str(),
                 opts.codepage);
-
-    if (auto init_res = gm::Platform::init(); !init_res) {
-        GM_LOG_FATAL("app", "%s", init_res.error_message().c_str());
-        return 1;
-    }
 
     AppState app;
 
     // Mount VFS roots (game folder if provided, otherwise current working directory).
     std::filesystem::path game_root = std::filesystem::current_path();
+    std::string exe_lookup_path = opts.game_path;
     if (!opts.game_path.empty()) {
         const auto exe_path = gm::Vfs::path_from_utf8(opts.game_path);
         if (exe_path.has_parent_path()) {
             game_root = exe_path.parent_path();
+            exe_lookup_path = gm::Vfs::path_to_utf8(exe_path.filename());
         }
         GM_LOG_INFO("app", "Target game: %s", opts.game_path.c_str());
     }
@@ -114,22 +112,69 @@ int main(int argc, char** argv) {
     if (auto res = app.vfs.mount_game_root(game_root); !res) {
         GM_LOG_ERROR("app", "%s", res.error_message().c_str());
     }
+
+    // Load game executable if provided.
+    std::optional<gm::GameData> loaded_game;
+    if (!opts.game_path.empty()) {
+        gm::LoadOptions load_opts{};
+        load_opts.version_override = opts.version_override;
+        load_opts.codepage_override = opts.codepage;
+
+        const gm::u64 t0 = gm::Clock::now_us();
+        auto game_res = gm::ExeLoader::load_from_vfs(app.vfs, exe_lookup_path, load_opts);
+        const gm::f64 elapsed_ms = static_cast<gm::f64>(gm::Clock::now_us() - t0) * 1e-3;
+        if (!game_res) {
+            GM_LOG_FATAL("loader", "Failed to load '%s': %s",
+                         opts.game_path.c_str(), game_res.error_message().c_str());
+            return 1;
+        }
+        loaded_game = std::move(game_res.value());
+        GM_LOG_INFO("loader", "Loaded '%s' (GM %.*s) in %.1f ms",
+                    opts.game_path.c_str(),
+                    static_cast<int>(gm::version_mode_name(loaded_game->meta.detected_version).size()),
+                    gm::version_mode_name(loaded_game->meta.detected_version).data(),
+                    elapsed_ms);
+    }
+
+    if (opts.inspect_only) {
+        if (!loaded_game) {
+            GM_LOG_ERROR("app", "--inspect requires a game executable path");
+            return 1;
+        }
+        gm::print_game_inspect(*loaded_game, opts.verbose);
+        return 0;
+    }
+
+    if (opts.compile_check_only) {
+        GM_LOG_WARN("app", "--compile-check will be wired in Phase 2.");
+        return 0;
+    }
+
+    if (auto init_res = gm::Platform::init(); !init_res) {
+        GM_LOG_FATAL("app", "%s", init_res.error_message().c_str());
+        return 1;
+    }
+
     if (auto res = app.vfs.init_temp_dir(); !res) {
         GM_LOG_WARN("app", "%s", res.error_message().c_str());
     }
 
-    if (opts.inspect_only || opts.compile_check_only) {
-        GM_LOG_WARN("app", "--inspect and --compile-check will be wired in Phases 1 and 2.");
-        gm::Platform::shutdown();
-        return 0;
-    }
-
     gm::WindowConfig win_cfg{};
-    win_cfg.title = "gmrunner — Phase 0 Platform & OpenGL Skeleton";
+    win_cfg.title = "gmrunner — Phase 1 Loader Ready";
     win_cfg.width = opts.window_width;
     win_cfg.height = opts.window_height;
     win_cfg.fullscreen = opts.fullscreen;
     win_cfg.vsync = opts.vsync;
+    if (loaded_game && !loaded_game->room_order.empty()) {
+        const gm::i32 first_id = loaded_game->room_order[0];
+        if (first_id >= 0 && static_cast<gm::usize>(first_id) < loaded_game->rooms.size() &&
+            loaded_game->rooms[static_cast<gm::usize>(first_id)].exists) {
+            const auto& rm = loaded_game->rooms[static_cast<gm::usize>(first_id)];
+            win_cfg.width = rm.width;
+            win_cfg.height = rm.height;
+            win_cfg.title = !rm.caption.empty() ? rm.caption : ("gmrunner — " + rm.name);
+        }
+    }
 
     if (auto res = app.window.create(win_cfg); !res) {
         GM_LOG_FATAL("app", "%s", res.error_message().c_str());

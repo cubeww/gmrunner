@@ -64,5 +64,6 @@ endif()
 # ---------------------------------------------------------------------------
 add_subdirectory(src/base)
 add_subdirectory(src/platform)
+add_subdirectory(src/loader)
 add_subdirectory(src/graphics)
 add_subdirectory(src/app)

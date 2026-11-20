@@ -10,7 +10,7 @@ namespace gm {
 struct CliOptions {
     std::string game_path;
     VersionMode version_override = VersionMode::Auto;
-    u32 codepage = 1252;
+    u32 codepage = 0; // 0 = auto-detect from version/fonts
     bool inspect_only = false;
     bool compile_check_only = false;
     bool show_help = false;
