@@ -72,14 +72,22 @@ public:
     void set_title(std::string_view title);
     void set_size(i32 width, i32 height);
     void set_position(i32 x, i32 y);
+    void center();
     void set_fullscreen(bool fullscreen);
     void set_vsync(bool enabled);
     void set_cursor_visible(bool visible);
 
+    [[nodiscard]] i32 x() const noexcept;
+    [[nodiscard]] i32 y() const noexcept;
     [[nodiscard]] i32 width() const noexcept;
     [[nodiscard]] i32 height() const noexcept;
     [[nodiscard]] i32 drawable_width() const noexcept;
     [[nodiscard]] i32 drawable_height() const noexcept;
+    [[nodiscard]] i32 display_width() const noexcept;
+    [[nodiscard]] i32 display_height() const noexcept;
+    [[nodiscard]] static bool numlock_on() noexcept;
+    [[nodiscard]] static bool capslock_on() noexcept;
+    [[nodiscard]] static bool scrolllock_on() noexcept;
     [[nodiscard]] bool is_fullscreen() const noexcept { return fullscreen_; }
     [[nodiscard]] bool has_focus() const noexcept { return has_focus_; }
 

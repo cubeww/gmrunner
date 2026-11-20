@@ -345,6 +345,12 @@ void PlatformWindow::set_position(i32 x, i32 y) {
     }
 }
 
+void PlatformWindow::center() {
+    if (window_) {
+        SDL_SetWindowPosition(window_, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
+    }
+}
+
 void PlatformWindow::set_fullscreen(bool fullscreen) {
     if (window_ && fullscreen_ != fullscreen) {
         if (SDL_SetWindowFullscreen(window_, fullscreen)) {
@@ -368,6 +374,18 @@ void PlatformWindow::set_cursor_visible(bool visible) {
     } else {
         SDL_HideCursor();
     }
+}
+
+i32 PlatformWindow::x() const noexcept {
+    int px = 0, py = 0;
+    if (window_) SDL_GetWindowPosition(window_, &px, &py);
+    return px;
+}
+
+i32 PlatformWindow::y() const noexcept {
+    int px = 0, py = 0;
+    if (window_) SDL_GetWindowPosition(window_, &px, &py);
+    return py;
 }
 
 i32 PlatformWindow::width() const noexcept {
@@ -396,6 +414,34 @@ i32 PlatformWindow::drawable_height() const noexcept {
     int h = 0;
     if (window_) SDL_GetWindowSizeInPixels(window_, &w, &h);
     return h;
+}
+
+i32 PlatformWindow::display_width() const noexcept {
+    const SDL_DisplayID did = window_ ? SDL_GetDisplayForWindow(window_) : SDL_GetPrimaryDisplay();
+    if (const SDL_DisplayMode* mode = SDL_GetDesktopDisplayMode(did)) {
+        return mode->w;
+    }
+    return 1920;
+}
+
+i32 PlatformWindow::display_height() const noexcept {
+    const SDL_DisplayID did = window_ ? SDL_GetDisplayForWindow(window_) : SDL_GetPrimaryDisplay();
+    if (const SDL_DisplayMode* mode = SDL_GetDesktopDisplayMode(did)) {
+        return mode->h;
+    }
+    return 1080;
+}
+
+bool PlatformWindow::numlock_on() noexcept {
+    return (SDL_GetModState() & SDL_KMOD_NUM) != 0;
+}
+
+bool PlatformWindow::capslock_on() noexcept {
+    return (SDL_GetModState() & SDL_KMOD_CAPS) != 0;
+}
+
+bool PlatformWindow::scrolllock_on() noexcept {
+    return (SDL_GetModState() & SDL_KMOD_SCROLL) != 0;
 }
 
 void* PlatformWindow::gl_get_proc_address(const char* proc_name) noexcept {

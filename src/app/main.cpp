@@ -8,9 +8,13 @@
 #include "platform/platform.h"
 #include "platform/vfs.h"
 #include "platform/window.h"
+#include "runtime/runner.h"
 
+#include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <memory>
+#include <vector>
 
 #if defined(__EMSCRIPTEN__)
 #include <emscripten/emscripten.h>
@@ -22,13 +26,14 @@ struct AppState {
     gm::Vfs vfs;
     gm::PlatformWindow window;
     gm::GlGraphicsDevice gfx;
+    std::unique_ptr<gm::Runner> runner;
     bool running = true;
     gm::u64 frame_count = 0;
     gm::u64 start_us = 0;
-    gm::u64 target_frame_us = 16667; // 60 FPS default
+    gm::u64 target_frame_us = 16667; // 60 FPS default for idle mode
 };
 
-void tick_frame(AppState& app) {
+void tick_idle_frame(AppState& app) {
     const gm::WindowEvents events = app.window.poll_events();
     if (events.quit_requested) {
         app.running = false;
@@ -58,6 +63,17 @@ void tick_frame(AppState& app) {
     ++app.frame_count;
 }
 
+void tick_app_frame(AppState& app) {
+    if (app.runner) {
+        app.runner->tick_frame();
+        if (!app.runner->is_running()) {
+            app.running = false;
+        }
+    } else {
+        tick_idle_frame(app);
+    }
+}
+
 #if defined(__EMSCRIPTEN__)
 void emscripten_frame_callback(void* userdata) {
     auto* app = static_cast<AppState*>(userdata);
@@ -65,7 +81,7 @@ void emscripten_frame_callback(void* userdata) {
         emscripten_cancel_main_loop();
         return;
     }
-    tick_frame(*app);
+    tick_app_frame(*app);
 }
 #endif
 
@@ -92,7 +108,7 @@ int main(int argc, char** argv) {
     }
     gm::Logger::set_trace_flags(opts.trace);
 
-    GM_LOG_INFO("app", "gmrunner Phase 2 (version_override=%s, codepage=%u)",
+    GM_LOG_INFO("app", "gmrunner Phase 3 (version_override=%s, codepage=%u)",
                 std::string(gm::version_mode_name(opts.version_override)).c_str(),
                 opts.codepage);
 
@@ -112,6 +128,9 @@ int main(int argc, char** argv) {
 
     if (auto res = app.vfs.mount_game_root(game_root); !res) {
         GM_LOG_ERROR("app", "%s", res.error_message().c_str());
+    }
+    if (auto res = app.vfs.mount_save_root(game_root); !res) {
+        GM_LOG_WARN("app", "%s", res.error_message().c_str());
     }
 
     // Load game executable if provided.
@@ -159,6 +178,20 @@ int main(int argc, char** argv) {
         return prog.stats.total_errors == 0 ? 0 : 1;
     }
 
+    std::optional<gm::CompiledProgram> compiled_prog;
+    if (loaded_game) {
+        const gm::u64 tc0 = gm::Clock::now_us();
+        compiled_prog = gm::GmlCompiler::compile_game(*loaded_game);
+        const gm::f64 compile_ms = static_cast<gm::f64>(gm::Clock::now_us() - tc0) * 1e-3;
+        GM_LOG_INFO("gml", "Compiled %zu instructions (%zu errors) in %.1f ms",
+                    compiled_prog->stats.total_instructions,
+                    compiled_prog->stats.total_errors,
+                    compile_ms);
+        if (compiled_prog->stats.total_errors > 0) {
+            gm::print_compile_summary(*compiled_prog, opts.verbose);
+        }
+    }
+
     if (auto init_res = gm::Platform::init(); !init_res) {
         GM_LOG_FATAL("app", "%s", init_res.error_message().c_str());
         return 1;
@@ -169,19 +202,41 @@ int main(int argc, char** argv) {
     }
 
     gm::WindowConfig win_cfg{};
-    win_cfg.title = "gmrunner — Phase 1 Loader Ready";
+    win_cfg.title = "gmrunner";
     win_cfg.width = opts.window_width;
     win_cfg.height = opts.window_height;
     win_cfg.fullscreen = opts.fullscreen;
     win_cfg.vsync = opts.vsync;
-    if (loaded_game && !loaded_game->room_order.empty()) {
-        const gm::i32 first_id = loaded_game->room_order[0];
-        if (first_id >= 0 && static_cast<gm::usize>(first_id) < loaded_game->rooms.size() &&
-            loaded_game->rooms[static_cast<gm::usize>(first_id)].exists) {
-            const auto& rm = loaded_game->rooms[static_cast<gm::usize>(first_id)];
-            win_cfg.width = rm.width;
-            win_cfg.height = rm.height;
-            win_cfg.title = !rm.caption.empty() ? rm.caption : ("gmrunner — " + rm.name);
+    if (loaded_game) {
+        win_cfg.fullscreen = opts.fullscreen || loaded_game->options.fullscreen;
+        win_cfg.borderless = loaded_game->options.no_border;
+        win_cfg.show_cursor = loaded_game->options.show_cursor;
+        win_cfg.resizable = true;
+        win_cfg.vsync = opts.vsync || (loaded_game->options.sync_vertex != 0);
+
+        if (!loaded_game->room_order.empty()) {
+            const gm::i32 first_id = loaded_game->room_order[0];
+            if (first_id >= 0 && static_cast<gm::usize>(first_id) < loaded_game->rooms.size() &&
+                loaded_game->rooms[static_cast<gm::usize>(first_id)].exists) {
+                const auto& rm = loaded_game->rooms[static_cast<gm::usize>(first_id)];
+                gm::i32 w = rm.width;
+                gm::i32 h = rm.height;
+                if (rm.enable_views) {
+                    gm::i32 max_r = 0, max_b = 0;
+                    for (const auto& v : rm.views) {
+                        if (!v.visible) continue;
+                        max_r = std::max(max_r, v.xport + v.wport);
+                        max_b = std::max(max_b, v.yport + v.hport);
+                    }
+                    if (max_r > 0 && max_b > 0) {
+                        w = max_r;
+                        h = max_b;
+                    }
+                }
+                win_cfg.width = std::max(1, w);
+                win_cfg.height = std::max(1, h);
+                win_cfg.title = !rm.caption.empty() ? rm.caption : rm.name;
+            }
         }
     }
 
@@ -198,7 +253,27 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    GM_LOG_INFO("app", "Ready. Press ESC to quit or F11 to toggle fullscreen.");
+    if (loaded_game && compiled_prog) {
+        std::vector<std::string> cmd_args;
+        cmd_args.reserve(static_cast<gm::usize>(argc));
+        for (int i = 0; i < argc; ++i) {
+            cmd_args.emplace_back(argv[i] ? argv[i] : "");
+        }
+        app.runner = std::make_unique<gm::Runner>(app.vfs, app.window, app.gfx);
+        if (auto res = app.runner->init(std::move(*loaded_game), std::move(*compiled_prog), std::move(cmd_args)); !res) {
+            GM_LOG_FATAL("runtime", "Runner initialization failed: %s", res.error_message().c_str());
+            app.runner.reset();
+            app.gfx.shutdown();
+            app.window.destroy();
+            app.vfs.cleanup_temp_dir();
+            gm::Platform::shutdown();
+            return 1;
+        }
+        GM_LOG_INFO("app", "Game started (room_speed=%d FPS)", app.runner->room_speed());
+    } else {
+        GM_LOG_INFO("app", "No game executable specified. Press ESC to quit or F11 to toggle fullscreen.");
+    }
+
     app.start_us = gm::Clock::now_us();
 
 #if defined(__EMSCRIPTEN__)
@@ -206,11 +281,12 @@ int main(int argc, char** argv) {
 #else
     gm::u64 next_frame_us = gm::Clock::now_us();
     while (app.running) {
-        tick_frame(app);
+        tick_app_frame(app);
         if (!app.running) {
             break;
         }
-        next_frame_us += app.target_frame_us;
+        const gm::u64 step_us = app.runner ? app.runner->target_frame_us() : app.target_frame_us;
+        next_frame_us += step_us;
         const gm::u64 now = gm::Clock::now_us();
         if (next_frame_us < now) {
             next_frame_us = now;
@@ -219,6 +295,10 @@ int main(int argc, char** argv) {
     }
 #endif
 
+    if (app.runner) {
+        app.runner->shutdown();
+        app.runner.reset();
+    }
     app.gfx.shutdown();
     app.window.destroy();
     app.vfs.cleanup_temp_dir();

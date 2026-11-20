@@ -4,10 +4,17 @@ add_library(gm_graphics STATIC
     gl_headers.h
     gl_graphics_device.h
     gl_graphics_device.cpp
+    renderer2d.h
+    renderer2d.cpp
 )
 
 target_include_directories(gm_graphics PUBLIC ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(gm_graphics PUBLIC gm_base)
+target_include_directories(gm_graphics SYSTEM PRIVATE ${CMAKE_SOURCE_DIR}/third_party/stb)
+target_link_libraries(gm_graphics
+    PUBLIC
+        gm_base
+        gm_loader
+)
 
 if(ANDROID)
     target_link_libraries(gm_graphics PRIVATE GLESv3)

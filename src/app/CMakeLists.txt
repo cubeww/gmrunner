@@ -12,6 +12,8 @@ target_link_libraries(gmrunner
         gm_loader
         gm_gml
         gm_graphics
+        gm_audio
+        gm_runtime
 )
 
 if(EMSCRIPTEN)
