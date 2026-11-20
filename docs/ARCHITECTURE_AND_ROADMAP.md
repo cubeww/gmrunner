@@ -142,7 +142,7 @@ gmrunner/
 | :---: | :--- | :--- |
 | **Phase 0** | Repo foundation, CMake presets, submodules (`SDL3`, `zlib`, `glad`), `gm_base`, `gm_platform`, `gm_graphics` RHI, `gm_app` skeleton | Empty OpenGL 3.3 Core window + CLI `--help` on Windows x64 (**Complete**) |
 | **Phase 1** | `gm_loader`: PE overlay scanner, GM 8.0 / 8.1 / 8.2 decryptors, all 16 asset parsers, GM 8.2 event table, GEX unpacker, `--inspect` CLI | `--inspect` cleanly parses all 7 sample EXEs (8.0, 8.1, 8.2) (**Complete**) |
-| **Phase 2** | `gm_gml`: GM8 lexer, symbol resolver, parser, D&D action lowerer, constant folder, bytecode compiler, VM, `--compile-check` CLI | `--compile-check` compiles all scripts/events/GEX GML across all 7 samples |
+| **Phase 2** | `gm_gml`: GM8 lexer, symbol resolver, parser, D&D action lowerer, constant folder, bytecode compiler, VM, `--compile-check` CLI | `--compile-check` compiles all scripts/events/GEX GML across all 7 samples (**Complete**) |
 | **Phase 3** | `gm_runtime` core simulation (17-stage step loop, `TMask` collisions, `solid`, `ds_*`, particles, core built-ins), 2D renderer, vanilla audio | `GM80_yuuutu` playable end-to-end |
 | **Phase 4** | External DLL interception, full `gm_audio` mixer/trackers/DSP, shims for `GMFMODSimple`, `SuperSound`, `MaizeMusic`, `CleanMem`, full GM 8.1 built-ins | `GM80_parasoko`, `GM81_nikaple`, `GM81_kamilia` playable |
 | **Phase 5** | Fixed-function 3D `d3d_*` + `C3D_Model`, GM 8.2 runner behaviors, shims for `gm82core`, `gm82buf`, `gm82snd`, `gm82joy`, `gm82drag`, `gm82test` | `GM82_guy`, `GM82_renex` (3D `.g3z` via virtual pipe + `.mod`/`.s3m` music) playable |

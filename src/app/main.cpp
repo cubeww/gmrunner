@@ -1,6 +1,7 @@
 #include "app/cli.h"
 #include "base/log.h"
 #include "base/math.h"
+#include "gml/compiler.h"
 #include "graphics/gl_graphics_device.h"
 #include "loader/exe_loader.h"
 #include "platform/clock.h"
@@ -91,7 +92,7 @@ int main(int argc, char** argv) {
     }
     gm::Logger::set_trace_flags(opts.trace);
 
-    GM_LOG_INFO("app", "gmrunner Phase 1 (version_override=%s, codepage=%u)",
+    GM_LOG_INFO("app", "gmrunner Phase 2 (version_override=%s, codepage=%u)",
                 std::string(gm::version_mode_name(opts.version_override)).c_str(),
                 opts.codepage);
 
@@ -146,8 +147,16 @@ int main(int argc, char** argv) {
     }
 
     if (opts.compile_check_only) {
-        GM_LOG_WARN("app", "--compile-check will be wired in Phase 2.");
-        return 0;
+        if (!loaded_game) {
+            GM_LOG_ERROR("app", "--compile-check requires a game executable path");
+            return 1;
+        }
+        const gm::u64 tc0 = gm::Clock::now_us();
+        auto prog = gm::GmlCompiler::compile_game(*loaded_game);
+        const gm::f64 compile_ms = static_cast<gm::f64>(gm::Clock::now_us() - tc0) * 1e-3;
+        GM_LOG_INFO("gml", "Compiled '%s' in %.1f ms", opts.game_path.c_str(), compile_ms);
+        gm::print_compile_summary(prog, opts.verbose);
+        return prog.stats.total_errors == 0 ? 0 : 1;
     }
 
     if (auto init_res = gm::Platform::init(); !init_res) {

@@ -10,6 +10,7 @@ target_link_libraries(gmrunner
         gm_base
         gm_platform
         gm_loader
+        gm_gml
         gm_graphics
 )
 
