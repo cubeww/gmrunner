@@ -15,8 +15,11 @@
 #include "runtime/particles.h"
 
 #include <array>
+#include <deque>
+#include <functional>
 #include <memory>
-#include <random>
+#include <optional>
+#include <ranges>
 #include <span>
 #include <string>
 #include <string_view>
@@ -91,7 +94,7 @@ enum class PendingRoomAction : u8 {
 
 class Runner : public IVmHost, public NonCopyable {
 public:
-    using BuiltinFn = RValue (*)(Runner&, i32 self_id, i32 other_id, std::span<const RValue> args);
+    using BuiltinFn = std::function<Result<RValue>(Runner&, i32 self_id, i32 other_id, std::span<const RValue> args)>;
 
     Runner(Vfs& vfs, PlatformWindow& window, GlGraphicsDevice& gfx);
     ~Runner() override;
@@ -115,12 +118,14 @@ public:
     [[nodiscard]] bool treat_uninitialized_as_zero() const noexcept override {
         return game_.options.treat_uninitialized_as_zero;
     }
+    [[nodiscard]] bool room_change_pending() const noexcept override { return pending_action_ != PendingRoomAction::None; }
     [[nodiscard]] Result<RValue> get_builtin_global(u32 var_id, i32 idx, bool has_idx) override;
     [[nodiscard]] Result<void> set_builtin_global(u32 var_id, i32 idx, bool has_idx, RValue value) override;
     [[nodiscard]] Result<RValue> get_builtin_inst(i32 inst_id, u32 var_id, i32 idx, bool has_idx) override;
     [[nodiscard]] Result<void> set_builtin_inst(i32 inst_id, u32 var_id, i32 idx, bool has_idx, RValue value) override;
     [[nodiscard]] VariableTable* get_instance_vars(i32 inst_id) override;
-    void resolve_target_instances(i32 target_id, i32 self_id, i32 other_id, std::vector<i32>& out) override;
+    [[nodiscard]] usize target_instance_count(i32 target) const override;
+    [[nodiscard]] i32 target_instance_at(i32 target, usize index, TargetUse use) const override;
     [[nodiscard]] Result<RValue> call_builtin(u32 func_id, i32 self_id, i32 other_id, std::span<const RValue> args) override;
     [[nodiscard]] Result<RValue> call_extension_dll(u32 ext_dll_id, std::span<const RValue> args) override;
 
@@ -142,12 +147,46 @@ public:
     // Instance & object hierarchy helpers
     [[nodiscard]] Instance* find_instance(i32 id) noexcept;
     [[nodiscard]] const Instance* find_instance(i32 id) const noexcept;
+    [[nodiscard]] i32 instance_handle(i32 id) const noexcept override;
     [[nodiscard]] const std::vector<std::unique_ptr<Instance>>& instances() const noexcept { return instances_; }
-    [[nodiscard]] std::vector<std::unique_ptr<Instance>>& instances_mut() noexcept { return instances_; }
+    [[nodiscard]] const std::vector<Instance*>& object_instances(i32 object, bool include_descendants) const noexcept;
+    void set_object_parent(i32 object, i32 parent);
 
     [[nodiscard]] bool object_exists(i32 obj_idx) const noexcept;
     [[nodiscard]] bool object_is_ancestor(i32 child_obj, i32 parent_obj) const noexcept;
     [[nodiscard]] bool object_matches(i32 inst_obj, i32 target) const noexcept;
+
+    // Read-only queries use room order for all, inherited object order for an
+    // object, and a single slot for an instance ID. The context pointers are
+    // supplied only by built-ins that accept the special self/other values.
+    template<class Visitor>
+    auto with_instance_selection(i32 target, Visitor visit, const Instance* self = nullptr,
+                                 const Instance* other = nullptr) const {
+        auto scan = [&](const auto& group) {
+            auto active = group | std::views::filter([](const auto& slot) {
+                return slot && !slot->destroyed && !slot->deactivated;
+            }) | std::views::transform([](const auto& slot) -> const Instance& { return *slot; });
+            return visit(active);
+        };
+        if (target == -3) return scan(instances_);
+        if (target >= 0 && target < 100000) return scan(object_instances(target, true));
+        const Instance* single = nullptr;
+        if (target >= 100000) single = find_instance(target);
+        if (target == -1) single = self;
+        if (target == -2) single = other;
+        return scan(std::array{single});
+    }
+
+    template<class Predicate>
+    i32 find_matching_instance(i32 target, Predicate matches, const Instance* self = nullptr,
+                               const Instance* other = nullptr) const {
+        return with_instance_selection(target, [&](auto& instances) {
+            for (const Instance& inst : instances) {
+                if (matches(inst)) return inst.id;
+            }
+            return -4;
+        }, self, other);
+    }
 
     i32 create_instance(f64 x, f64 y, i32 obj_idx, bool run_create = true, i32 forced_id = -1);
     void destroy_instance(i32 inst_id, bool perform_event = true);
@@ -156,10 +195,10 @@ public:
     void remove_marked_instances();
 
     void deactivate_all(bool notme, i32 self_id);
-    void deactivate_object(i32 target, i32 self_id);
+    void deactivate_object(i32 target, i32 self_id, i32 other_id = -1);
     void deactivate_region(f64 left, f64 top, f64 w, f64 h, bool inside, bool notme, i32 self_id);
     void activate_all();
-    void activate_object(i32 target);
+    void activate_object(i32 target, i32 self_id = -1, i32 other_id = -1);
     void activate_region(f64 left, f64 top, f64 w, f64 h, bool inside);
 
     // Event dispatch helpers
@@ -167,13 +206,16 @@ public:
     [[nodiscard]] bool object_has_event(i32 obj_idx, i32 cat, i32 sub) const noexcept;
     void perform_event_on_instance(i32 inst_id, i32 obj_override, i32 cat, i32 sub, i32 other_id = -1);
     void perform_event_inherited(i32 self_id);
+    void invalidate_event_tables();
 
     // Collision & movement helpers
     [[nodiscard]] i32 find_collision_instance(
-        const Instance& self, f64 test_x, f64 test_y, i32 target, bool solid_only) const noexcept;
+        const Instance& self, f64 test_x, f64 test_y, i32 target, bool solid_only,
+        const Instance* context_other = nullptr) const noexcept;
     [[nodiscard]] bool check_place_free(const Instance& self, f64 test_x, f64 test_y) const noexcept;
     [[nodiscard]] bool check_place_empty(const Instance& self, f64 test_x, f64 test_y) const noexcept;
-    [[nodiscard]] bool check_place_meeting(const Instance& self, f64 test_x, f64 test_y, i32 target) const noexcept;
+    [[nodiscard]] bool check_place_meeting(const Instance& self, f64 test_x, f64 test_y, i32 target,
+                                           const Instance* context_other = nullptr) const noexcept;
     void move_contact(Instance& inst, f64 dir_deg, f64 max_dist, bool solid_only);
     void move_outside(Instance& inst, f64 dir_deg, f64 max_dist, bool solid_only);
     void move_bounce(Instance& inst, bool advanced, bool solid_only);
@@ -192,7 +234,7 @@ public:
 
     // RNG helpers
     void set_random_seed(u32 seed) noexcept;
-    [[nodiscard]] u32 random_seed() const noexcept { return rng_seed_; }
+    [[nodiscard]] i32 random_seed() const noexcept { return static_cast<i32>(rng_.seed); }
     [[nodiscard]] f64 random_uniform(f64 upper) noexcept;
     [[nodiscard]] i64 random_int_inclusive(i64 upper) noexcept;
 
@@ -228,7 +270,6 @@ public:
     // Screen/draw/window helpers
     void render_current_frame();
     void draw_instance_default(const Instance& inst);
-    void update_window_caption();
 
     // Public state fields accessed by built-in implementation units
     i32 current_room_ = -1;
@@ -249,6 +290,7 @@ public:
     f64 lives_ = -1.0;
     f64 health_ = 100.0;
     bool show_score_ = true;
+    bool show_score_explicit_ = false;
     bool show_lives_ = false;
     bool show_health_ = false;
     std::string caption_score_ = "Score: ";
@@ -267,6 +309,8 @@ public:
 
     f64 mouse_x_ = 0.0;
     f64 mouse_y_ = 0.0;
+    f64 event_mouse_x_ = 0.0;
+    f64 event_mouse_y_ = 0.0;
     i32 mouse_button_ = 0;
     i32 mouse_lastbutton_ = 0;
 
@@ -285,14 +329,37 @@ private:
     void register_builtins_graphics();
     void register_builtins_actions();
 
+    template<class Fn>
+    void for_instances_at_position(f64 x, f64 y, Fn visit) {
+        // A Destroy or Create event can move later instances or change the room list.
+        const usize count = instances_.size();
+        for (usize i = 0; i < count && i < instances_.size(); ++i) {
+            const Instance& inst = *instances_[i];
+            if (!inst.destroyed && !inst.deactivated &&
+                check_point_collision(inst, x, y, true, game_, version_mode())) {
+                visit(inst.handle);
+            }
+        }
+    }
+
     void start_game();
+    void add_room_instance(std::unique_ptr<Instance> instance);
+    void index_instance(Instance& instance);
+    [[nodiscard]] const Instance* field_target_by_id(i32 id, TargetUse use) const;
+    mutable std::array<usize, 2> cached_field_indices_{};
+    void rebuild_object_instances();
+    void move_deactivated(bool deactivate);
+    bool broadcast_event(i32 category, i32 sub);
+    bool execute_instance_event(i32 inst_id, i32 obj_idx, i32 cat, i32 sub, i32 other_id);
     void start_room(i32 room_id, bool is_game_start);
     void process_pending_room_action();
 
     void update_mouse_room_coords();
+    void update_window_caption();
     void compute_canvas_viewport(i32& out_vx, i32& out_vy, i32& out_vw, i32& out_vh, i32& out_cw, i32& out_ch) const noexcept;
     void update_view_following();
     void step_triggers(i32 moment);
+    void step_event(i32 moment);
     void step_timelines();
     void step_alarms();
     void step_keyboard_events();
@@ -301,9 +368,38 @@ private:
     void step_boundary_events();
     void step_collisions();
     void step_animations();
+    const Gm82EventTables& event_tables();
+    const std::vector<i32>& event_objects(i32 category, i32 sub);
+
+    // Delphi's for loop captures the last index on entry, but fetches each
+    // instance from the current list. A later object group takes its own bound.
+    template<class Fn>
+    void for_object_instances(i32 object, usize first, Fn&& visit) {
+        const usize count = object_instances(object, false).size();
+        for (usize i = first; i < count; ++i) {
+            const auto& live = object_instances(object, false);
+            if (i >= live.size()) break;
+            Instance* inst = live[i];
+            if (inst && !inst->destroyed && !inst->deactivated) visit(*inst, i);
+        }
+    }
+
+    template<class Fn>
+    void for_event_instances(i32 category, i32 sub, Fn&& visit, bool continue_after_transition = false) {
+        const usize object_count = event_objects(category, sub).size();
+        for (usize i = 0; i < object_count; ++i) {
+            if (!continue_after_transition && pending_action_ != PendingRoomAction::None) return;
+            const auto& objects = event_objects(category, sub);
+            if (i >= objects.size()) break;
+            const i32 object = objects[i];
+            if (!object_exists(object)) continue;
+            for_object_instances(object, 0, [&](Instance& inst, usize) {
+                if (continue_after_transition || pending_action_ == PendingRoomAction::None) visit(inst);
+            });
+        }
+    }
     void render_view(i32 view_idx, f32 vx, f32 vy, f32 vw, f32 vh, f32 angle, i32 px, i32 py, i32 pw, i32 ph);
 
-    void snapshot_active_instances(std::vector<i32>& out, u64 max_counter) const;
     void parse_ini_text(std::string_view text);
     std::string serialize_ini() const;
 
@@ -313,6 +409,8 @@ private:
 
     GameData game_;
     CompiledProgram program_;
+    std::optional<Gm82EventTables> generated_event_tables_;
+    bool use_precomputed_events_ = true;
     std::unique_ptr<GmlVm> vm_;
     Renderer2D renderer_;
     AudioEngine audio_;
@@ -320,14 +418,22 @@ private:
     ParticleManager particles_;
     MpGridManager mp_grids_;
 
+    // CRoom maintains separate ordered active and inactive lists. Object lists
+    // reference the active entries, including marked instances until cleanup.
     std::vector<std::unique_ptr<Instance>> instances_;
+    std::vector<std::unique_ptr<Instance>> inactive_instances_;
+    struct ObjectInstances {
+        std::vector<Instance*> exact;
+        std::vector<Instance*> recursive;
+    };
+    std::deque<ObjectInstances> object_instances_;
     std::unordered_map<i32, Instance*> inst_by_id_;
+    i32 next_handle_ = -8; // Below all GML selector constants.
     std::vector<ActiveTile> tiles_;
     std::unordered_map<i32, SavedRoomState> saved_rooms_;
 
     i32 next_instance_id_ = 100001;
     i32 next_tile_id_ = 10000001;
-    u64 next_create_counter_ = 1;
 
     std::vector<EventFrame> event_stack_;
     PendingRoomAction pending_action_ = PendingRoomAction::None;
@@ -336,8 +442,7 @@ private:
     bool no_more_lives_armed_ = false;
     bool no_more_health_armed_ = false;
 
-    u32 rng_seed_ = 0x12345678u;
-    std::mt19937 rng_{0x12345678u};
+    GmlRandom rng_;
 
     u32 fps_frame_accum_ = 0;
     u64 fps_last_sample_us_ = 0;

@@ -17,6 +17,20 @@ inline constexpr f64 kGmlEpsilon = 1e-13;
 // Verified from gm81.exe.c (dbl_688828): default ds_set_precision epsilon is 1e-7.
 inline constexpr f64 kDefaultDsPrecision = 1e-7;
 
+// Delphi's 32-bit RandSeed drives both GML random() and integer draws.
+struct GmlRandom {
+    u32 seed = 0x12345678u;
+
+    [[nodiscard]] u32 next() noexcept {
+        seed = seed * 0x08088405u + 1u;
+        return seed;
+    }
+
+    [[nodiscard]] u32 below(u32 count) noexcept {
+        return static_cast<u32>((static_cast<u64>(next()) * count) >> 32);
+    }
+};
+
 // Exact Delphi Round() semantics: IEEE-754 round-half-to-even (banker's rounding),
 // independent of ambient FPU rounding mode.
 [[nodiscard]] i64 delphi_round(f64 v) noexcept;

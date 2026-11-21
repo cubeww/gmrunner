@@ -13,7 +13,6 @@
 #include <cstdlib>
 #include <ctime>
 #include <filesystem>
-#include <sstream>
 
 namespace gm {
 
@@ -31,6 +30,12 @@ std::string format_gm_real(f64 v) {
     return std::string(buf);
 }
 
+Result<i32> delphi_floor_i32(f64 value) {
+    // Delphi's Floor uses a signed 64-bit conversion and returns the low 32 bits.
+    if (!(value >= -0x1p63 && value < 0x1p63)) return Error{"Invalid floating point operation."};
+    return static_cast<i32>(static_cast<i64>(std::floor(value)));
+}
+
 f64 parse_gm_real(std::string_view s) {
     usize i = 0;
     while (i < s.size() && std::isspace(static_cast<unsigned char>(s[i]))) ++i;
@@ -39,6 +44,16 @@ f64 parse_gm_real(std::string_view s) {
     char* end = nullptr;
     const f64 v = std::strtod(tmp.c_str(), &end);
     return (end != tmp.c_str() && std::isfinite(v)) ? v : 0.0;
+}
+
+usize gm81_character_width(u8 lead) noexcept {
+    // Delphi accepts five- and six-byte leads and ignores the following bytes.
+    if (lead < 0xC2 || lead > 0xFD) return 1;
+    if (lead < 0xE0) return 2;
+    if (lead < 0xF0) return 3;
+    if (lead < 0xF8) return 4;
+    if (lead < 0xFC) return 5;
+    return 6;
 }
 
 f64 delphi_datetime_from_tm(const std::tm& tm_val) {
@@ -100,7 +115,7 @@ void Runner::register_builtins_core() {
     register_builtin("randomize", [](Runner& r, i32, i32, std::span<const RValue>) {
         const u32 s = static_cast<u32>(Clock::now_us() ^ 0x9E3779B9u);
         r.set_random_seed(s);
-        return RValue(s);
+        return RValue(0.0);
     });
     register_builtin("choose", [](Runner& r, i32, i32, std::span<const RValue> a) {
         if (a.empty()) return RValue(0.0);
@@ -250,14 +265,25 @@ void Runner::register_builtins_core() {
         std::snprintf(buf, sizeof(buf), "%*.*f", width, dec, val);
         return RValue(std::string(buf));
     });
-    register_builtin("chr", [](Runner& r, i32, i32, std::span<const RValue> a) {
-        const u32 cp = static_cast<u32>(arg_i32(a, 0));
-        if (r.game().meta.encoding == EncodingMode::Utf8 && cp >= 0x80u) {
-            std::string out;
-            utf8_append_codepoint(out, cp);
-            return RValue(std::move(out));
+    register_builtin("chr", [](Runner& r, i32, i32, std::span<const RValue> a) -> Result<RValue> {
+        if (r.game().meta.encoding == EncodingMode::LegacyAnsi) {
+            return RValue(std::string(1, static_cast<char>(arg_i32(a, 0) & 0xFF)));
         }
-        return RValue(std::string(1, static_cast<char>(cp & 0xFFu)));
+        const f64 rounded = delphi_round_f64(arg_real(a, 0));
+        if (!(rounded >= -0x1p63 && rounded < 0x1p63)) return Error{"Invalid floating point operation."};
+        const u8 byte = static_cast<u8>(static_cast<i64>(rounded));
+        u32 codepage = system_ansi_codepage();
+        const i32 id = r.renderer().font();
+        const auto& fonts = r.game().fonts;
+        if (id >= 0 && static_cast<usize>(id) < fonts.size() && fonts[static_cast<usize>(id)].exists) {
+            if (r.renderer().using_sprite_font()) {
+                // Delphi's sprite-font conversion drops NUL on legacy ANSI codepages.
+                if (byte == 0 && codepage != 65001) return RValue(std::string{});
+            } else {
+                codepage = gdi_charset_to_codepage(fonts[static_cast<usize>(id)].charset, codepage);
+            }
+        }
+        return RValue(codepage_byte_to_utf8(byte, codepage));
     });
     register_builtin("ansi_char", [](Runner&, i32, i32, std::span<const RValue> a) {
         return RValue(std::string(1, static_cast<char>(arg_i32(a, 0) & 0xFF)));
@@ -271,8 +297,14 @@ void Runner::register_builtins_core() {
         }
         return RValue(static_cast<i32>(static_cast<u8>(s[0])));
     });
-    register_builtin("string_length", [](Runner&, i32, i32, std::span<const RValue> a) {
-        return RValue(static_cast<i32>(arg_str(a, 0).size()));
+    register_builtin("string_length", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        const std::string_view s = arg_str(a, 0);
+        if (r.game().meta.encoding == EncodingMode::LegacyAnsi) return RValue(static_cast<f64>(s.size()));
+        usize count = 0;
+        for (usize offset = 0; offset < s.size(); offset += gm81_character_width(static_cast<u8>(s[offset]))) {
+            ++count;
+        }
+        return RValue(static_cast<f64>(count));
     });
     register_builtin("string_byte_length", [](Runner&, i32, i32, std::span<const RValue> a) {
         return RValue(static_cast<i32>(arg_str(a, 0).size()));
@@ -577,11 +609,25 @@ void Runner::register_builtins_core() {
         if (auto* tf = r.get_text_file(arg_i32(a, 0))) tf->write_buf.append(arg_str(a, 1));
         return RValue(0.0);
     });
-    register_builtin("file_text_write_real", [](Runner& r, i32, i32, std::span<const RValue> a) {
-        if (auto* tf = r.get_text_file(arg_i32(a, 0))) {
-            std::ostringstream oss;
-            oss << arg_real(a, 1);
-            tf->write_buf.append(oss.str());
+    register_builtin("file_text_write_real", [](Runner& r, i32, i32, std::span<const RValue> a) -> Result<RValue> {
+        auto* tf = r.get_text_file(arg_i32(a, 0));
+        if (!tf || tf->mode == 0) return RValue(0.0);
+
+        f64 value = arg_real(a, 1);
+        // GM8.0 floors the signed value. GM8.1 and 8.2 write the sign separately.
+        const bool negative = r.version_mode() != VersionMode::GM80 && value < 0.0;
+        if (negative) value = -value;
+        const auto whole = delphi_floor_i32(value);
+        if (!whole) return whole.error();
+        const auto fraction = delphi_floor_i32((value - whole.value()) * 1'000'000.0);
+        if (!fraction) return fraction.error();
+
+        tf->write_buf.append(negative ? " -" : " ");
+        tf->write_buf.append(std::to_string(whole.value()));
+        if (fraction.value() != 0) {
+            char digits[8];
+            std::snprintf(digits, sizeof(digits), ".%06u", static_cast<u32>(fraction.value()) % 1'000'000u);
+            tf->write_buf.append(digits);
         }
         return RValue(0.0);
     });
@@ -642,7 +688,7 @@ void Runner::register_builtins_core() {
         return RValue(r.bin_file_open(arg_str(a, 0), arg_i32(a, 1)));
     });
     register_builtin("file_bin_rewrite", [](Runner& r, i32, i32, std::span<const RValue> a) {
-        if (auto* bf = r.get_bin_file(arg_i32(a, 0))) {
+        if (auto* bf = r.get_bin_file(arg_i32(a, 0)); bf && bf->mode != 0) {
             bf->data.clear();
             bf->pos = 0;
             bf->dirty = true;
@@ -668,7 +714,7 @@ void Runner::register_builtins_core() {
         return RValue(0.0);
     });
     register_builtin("file_bin_write_byte", [](Runner& r, i32, i32, std::span<const RValue> a) {
-        if (auto* bf = r.get_bin_file(arg_i32(a, 0))) {
+        if (auto* bf = r.get_bin_file(arg_i32(a, 0)); bf && bf->mode != 0) {
             if (bf->pos >= bf->data.size()) bf->data.resize(bf->pos + 1, 0);
             bf->data[bf->pos++] = static_cast<u8>(arg_i32(a, 1) & 0xFF);
             bf->dirty = true;
@@ -677,7 +723,7 @@ void Runner::register_builtins_core() {
     });
     register_builtin("file_bin_read_byte", [](Runner& r, i32, i32, std::span<const RValue> a) {
         auto* bf = r.get_bin_file(arg_i32(a, 0));
-        if (!bf || bf->pos >= bf->data.size()) return RValue(0);
+        if (!bf || bf->mode == 1 || bf->pos >= bf->data.size()) return RValue(0);
         return RValue(static_cast<i32>(bf->data[bf->pos++]));
     });
 
@@ -861,7 +907,7 @@ void Runner::register_builtins_core() {
         return RValue(0.0);
     });
     register_builtin("ds_list_shuffle", [](Runner& r, i32, i32, std::span<const RValue> a) {
-        r.ds().list_shuffle(arg_i32(a, 0), static_cast<u32>(r.random_int_inclusive(0x7FFFFFFF)));
+        r.ds().list_shuffle(arg_i32(a, 0), r.rng_);
         return RValue(0.0);
     });
     register_builtin("ds_list_write", [](Runner& r, i32, i32, std::span<const RValue> a) { return RValue(r.ds().list_write(arg_i32(a, 0))); });
@@ -911,15 +957,15 @@ void Runner::register_builtins_core() {
     register_builtin("ds_priority_size", [](Runner& r, i32, i32, std::span<const RValue> a) { return RValue(r.ds().priority_size(arg_i32(a, 0))); });
     register_builtin("ds_priority_empty", [](Runner& r, i32, i32, std::span<const RValue> a) { return RValue(r.ds().priority_empty(arg_i32(a, 0))); });
     register_builtin("ds_priority_add", [](Runner& r, i32, i32, std::span<const RValue> a) {
-        if (a.size() >= 3) r.ds().priority_add(arg_i32(a, 0), a[1], arg_real(a, 2));
+        if (a.size() >= 3) r.ds().priority_add(arg_i32(a, 0), a[1], a[2]);
         return RValue(0.0);
     });
     register_builtin("ds_priority_change_priority", [](Runner& r, i32, i32, std::span<const RValue> a) {
-        if (a.size() >= 3) r.ds().priority_change_priority(arg_i32(a, 0), a[1], arg_real(a, 2));
+        if (a.size() >= 3) r.ds().priority_change_priority(arg_i32(a, 0), a[1], a[2]);
         return RValue(0.0);
     });
     register_builtin("ds_priority_find_priority", [](Runner& r, i32, i32, std::span<const RValue> a) {
-        return a.size() >= 2 ? RValue(r.ds().priority_find_priority(arg_i32(a, 0), a[1])) : RValue(0.0);
+        return a.size() >= 2 ? r.ds().priority_find_priority(arg_i32(a, 0), a[1]) : RValue(0.0);
     });
     register_builtin("ds_priority_delete_value", [](Runner& r, i32, i32, std::span<const RValue> a) {
         if (a.size() >= 2) r.ds().priority_delete_value(arg_i32(a, 0), a[1]);

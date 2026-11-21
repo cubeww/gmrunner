@@ -342,12 +342,4 @@ std::string_view SymbolTable::user_var_name(u32 var_id) const noexcept {
     return (idx < user_var_names_.size()) ? std::string_view(user_var_names_[idx]) : std::string_view{};
 }
 
-void SymbolTable::mark_globalvar(u32 var_id) {
-    globalvars_.insert(var_id);
-}
-
-bool SymbolTable::is_globalvar(u32 var_id) const noexcept {
-    return globalvars_.contains(var_id);
-}
-
 } // namespace gm

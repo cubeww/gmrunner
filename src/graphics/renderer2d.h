@@ -54,6 +54,8 @@ public:
 
     // Frame & camera control
     void begin_frame(i32 backbuffer_w, i32 backbuffer_h);
+    // Logical GM screen and its top-down drawable viewport, including window scaling.
+    void set_screen_region(i32 backbuffer_w, i32 backbuffer_h, i32 width, i32 height, const ViewportRect& viewport);
     void end_frame();
     void flush();
 
@@ -71,6 +73,10 @@ public:
     [[nodiscard]] f32 alpha() const noexcept { return draw_alpha_; }
     void set_font(i32 font_id) noexcept { draw_font_ = font_id; }
     [[nodiscard]] i32 font() const noexcept { return draw_font_; }
+    [[nodiscard]] bool using_sprite_font() const noexcept {
+        return draw_font_ >= 0 && static_cast<usize>(draw_font_) < fonts_.size() &&
+               fonts_[static_cast<usize>(draw_font_)].sprite_index >= 0;
+    }
     void set_halign(i32 halign) noexcept { draw_halign_ = halign; }
     void set_valign(i32 valign) noexcept { draw_valign_ = valign; }
     void set_circle_precision(i32 prec) noexcept { circle_precision_ = (prec >= 4 && prec <= 64) ? prec : 24; }
@@ -90,7 +96,7 @@ public:
     [[nodiscard]] i32 surface_width(i32 id) const noexcept;
     [[nodiscard]] i32 surface_height(i32 id) const noexcept;
     bool surface_set_target(i32 id);
-    void surface_reset_target();
+    bool surface_reset_target();
     [[nodiscard]] i32 current_surface_target() const noexcept { return active_surface_id_; }
     void draw_surface_ext(i32 id, f32 x, f32 y, f32 xscale, f32 yscale, f32 rot_deg, u32 color_bgr, f32 alpha);
     void draw_surface_part_ext(i32 id, f32 left, f32 top, f32 w, f32 h, f32 x, f32 y, f32 xscale, f32 yscale, u32 color_bgr, f32 alpha);
@@ -181,6 +187,7 @@ private:
         f32 x3, f32 y3, f32 u3, f32 v3, ColorRGBA c3);
 
     void create_builtin_font_texture();
+    void apply_screen_projection();
     std::vector<std::string> split_gm_lines(const GameData& game, std::string_view text, f32 max_w) const;
     f32 measure_single_line_width(const GameData& game, std::string_view line) const;
     f32 current_font_line_height(const GameData& game) const;
@@ -210,6 +217,9 @@ private:
     f32 proj_matrix_[16]{};
     i32 backbuffer_w_ = 800;
     i32 backbuffer_h_ = 608;
+    i32 screen_w_ = 800;
+    i32 screen_h_ = 608;
+    ViewportRect screen_viewport_{0, 0, 800, 608};
 
     u32 draw_color_ = 0x000000u; // GM8 default draw color is c_black (0)
     f32 draw_alpha_ = 1.0f;

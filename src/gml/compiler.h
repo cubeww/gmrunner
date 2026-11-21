@@ -46,15 +46,12 @@ struct CompiledProgram {
     std::vector<std::array<std::unordered_map<i32, BytecodeChunk>, 12>> object_event_chunks;
     std::vector<std::unordered_map<i32, BytecodeChunk>> timeline_chunks;
     std::vector<std::optional<BytecodeChunk>> room_creation_chunks;
-    std::unordered_map<i32, BytecodeChunk> instance_creation_chunks;
+    std::vector<std::unordered_map<i32, BytecodeChunk>> instance_creation_chunks; // room -> placed instance ID
     std::vector<BytecodeChunk> library_init_chunks;
 };
 
 class GmlCompiler {
 public:
-    // Scans tokens in source to pre-register every `globalvar` declaration in SymbolTable.
-    static void prescan_globalvars(std::string_view source, SymbolTable& symbols);
-
     // Compiles a GML statement sequence (script, event, room/instance creation code, execute_string).
     [[nodiscard]] static Result<BytecodeChunk> compile_chunk(
         std::string_view debug_name,

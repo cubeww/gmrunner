@@ -700,7 +700,8 @@ Result<FontData> parse_font_entry(BinaryReader& r, i32) {
 
     const u32 fp = first_packed.value();
     f.first = static_cast<i32>(fp & 0xFFFFu);
-    f.charset = static_cast<u8>((fp >> 16u) & 0xFFu);
+    const u8 charset = static_cast<u8>((fp >> 16u) & 0xFFu);
+    if (charset != 0) f.charset = charset; // A zero packed byte leaves DEFAULT_CHARSET in effect.
     const u8 aa_raw = static_cast<u8>((fp >> 24u) & 0xFFu);
     f.antialias = (aa_raw != 0u) ? static_cast<u8>(aa_raw - 1u) : 3u;
     f.last = last.value();

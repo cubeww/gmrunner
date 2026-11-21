@@ -274,13 +274,7 @@ void Runner::register_builtins_actions() {
         const auto* self = r.find_instance(self_id);
         const f64 px = ((r.action_relative_ && self) ? self->x : 0.0) + arg_real(a, 0);
         const f64 py = ((r.action_relative_ && self) ? self->y : 0.0) + arg_real(a, 1);
-        std::vector<i32> hits;
-        for (const auto& up : r.instances()) {
-            if (!up->destroyed && !up->deactivated && check_point_collision(*up, px, py, true, r.game(), r.version_mode())) {
-                hits.push_back(up->id);
-            }
-        }
-        for (i32 id : hits) r.destroy_instance(id, true);
+        r.for_instances_at_position(px, py, [&](i32 handle) { r.destroy_instance(handle, true); });
         return RValue(0.0);
     });
     register_builtin("action_sprite_set", [](Runner& r, i32 self_id, i32, std::span<const RValue> a) {
@@ -484,11 +478,9 @@ void Runner::register_builtins_actions() {
     });
     register_builtin("action_if_number", [](Runner& r, i32, i32, std::span<const RValue> a) {
         const i32 obj = arg_i32(a, 0, -4);
-        i32 cnt = 0;
-        for (const auto& up : r.instances()) {
-            if (!up->destroyed && !up->deactivated && r.object_matches(up->object_index, obj)) ++cnt;
-        }
-        return RValue(compare_dnd_op(static_cast<f64>(cnt), arg_real(a, 1), arg_i32(a, 2, 0)));
+        return r.with_instance_selection(obj, [&](auto& group) {
+            return RValue(compare_dnd_op(static_cast<f64>(std::ranges::distance(group)), arg_real(a, 1), arg_i32(a, 2, 0)));
+        });
     });
     register_builtin("action_if_question", [](Runner& r, i32, i32, std::span<const RValue> a) {
         return RValue(r.window().show_question(r.room_caption_.empty() ? "GameMaker" : r.room_caption_, arg_str(a, 0)));
@@ -512,7 +504,6 @@ void Runner::register_builtins_actions() {
     // Score, Lives, Health & Draw actions
     register_builtin("action_set_score", [](Runner& r, i32, i32, std::span<const RValue> a) {
         r.score_ = r.action_relative_ ? (r.score_ + arg_real(a, 0)) : arg_real(a, 0);
-        if (r.show_score_) r.update_window_caption();
         return RValue(0.0);
     });
     register_builtin("action_if_score", [](Runner& r, i32, i32, std::span<const RValue> a) {
@@ -535,10 +526,10 @@ void Runner::register_builtins_actions() {
         return RValue(compare_dnd_op(r.health_, arg_real(a, 0), arg_i32(a, 1, 0)));
     });
     register_builtin("action_set_caption", [](Runner& r, i32, i32, std::span<const RValue> a) {
-        r.show_score_ = arg_bool(a, 0); r.caption_score_ = std::string(arg_str(a, 1));
-        r.show_lives_ = arg_bool(a, 2); r.caption_lives_ = std::string(arg_str(a, 3));
-        r.show_health_ = arg_bool(a, 4); r.caption_health_ = std::string(arg_str(a, 5));
-        r.update_window_caption();
+        r.show_score_explicit_ = true;
+        r.show_score_ = arg_i32(a, 0) == 1; r.caption_score_ = std::string(arg_str(a, 1));
+        r.show_lives_ = arg_i32(a, 2) == 1; r.caption_lives_ = std::string(arg_str(a, 3));
+        r.show_health_ = arg_i32(a, 4) == 1; r.caption_health_ = std::string(arg_str(a, 5));
         return RValue(0.0);
     });
     register_builtin("action_color", [](Runner& r, i32, i32, std::span<const RValue> a) {
@@ -554,9 +545,9 @@ void Runner::register_builtins_actions() {
         const auto* self = r.find_instance(self_id);
         const f64 bx = (r.action_relative_ && self) ? self->x : 0.0;
         const f64 by = (r.action_relative_ && self) ? self->y : 0.0;
-        i32 sub = arg_i32(a, 3, -1);
-        if (sub < 0 && self) sub = static_cast<i32>(std::floor(self->image_index));
-        r.renderer().draw_sprite_ext(r.game(), arg_i32(a, 0, -1), std::max(0, sub),
+        f64 sub = arg_real(a, 3, -1);
+        if (sub < 0.0) sub = self ? self->image_index : 0.0;
+        r.renderer().draw_sprite_ext(r.game(), arg_i32(a, 0, -1), static_cast<i32>(std::floor(sub)),
                                      static_cast<f32>(bx + arg_real(a, 1)), static_cast<f32>(by + arg_real(a, 2)),
                                      1.0f, 1.0f, 0.0f, 0xFFFFFFu, 1.0f);
         return RValue(0.0);

@@ -1,5 +1,17 @@
 #include "base/encoding.h"
 
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include "base/single_byte_codepages.h"
+#endif
+
 #include <array>
 
 namespace gm {
@@ -80,8 +92,9 @@ const std::array<u16, 128>* find_single_byte_table(u32 codepage) noexcept {
 
 } // namespace
 
-u32 gdi_charset_to_codepage(u8 charset) noexcept {
+u32 gdi_charset_to_codepage(u8 charset, u32 default_codepage) noexcept {
     switch (charset) {
+        case 0:   return 1252; // ANSI_CHARSET
         case 128: return 932;  // SHIFTJIS_CHARSET
         case 129: return 949;  // HANGEUL_CHARSET
         case 130: return 1361; // JOHAB_CHARSET
@@ -96,7 +109,7 @@ u32 gdi_charset_to_codepage(u8 charset) noexcept {
         case 204: return 1251; // RUSSIAN_CHARSET
         case 222: return 874;  // THAI_CHARSET
         case 238: return 1250; // EASTEUROPE_CHARSET
-        default:  return 1252; // ANSI_CHARSET / DEFAULT_CHARSET
+        default:  return default_codepage;
     }
 }
 
@@ -207,6 +220,48 @@ std::string utf16_to_utf8(std::u16string_view utf16) {
 void register_platform_codepage_hooks(CodepageToUtf8Hook to_utf8, Utf8ToCodepageHook from_utf8) {
     g_to_utf8_hook = std::move(to_utf8);
     g_from_utf8_hook = std::move(from_utf8);
+}
+
+u32 system_ansi_codepage() noexcept {
+#ifdef _WIN32
+    return GetACP();
+#else
+    return 1252;
+#endif
+}
+
+std::string codepage_byte_to_utf8(u8 byte, u32 codepage) {
+    const char raw = static_cast<char>(byte);
+#ifdef _WIN32
+    // CP_ACP is zero. The explicit input length preserves chr(0).
+    wchar_t wide = 0;
+    if (MultiByteToWideChar(codepage, 0, &raw, 1, &wide, 1) != 1) return {};
+    const u32 cp = static_cast<u16>(wide);
+#else
+    if (byte < 0x80) return std::string(1, raw);
+    if (codepage == 0) codepage = system_ansi_codepage();
+    const auto* table = find_single_byte_table(codepage);
+    switch (codepage) {
+        case 874:  table = &detail::kChrCp874; break;
+        case 932:  table = &detail::kChrCp932; break;
+        case 936:  table = &detail::kChrCp936; break;
+        case 949:  table = &detail::kChrCp949; break;
+        case 950:  table = &detail::kChrCp950; break;
+        case 1361: table = &detail::kChrCp1361; break;
+        case 1253: table = &detail::kChrCp1253; break;
+        case 1254: table = &detail::kChrCp1254; break;
+        case 1255: table = &detail::kChrCp1255; break;
+        case 1256: table = &detail::kChrCp1256; break;
+        case 1257: table = &detail::kChrCp1257; break;
+        case 1258: table = &detail::kChrCp1258; break;
+    }
+    if (codepage == 65001) return "\xEF\xBF\xBD";
+    if (!table) return codepage_to_utf8(std::string_view(&raw, 1), codepage);
+    const u32 cp = (*table)[byte - 0x80];
+#endif
+    std::string out;
+    utf8_append_codepoint(out, cp);
+    return out;
 }
 
 std::string codepage_to_utf8(std::string_view bytes, u32 codepage) {

@@ -84,6 +84,45 @@ bool win32_utf8_to_codepage(std::string_view utf8, u32 codepage, std::string& ou
     }
     return true;
 }
+#else
+bool convert_codepage(std::string_view input, u32 codepage, bool to_utf8, std::string& out) {
+    const std::string name = "CP" + std::to_string(codepage);
+    const char* src = to_utf8 ? name.c_str() : "UTF-8";
+    const char* dst = to_utf8 ? "UTF-8" : name.c_str();
+    const SDL_iconv_t converter = SDL_iconv_open(dst, src);
+    if (converter == reinterpret_cast<SDL_iconv_t>(SDL_ICONV_ERROR)) {
+        return false;
+    }
+
+    const char* next = input.data();
+    usize remaining = input.size();
+    out.clear();
+    while (remaining > 0) {
+        char buffer[256];
+        char* write = buffer;
+        usize space = sizeof(buffer);
+        const usize result = SDL_iconv(converter, &next, &remaining, &write, &space);
+        out.append(buffer, sizeof(buffer) - space);
+        if (result == SDL_ICONV_EILSEQ || result == SDL_ICONV_EINVAL) {
+            // Replace an invalid legacy byte or an unrepresentable Unicode character.
+            usize skip = 1;
+            if (to_utf8) {
+                utf8_append_codepoint(out, 0xFFFD);
+            } else {
+                skip = 0;
+                (void)utf8_decode_next(std::string_view(next, remaining), skip);
+                out.push_back('?');
+            }
+            next += skip;
+            remaining -= skip;
+        } else if (result == SDL_ICONV_ERROR) {
+            SDL_iconv_close(converter);
+            return false;
+        }
+    }
+    SDL_iconv_close(converter);
+    return true;
+}
 #endif
 
 } // namespace
@@ -97,6 +136,10 @@ Result<void> Platform::init() {
 
 #if defined(_WIN32)
     register_platform_codepage_hooks(&win32_codepage_to_utf8, &win32_utf8_to_codepage);
+#else
+    register_platform_codepage_hooks(
+        [](std::string_view bytes, u32 cp, std::string& out) { return convert_codepage(bytes, cp, true, out); },
+        [](std::string_view utf8, u32 cp, std::string& out) { return convert_codepage(utf8, cp, false, out); });
 #endif
 
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_GAMEPAD | SDL_INIT_JOYSTICK)) {
@@ -125,6 +168,10 @@ void Platform::shutdown() noexcept {
 
 bool Platform::is_initialized() noexcept {
     return g_platform_initialized;
+}
+
+void Platform::set_application_title(const std::string& title) {
+    SDL_SetAppMetadataProperty(SDL_PROP_APP_METADATA_NAME_STRING, title.c_str());
 }
 
 const char* Platform::platform_name() noexcept {

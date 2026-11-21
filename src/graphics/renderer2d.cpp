@@ -10,6 +10,7 @@
 #include <stb_image.h>
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
+#define STBIW_WINDOWS_UTF8
 #include <stb_image_write.h>
 
 #include <algorithm>
@@ -453,14 +454,24 @@ void Renderer2D::register_sprite_font(usize font_idx, i32 sprite_idx, i32 first_
 }
 
 void Renderer2D::begin_frame(i32 backbuffer_w, i32 backbuffer_h) {
-    backbuffer_w_ = std::max(1, backbuffer_w);
-    backbuffer_h_ = std::max(1, backbuffer_h);
     vertices_.clear();
     device_->bind_framebuffer(FramebufferHandle{});
     active_surface_id_ = -1;
+    set_screen_region(backbuffer_w, backbuffer_h, backbuffer_w, backbuffer_h, {0, 0, backbuffer_w, backbuffer_h});
     device_->set_depth_state(DepthState{false, false, CompareFunc::Always});
     device_->set_cull_mode(CullMode::None);
     device_->set_blend_state(blend_state_);
+}
+
+void Renderer2D::set_screen_region(i32 backbuffer_w, i32 backbuffer_h, i32 width, i32 height, const ViewportRect& viewport) {
+    backbuffer_w_ = std::max(1, backbuffer_w);
+    backbuffer_h_ = std::max(1, backbuffer_h);
+    screen_w_ = width;
+    screen_h_ = height;
+    screen_viewport_ = viewport;
+    if (initialized_ && active_surface_id_ < 0) {
+        apply_screen_projection();
+    }
 }
 
 void Renderer2D::end_frame() {
@@ -479,12 +490,12 @@ void Renderer2D::flush() {
     glUniform1f(loc_alpha_ref_, alpha_test_ref_);
 
     device_->set_blend_state(blend_state_);
-    device_->bind_texture(0, batch_tex_);
     if (batch_tex_.valid()) {
         const TextureFilter f = linear_filter_ ? TextureFilter::Linear : TextureFilter::Nearest;
         const TextureWrap w = tex_repeat_ ? TextureWrap::Repeat : TextureWrap::ClampToEdge;
         device_->set_texture_sampler(batch_tex_, f, w, w);
     }
+    device_->bind_texture(0, batch_tex_);
 
     glBindVertexArray(vao_);
     glBindBuffer(GL_ARRAY_BUFFER, vbo_);
@@ -658,17 +669,6 @@ i32 Renderer2D::surface_create(i32 width, i32 height) {
     const i32 id = next_surface_id_++;
     surfaces_[id] = SurfaceObject{width, height, tex_res.value(), fbo_res.value()};
 
-    // Clear newly created surface to transparent black.
-    const i32 prev = active_surface_id_;
-    flush();
-    device_->bind_framebuffer(fbo_res.value());
-    device_->set_viewport(ViewportRect{0, 0, width, height});
-    device_->clear(true, true, true, 0.0f, 0.0f, 0.0f, 0.0f);
-    if (prev >= 0 && surfaces_.contains(prev)) {
-        device_->bind_framebuffer(surfaces_[prev].fbo);
-    } else {
-        device_->bind_framebuffer(FramebufferHandle{});
-    }
     return id;
 }
 
@@ -677,6 +677,8 @@ void Renderer2D::surface_free(i32 id) {
     if (it == surfaces_.end()) return;
     if (active_surface_id_ == id) {
         surface_reset_target();
+    } else if (batch_tex_ == it->second.texture) {
+        flush();
     }
     device_->destroy_framebuffer(it->second.fbo);
     device_->destroy_texture(it->second.texture);
@@ -700,18 +702,31 @@ i32 Renderer2D::surface_height(i32 id) const noexcept {
 bool Renderer2D::surface_set_target(i32 id) {
     const auto it = surfaces_.find(id);
     if (it == surfaces_.end()) return false;
+    if (active_surface_id_ == id) return true;
     flush();
     active_surface_id_ = id;
     device_->bind_framebuffer(it->second.fbo);
+    device_->set_scissor(false);
     set_projection_ortho(0.0f, 0.0f, static_cast<f32>(it->second.width), static_cast<f32>(it->second.height),
                          0.0f, 0, 0, it->second.width, it->second.height);
     return true;
 }
 
-void Renderer2D::surface_reset_target() {
+bool Renderer2D::surface_reset_target() {
+    if (active_surface_id_ < 0) return false;
     flush();
     active_surface_id_ = -1;
     device_->bind_framebuffer(FramebufferHandle{});
+    apply_screen_projection();
+    return true;
+}
+
+void Renderer2D::apply_screen_projection() {
+    // GM8 restores the whole logical screen even if a view was active before the surface.
+    const auto& port = screen_viewport_;
+    set_projection_ortho(0, 0, static_cast<f32>(screen_w_), static_cast<f32>(screen_h_),
+                         0, port.x, port.y, port.width, port.height);
+    device_->set_scissor(true, {port.x, backbuffer_h_ - port.y - port.height, port.width, port.height});
 }
 
 void Renderer2D::draw_surface_ext(i32 id, f32 x, f32 y, f32 xscale, f32 yscale, f32 rot_deg, u32 color_bgr, f32 alpha) {

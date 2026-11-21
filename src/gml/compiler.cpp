@@ -66,7 +66,8 @@ public:
             (chunk_.code.back().op != OpCode::Return && chunk_.code.back().op != OpCode::Exit)) {
             chunk_.emit(OpCode::Exit, 0, 0, cur_line());
         }
-        chunk_.local_count = next_local_slot_;
+        chunk_.local_count = static_cast<u32>(locals_.size());
+        chunk_.temp_count = next_temp_slot_;
         return std::move(chunk_);
     }
 
@@ -81,7 +82,8 @@ public:
             }
         }
         chunk_.emit(OpCode::Return, 0, 0, cur_line());
-        chunk_.local_count = next_local_slot_;
+        chunk_.local_count = static_cast<u32>(locals_.size());
+        chunk_.temp_count = next_temp_slot_;
         return std::move(chunk_);
     }
 
@@ -91,12 +93,12 @@ private:
         bool is_switch = false;
         std::vector<u32> break_jumps;
         std::vector<u32> continue_jumps;
-        u32 with_depth = 0; // enclosing with-depth at entry to this loop/switch
     };
 
     enum class LValueKind : u8 {
         None = 0,
         Local,
+        UnqualifiedUser,
         SelfUser,
         GlobalUser,
         BuiltinGlobal,
@@ -106,7 +108,7 @@ private:
 
     struct PendingLValue {
         LValueKind kind = LValueKind::None;
-        u32 id = 0;      // local slot, user var_id, or builtin_var_id
+        u32 id = 0;      // user var_id or builtin_var_id
         u8 arr_dims = 0; // 0 = scalar, 1 = [i], 2 = [i, j]
         bool is_array_builtin = false;
         u16 line = 0;
@@ -149,7 +151,7 @@ private:
     }
 
     u32 alloc_temp_local() noexcept {
-        return next_local_slot_++;
+        return next_temp_slot_++;
     }
 
     u32 declare_local(std::string_view name) {
@@ -157,9 +159,9 @@ private:
         if (const auto it = locals_.find(key); it != locals_.end()) {
             return it->second;
         }
-        const u32 slot = next_local_slot_++;
-        locals_.emplace(key, slot);
-        return slot;
+        const u32 var_id = symbols_.intern_user_var(name);
+        locals_.emplace(key, var_id);
+        return var_id;
     }
 
     std::optional<u32> find_local(std::string_view name) const {
@@ -182,6 +184,10 @@ private:
             case LValueKind::Local:
                 if (lv.arr_dims == 0) chunk_.emit(OpCode::LoadLocal, lv.id, 0, lv.line);
                 else chunk_.emit(OpCode::LoadLocalArr, lv.id, lv.arr_dims, lv.line);
+                break;
+            case LValueKind::UnqualifiedUser:
+                if (lv.arr_dims == 0) chunk_.emit(OpCode::LoadVar, lv.id, 0, lv.line);
+                else chunk_.emit(OpCode::LoadArr, lv.id, lv.arr_dims, lv.line);
                 break;
             case LValueKind::SelfUser:
                 if (lv.arr_dims == 0) chunk_.emit(OpCode::LoadSelfVar, lv.id, 0, lv.line);
@@ -213,6 +219,10 @@ private:
             case LValueKind::Local:
                 if (lv.arr_dims == 0) chunk_.emit(OpCode::StoreLocal, lv.id, 0, lv.line);
                 else chunk_.emit(OpCode::StoreLocalArr, lv.id, lv.arr_dims, lv.line);
+                break;
+            case LValueKind::UnqualifiedUser:
+                if (lv.arr_dims == 0) chunk_.emit(OpCode::StoreVar, lv.id, 0, lv.line);
+                else chunk_.emit(OpCode::StoreArr, lv.id, lv.arr_dims, lv.line);
                 break;
             case LValueKind::SelfUser:
                 if (lv.arr_dims == 0) chunk_.emit(OpCode::StoreSelfVar, lv.id, 0, lv.line);
@@ -256,11 +266,28 @@ private:
     // Statements
     Result<void> parse_statement() {
         while (match(TokenKind::Semicolon)) {}
+        while (match(TokenKind::DndActionStart)) {
+            action_end_jumps_.push_back(chunk_.emit(OpCode::JumpIfRoomChange, 0, 0, cur_line()));
+        }
+        if (match(TokenKind::DndEventEnd)) {
+            for (u32 jump : action_end_jumps_) chunk_.patch_operand(jump, static_cast<u32>(chunk_.code.size()));
+            return Result<void>::success();
+        }
         if (at(TokenKind::Eof) || at(TokenKind::RBrace) || at(TokenKind::KwEnd)) {
             return Result<void>::success();
         }
 
         switch (peek().kind) {
+            case TokenKind::DndCodeAction: {
+                const auto& token = advance();
+                const auto name = chunk_.debug_name + ":action" + std::to_string(token.line);
+                auto action = GmlCompiler::compile_chunk(name, token.text, symbols_);
+                if (!action) return action.error();
+                chunk_.emit(OpCode::RunCodeAction, static_cast<u32>(chunk_.code_actions.size()),
+                            0, static_cast<u16>(token.line));
+                chunk_.code_actions.push_back(std::move(action.value()));
+                return Result<void>::success();
+            }
             case TokenKind::LBrace:
             case TokenKind::KwBegin:
                 return parse_block();
@@ -326,12 +353,12 @@ private:
                 break;
             }
             const Token tok = advance();
-            const u32 slot = declare_local(tok.text);
+            const u32 var_id = declare_local(tok.text);
 
             // Tolerate optional initializer `var x = expr` if encountered.
             if (match(TokenKind::Assign)) {
                 if (auto e = parse_expression(); !e) return e.error();
-                chunk_.emit(OpCode::StoreLocal, slot, 0, static_cast<u16>(tok.line));
+                chunk_.emit(OpCode::StoreLocal, var_id, 0, static_cast<u16>(tok.line));
             }
             if (!match(TokenKind::Comma)) {
                 break;
@@ -352,7 +379,7 @@ private:
             }
             const Token tok = advance();
             const u32 vid = symbols_.intern_user_var(tok.text);
-            symbols_.mark_globalvar(vid);
+            chunk_.emit(OpCode::DeclareGlobal, vid, 0, static_cast<u16>(tok.line));
             if (!match(TokenKind::Comma)) {
                 break;
             }
@@ -396,7 +423,7 @@ private:
 
         const u32 jend = chunk_.emit(OpCode::JumpIfFalse, 0, 0, line);
 
-        loops_.push_back(LoopContext{false, false, {}, {}, with_depth_});
+        loops_.push_back(LoopContext{false, false, {}, {}});
         if (auto e = parse_statement(); !e) return e.error();
         LoopContext ctx = std::move(loops_.back());
         loops_.pop_back();
@@ -414,7 +441,7 @@ private:
         advance(); // 'do'
 
         const u32 loop_start = static_cast<u32>(chunk_.code.size());
-        loops_.push_back(LoopContext{false, false, {}, {}, with_depth_});
+        loops_.push_back(LoopContext{false, false, {}, {}});
         if (auto e = parse_statement(); !e) return e.error();
         LoopContext ctx = std::move(loops_.back());
         loops_.pop_back();
@@ -447,7 +474,7 @@ private:
         const u32 init_ip = chunk_.emit(OpCode::RepeatInit, 0, static_cast<u8>(slot), line);
         const u32 body_start = static_cast<u32>(chunk_.code.size());
 
-        loops_.push_back(LoopContext{false, false, {}, {}, with_depth_});
+        loops_.push_back(LoopContext{false, false, {}, {}});
         if (auto e = parse_statement(); !e) return e.error();
         LoopContext ctx = std::move(loops_.back());
         loops_.pop_back();
@@ -497,7 +524,7 @@ private:
 
         chunk_.patch_operand(jbody, static_cast<u32>(chunk_.code.size()));
 
-        loops_.push_back(LoopContext{false, false, {}, {}, with_depth_});
+        loops_.push_back(LoopContext{false, false, {}, {}});
         if (auto e = parse_statement(); !e) return e.error();
         LoopContext ctx = std::move(loops_.back());
         loops_.pop_back();
@@ -520,12 +547,10 @@ private:
         const u32 push_ip = chunk_.emit(OpCode::WithPush, 0, 0, line);
         const u32 body_start = static_cast<u32>(chunk_.code.size());
 
-        ++with_depth_;
-        loops_.push_back(LoopContext{true, false, {}, {}, with_depth_});
+        loops_.push_back(LoopContext{true, false, {}, {}});
         if (auto e = parse_statement(); !e) return e.error();
         LoopContext ctx = std::move(loops_.back());
         loops_.pop_back();
-        --with_depth_;
 
         const u32 next_ip = static_cast<u32>(chunk_.code.size());
         chunk_.emit(OpCode::WithNext, body_start, 0, line);
@@ -543,7 +568,7 @@ private:
 
         if (auto e = parse_expression(); !e) return e.error();
         const u32 sw_slot = alloc_temp_local();
-        chunk_.emit(OpCode::StoreLocal, sw_slot, 0, line);
+        chunk_.emit(OpCode::StoreTemp, sw_slot, 0, line);
 
         const bool is_begin = at(TokenKind::KwBegin);
         if (!match(TokenKind::LBrace) && !match(TokenKind::KwBegin)) {
@@ -562,7 +587,7 @@ private:
         };
         std::vector<CaseEntry> cases;
 
-        loops_.push_back(LoopContext{false, true, {}, {}, with_depth_});
+        loops_.push_back(LoopContext{false, true, {}, {}});
 
         while (!at(TokenKind::Eof) && !at(TokenKind::RBrace) && !at(TokenKind::KwEnd)) {
             if (match(TokenKind::KwCase)) {
@@ -621,7 +646,7 @@ private:
                 default_ip = c.body_ip;
                 continue;
             }
-            chunk_.emit(OpCode::LoadLocal, sw_slot, 0, c.line);
+            chunk_.emit(OpCode::LoadTemp, sw_slot, 0, c.line);
             // Parse the captured case expression tokens using a temporary sub-view.
             c.expr_tokens.push_back(Token{TokenKind::Eof, c.line, 1, 0.0, {}});
             auto saved_tokens = std::move(tokens_);
@@ -650,21 +675,18 @@ private:
     Result<void> parse_break() {
         const u16 line = cur_line();
         advance(); // 'break'
-        if (loops_.empty()) {
-            // GM8 quirk: break outside loop/switch/with exits current script/event.
-            chunk_.emit(OpCode::Exit, 0, 0, line);
-        } else {
-            auto& target_loop = loops_.back();
-            // Unwind any enclosing `with` scopes inside this break target (including the loop itself if it is a `with`).
-            const u32 pops = target_loop.is_with
-                                 ? (with_depth_ - target_loop.with_depth + 1u)
-                                 : (with_depth_ - target_loop.with_depth);
-            for (u32 i = 0; i < pops; ++i) {
-                chunk_.emit(OpCode::WithPop, 0, 0, line);
+        // Object/all iterations consume break. A single-instance with restores its scope
+        // and passes break through to the next enclosing loop or switch.
+        for (auto it = loops_.rbegin(); it != loops_.rend(); ++it) {
+            if (it->is_with) {
+                it->break_jumps.push_back(chunk_.emit(OpCode::WithBreak, 0, 0, line));
+            } else {
+                it->break_jumps.push_back(chunk_.emit(OpCode::Jump, 0, 0, line));
+                match(TokenKind::Semicolon);
+                return Result<void>::success();
             }
-            const u32 j = chunk_.emit(OpCode::Jump, 0, 0, line);
-            target_loop.break_jumps.push_back(j);
         }
+        chunk_.emit(OpCode::Exit, 0, 0, line);
         match(TokenKind::Semicolon);
         return Result<void>::success();
     }
@@ -683,10 +705,6 @@ private:
         if (!target_loop) {
             chunk_.emit(OpCode::Exit, 0, 0, line);
         } else {
-            const u32 pops = with_depth_ - target_loop->with_depth;
-            for (u32 i = 0; i < pops; ++i) {
-                chunk_.emit(OpCode::WithPop, 0, 0, line);
-            }
             const u32 j = chunk_.emit(OpCode::Jump, 0, 0, line);
             target_loop->continue_jumps.push_back(j);
         }
@@ -723,13 +741,8 @@ private:
             lv.is_array_builtin = bv->is_array;
             return lv;
         }
-        const u32 uid = symbols_.intern_user_var(name);
-        if (symbols_.is_globalvar(uid)) {
-            lv.kind = LValueKind::GlobalUser;
-        } else {
-            lv.kind = LValueKind::SelfUser;
-        }
-        lv.id = uid;
+        lv.kind = LValueKind::UnqualifiedUser;
+        lv.id = symbols_.intern_user_var(name);
         return lv;
     }
 
@@ -860,19 +873,16 @@ private:
         }
 
         const Token op_tok = advance();
+        if (auto e = parse_expression(); !e) return e.error();
         if (op_tok.kind == TokenKind::Assign) {
-            if (auto e = parse_expression(); !e) return e.error();
             emit_lvalue_store(lv);
         } else {
-            // Compound assignment: duplicate any stack-resident target + index values so they are evaluated once.
+            // GM8 resolves the target and indices, evaluates the RHS, then reads the old value.
+            // A call on the RHS can change the first instance in the object's list.
             const u8 stack_inputs = static_cast<u8>((lv.kind == LValueKind::Field ? 1u : 0u) + lv.arr_dims);
-            if (stack_inputs == 1) {
-                chunk_.emit(OpCode::Dup, 0, 0, static_cast<u16>(op_tok.line));
-            } else if (stack_inputs > 1) {
-                chunk_.emit(OpCode::DupN, 0, stack_inputs, static_cast<u16>(op_tok.line));
-            }
+            if (stack_inputs) chunk_.emit(OpCode::DupN, 1, stack_inputs, line);
             emit_lvalue_load(lv);
-            if (auto e = parse_expression(); !e) return e.error();
+            chunk_.emit(OpCode::Swap, 0, 0, line);
             chunk_.emit(compound_assign_op(op_tok.kind), 0, 0, static_cast<u16>(op_tok.line));
             emit_lvalue_store(lv);
         }
@@ -1151,35 +1161,12 @@ private:
     SymbolTable& symbols_;
     BytecodeChunk chunk_;
     std::unordered_map<std::string, u32> locals_;
-    u32 next_local_slot_ = 0;
+    u32 next_temp_slot_ = 0;
     std::vector<LoopContext> loops_;
-    u32 with_depth_ = 0;
+    std::vector<u32> action_end_jumps_;
 };
 
 } // namespace
-
-void GmlCompiler::prescan_globalvars(std::string_view source, SymbolTable& symbols) {
-    if (source.find("globalvar") == std::string_view::npos) {
-        return;
-    }
-    auto lex_res = lex_gml(source);
-    if (!lex_res) return;
-    const auto& toks = lex_res.value().tokens;
-    for (usize i = 0; i < toks.size(); ++i) {
-        if (toks[i].kind != TokenKind::KwGlobalVar) continue;
-        ++i;
-        while (i < toks.size() && toks[i].kind == TokenKind::Identifier) {
-            const u32 vid = symbols.intern_user_var(toks[i].text);
-            symbols.mark_globalvar(vid);
-            ++i;
-            if (i < toks.size() && toks[i].kind == TokenKind::Comma) {
-                ++i;
-            } else {
-                break;
-            }
-        }
-    }
-}
 
 Result<BytecodeChunk> GmlCompiler::compile_chunk(
     std::string_view debug_name,
@@ -1209,61 +1196,12 @@ CompiledProgram GmlCompiler::compile_game(const GameData& game) {
     CompiledProgram prog{};
     prog.symbols.populate_from_game(game);
 
-    // Pre-lower all object events & timeline moments so both Pass 0 (globalvar prescan)
-    // and Pass 1 (bytecode compilation) see identical GML text.
-    std::vector<std::array<std::vector<std::pair<i32, std::string>>, 12>> lowered_obj_events(game.objects.size());
-    for (usize oi = 0; oi < game.objects.size(); ++oi) {
-        const auto& obj = game.objects[oi];
-        if (!obj.exists) continue;
-        for (usize cat = 0; cat < 12; ++cat) {
-            for (const auto& entry : obj.events[cat]) {
-                lowered_obj_events[oi][cat].emplace_back(
-                    entry.sub_id,
-                    lower_dnd_event_to_gml(entry.event, game));
-            }
-        }
-    }
-
-    std::vector<std::vector<std::pair<i32, std::string>>> lowered_tl_moments(game.timelines.size());
-    for (usize ti = 0; ti < game.timelines.size(); ++ti) {
-        const auto& tl = game.timelines[ti];
-        if (!tl.exists) continue;
-        for (const auto& mom : tl.moments) {
-            lowered_tl_moments[ti].emplace_back(mom.step, lower_dnd_event_to_gml(mom.event, game));
-        }
-    }
-
-    // Pass 0: Globalvar pre-scan across every code unit in the game.
-    for (const auto& fn : prog.symbols.extension_gml_functions()) {
-        prescan_globalvars(fn.source, prog.symbols);
-    }
-    for (const auto& sc : game.scripts) {
-        if (sc.exists) prescan_globalvars(sc.source, prog.symbols);
-    }
-    for (const auto& lib : game.libraries) {
-        prescan_globalvars(lib, prog.symbols);
-    }
-    for (usize oi = 0; oi < game.objects.size(); ++oi) {
-        for (usize cat = 0; cat < 12; ++cat) {
-            for (const auto& [sub_id, code] : lowered_obj_events[oi][cat]) {
-                (void)sub_id;
-                prescan_globalvars(code, prog.symbols);
-            }
-        }
-    }
-    for (const auto& tl_vec : lowered_tl_moments) {
-        for (const auto& [step, code] : tl_vec) {
-            (void)step;
-            prescan_globalvars(code, prog.symbols);
-        }
-    }
-    for (const auto& rm : game.rooms) {
-        if (!rm.exists) continue;
-        prescan_globalvars(rm.creation_code, prog.symbols);
-        for (const auto& inst : rm.instances) {
-            prescan_globalvars(inst.creation_code, prog.symbols);
-        }
-    }
+    auto compile_event = [&](std::string_view name, const EventData& event) -> Result<BytecodeChunk> {
+        auto lexed = lex_dnd_event(event, game);
+        if (!lexed) return Error{std::string(name) + ": " + lexed.error_message()};
+        ParserCompiler parser(name, std::move(lexed.value().tokens), prog.symbols);
+        return parser.compile_program();
+    };
 
     auto record_error = [&](std::string name, std::string msg, std::string_view src = {}) {
         ++prog.stats.total_errors;
@@ -1349,15 +1287,15 @@ CompiledProgram GmlCompiler::compile_game(const GameData& game) {
         const auto& obj = game.objects[oi];
         if (!obj.exists) continue;
         for (usize cat = 0; cat < 12; ++cat) {
-            for (const auto& [sub_id, code] : lowered_obj_events[oi][cat]) {
+            for (const auto& [sub_id, event] : obj.events[cat]) {
                 std::string uname = "obj:" + obj.name + ":ev" + std::to_string(cat) + "_" + std::to_string(sub_id);
-                auto res = compile_chunk(uname, code, prog.symbols);
+                auto res = compile_event(uname, event);
                 if (res) {
-                    prog.stats.total_instructions += res.value().code.size();
+                    prog.stats.total_instructions += res.value().instruction_count();
                     ++prog.stats.object_events_compiled;
                     prog.object_event_chunks[oi][cat].emplace(sub_id, std::move(res.value()));
                 } else {
-                    record_error(uname, res.error_message(), code);
+                    record_error(uname, res.error_message(), lower_dnd_event_to_gml(event, game));
                 }
             }
         }
@@ -1368,11 +1306,11 @@ CompiledProgram GmlCompiler::compile_game(const GameData& game) {
     for (usize ti = 0; ti < game.timelines.size(); ++ti) {
         const auto& tl = game.timelines[ti];
         if (!tl.exists) continue;
-        for (const auto& [step, code] : lowered_tl_moments[ti]) {
+        for (const auto& [step, event] : tl.moments) {
             std::string uname = "tl:" + tl.name + ":step" + std::to_string(step);
-            auto res = compile_chunk(uname, code, prog.symbols);
+            auto res = compile_event(uname, event);
             if (res) {
-                prog.stats.total_instructions += res.value().code.size();
+                prog.stats.total_instructions += res.value().instruction_count();
                 ++prog.stats.timeline_moments_compiled;
                 prog.timeline_chunks[ti].emplace(step, std::move(res.value()));
             } else {
@@ -1383,6 +1321,7 @@ CompiledProgram GmlCompiler::compile_game(const GameData& game) {
 
     // Compile room & instance creation codes.
     prog.room_creation_chunks.resize(game.rooms.size());
+    prog.instance_creation_chunks.resize(game.rooms.size());
     for (usize ri = 0; ri < game.rooms.size(); ++ri) {
         const auto& rm = game.rooms[ri];
         if (!rm.exists) continue;
@@ -1404,7 +1343,7 @@ CompiledProgram GmlCompiler::compile_game(const GameData& game) {
             if (res) {
                 prog.stats.total_instructions += res.value().code.size();
                 ++prog.stats.instance_codes_compiled;
-                prog.instance_creation_chunks.emplace(inst.id, std::move(res.value()));
+                prog.instance_creation_chunks[ri].emplace(inst.id, std::move(res.value()));
             } else {
                 record_error(uname, res.error_message(), inst.creation_code);
             }

@@ -4,9 +4,8 @@
 #include "base/hash.h"
 
 #include <algorithm>
-#include <cstring>
+#include <bit>
 #include <limits>
-#include <random>
 
 namespace gm {
 
@@ -20,34 +19,44 @@ void append_u32_le(std::vector<u8>& buf, u32 v) {
 }
 
 void append_f64_le(std::vector<u8>& buf, f64 v) {
-    u8 raw[8];
-    std::memcpy(raw, &v, 8);
-    buf.insert(buf.end(), raw, raw + 8);
+    const u64 bits = std::bit_cast<u64>(v);
+    append_u32_le(buf, static_cast<u32>(bits));
+    append_u32_le(buf, static_cast<u32>(bits >> 32u));
 }
 
-void write_ds_rvalue(std::vector<u8>& buf, const RValue& val) {
-    if (val.is_real()) {
-        append_u32_le(buf, 0u);
-        append_f64_le(buf, val.as_real());
-    } else {
-        append_u32_le(buf, 1u);
-        const auto& s = val.as_string();
-        append_u32_le(buf, static_cast<u32>(s.size()));
-        buf.insert(buf.end(), s.begin(), s.end());
-    }
-}
+// Each GM8 DS value stores its tag, real, and length-prefixed string, in that order.
+constexpr usize kDsValueHeaderSize = sizeof(u32) + sizeof(f64) + sizeof(u32);
 
-Result<RValue> read_ds_rvalue(BinaryReader& r) {
-    auto kind = r.read_u32();
-    if (!kind) return kind.error();
-    if (kind.value() == 0u) {
-        auto d = r.read_f64();
-        if (!d) return d.error();
-        return RValue(d.value());
+// GM8.0 writes byte strings verbatim. GM8.1's Unicode stream conversion
+// replaces malformed UTF-8 without changing the string held by the container.
+bool repair_stream_utf8(std::string_view bytes, EncodingMode encoding, std::string& repaired) {
+    if (encoding != EncodingMode::Utf8) return false;
+    usize valid_start = 0;
+    for (usize pos = 0; pos < bytes.size();) {
+        const usize start = pos;
+        const u8 lead = static_cast<u8>(bytes[pos++]);
+        if (lead < 0x80) continue;
+        if (lead >= 0xC2 && lead <= 0xF4) {
+            const usize length = lead < 0xE0 ? 2 : (lead < 0xF0 ? 3 : 4);
+            while (pos - start < length && pos < bytes.size()) {
+                const u8 next = static_cast<u8>(bytes[pos]);
+                if ((next & 0xC0) != 0x80) break;
+                ++pos;
+                // The native decoder consumes the second byte even when it
+                // makes the sequence overlong, a surrogate, or above U+10FFFF.
+                if (pos - start == 2 &&
+                    ((lead == 0xE0 && next < 0xA0) || (lead == 0xED && next >= 0xA0) ||
+                     (lead == 0xF0 && next < 0x90) || (lead == 0xF4 && next >= 0x90))) break;
+            }
+            if (pos - start == length) continue;
+        }
+        repaired.append(bytes.substr(valid_start, start - valid_start));
+        repaired.append("\xEF\xBF\xBD");
+        valid_start = pos;
     }
-    auto s = r.read_gm_string();
-    if (!s) return s.error();
-    return RValue(std::move(s.value()));
+    if (valid_start == 0) return false;
+    repaired.append(bytes.substr(valid_start));
+    return true;
 }
 
 std::vector<u8> hex_decode(std::string_view hex) {
@@ -69,6 +78,42 @@ std::vector<u8> hex_decode(std::string_view hex) {
 }
 
 } // namespace
+
+void DsManager::write_ds_rvalue(std::vector<u8>& buf, const RValue& val) const {
+    append_u32_le(buf, val.is_string() ? 1u : 0u);
+    append_f64_le(buf, val.as_real());
+    std::string repaired;
+    std::string_view text = val.as_string();
+    if (repair_stream_utf8(text, string_encoding_, repaired)) text = repaired;
+    append_u32_le(buf, static_cast<u32>(text.size()));
+    buf.insert(buf.end(), text.begin(), text.end());
+}
+
+Result<RValue> DsManager::read_ds_rvalue(BinaryReader& r) const {
+    auto kind = r.read_u32();
+    if (!kind) return kind.error();
+    if (kind.value() > 1u) return Error{"Unknown DS value type"};
+    auto number = r.read_f64();
+    if (!number) return number.error();
+    auto text = r.read_gm_string();
+    if (!text) return text.error();
+    std::string repaired;
+    if (repair_stream_utf8(text.value(), string_encoding_, repaired)) text.value() = std::move(repaired);
+    return RValue(static_cast<RValue::Kind>(kind.value()), number.value(), std::move(text.value()));
+}
+
+bool DsManager::read_ds_values(BinaryReader& r, u64 count, std::vector<RValue>& values) const {
+    if (count > r.remaining() / kDsValueHeaderSize) return false;
+    std::vector<RValue> parsed;
+    parsed.reserve(static_cast<usize>(count));
+    for (usize i = 0; i < count; ++i) {
+        auto value = read_ds_rvalue(r);
+        if (!value) return false;
+        parsed.push_back(std::move(value.value()));
+    }
+    values = std::move(parsed);
+    return true;
+}
 
 void DsManager::clear_all() {
     stacks_.clear();
@@ -140,23 +185,19 @@ void DsManager::stack_read(i32 id, std::string_view hex) {
     BinaryReader r(bytes);
     auto ver = r.read_u32();
     auto cnt = r.read_u32();
-    if (!ver || !cnt || (ver.value() != 100u && ver.value() != 101u)) return;
-    it->second.clear();
-    for (u32 i = 0; i < cnt.value(); ++i) {
-        auto v = read_ds_rvalue(r);
-        if (!v) break;
-        it->second.push_back(std::move(v.value()));
+    if (ver && ver.value() == 101u && cnt) {
+        read_ds_values(r, cnt.value(), it->second);
     }
 }
 
 // ---- Queue ----
 i32 DsManager::queue_create() {
     const i32 id = next_queue_id_++;
-    queues_.emplace(id, std::vector<RValue>{});
+    queues_.try_emplace(id);
     return id;
 }
 void DsManager::queue_destroy(i32 id) { queues_.erase(id); }
-void DsManager::queue_clear(i32 id) { if (auto it = queues_.find(id); it != queues_.end()) it->second.clear(); }
+void DsManager::queue_clear(i32 id) { if (auto it = queues_.find(id); it != queues_.end()) it->second = {}; }
 void DsManager::queue_copy(i32 dst, i32 src) {
     const auto sit = queues_.find(src);
     const auto dit = queues_.find(dst);
@@ -164,34 +205,51 @@ void DsManager::queue_copy(i32 dst, i32 src) {
 }
 i32 DsManager::queue_size(i32 id) const {
     const auto it = queues_.find(id);
-    return it != queues_.end() ? static_cast<i32>(it->second.size()) : 0;
+    return it != queues_.end() ? static_cast<i32>(it->second.write_pos - it->second.read_pos) : 0;
 }
 bool DsManager::queue_empty(i32 id) const { return queue_size(id) == 0; }
 void DsManager::queue_enqueue(i32 id, RValue val) {
-    if (auto it = queues_.find(id); it != queues_.end()) it->second.push_back(std::move(val));
+    const auto it = queues_.find(id);
+    if (it == queues_.end()) return;
+    auto& queue = it->second;
+    if (queue.write_pos == queue.slots.size()) queue.slots.resize(queue.write_pos + 16);
+    queue.slots[queue.write_pos++] = std::move(val);
 }
 RValue DsManager::queue_dequeue(i32 id) {
     const auto it = queues_.find(id);
-    if (it == queues_.end() || it->second.empty()) return RValue(0.0);
-    RValue v = std::move(it->second.front());
-    it->second.erase(it->second.begin());
-    return v;
+    if (it == queues_.end()) return RValue(0.0);
+    auto& queue = it->second;
+    RValue value;
+    if (queue.read_pos < queue.write_pos) value = queue.slots[queue.read_pos++];
+    // GM copies the remaining entries forward and keeps the old slots. They
+    // are observable in ds_queue_write, including strings already dequeued.
+    if (queue.read_pos > 16 && queue.read_pos > queue.write_pos / 2) {
+        queue.write_pos -= queue.read_pos;
+        for (usize i = 0; i < queue.write_pos; ++i) queue.slots[i] = queue.slots[queue.read_pos + i];
+        queue.read_pos = 0;
+    }
+    return value;
 }
 RValue DsManager::queue_head(i32 id) const {
     const auto it = queues_.find(id);
-    return (it != queues_.end() && !it->second.empty()) ? it->second.front() : RValue(0.0);
+    if (it == queues_.end() || it->second.read_pos == it->second.write_pos) return RValue(0.0);
+    return it->second.slots[it->second.read_pos];
 }
 RValue DsManager::queue_tail(i32 id) const {
     const auto it = queues_.find(id);
-    return (it != queues_.end() && !it->second.empty()) ? it->second.back() : RValue(0.0);
+    if (it == queues_.end() || it->second.read_pos == it->second.write_pos) return RValue(0.0);
+    return it->second.slots[it->second.write_pos - 1];
 }
 std::string DsManager::queue_write(i32 id) const {
     const auto it = queues_.find(id);
     if (it == queues_.end()) return {};
+    const auto& queue = it->second;
     std::vector<u8> buf;
     append_u32_le(buf, 201u);
-    append_u32_le(buf, static_cast<u32>(it->second.size()));
-    for (const auto& v : it->second) write_ds_rvalue(buf, v);
+    append_u32_le(buf, static_cast<u32>(queue.write_pos));
+    append_u32_le(buf, static_cast<u32>(queue.read_pos));
+    append_u32_le(buf, static_cast<u32>(queue.slots.size()));
+    for (const auto& value : queue.slots) write_ds_rvalue(buf, value);
     return hex_encode(buf, true);
 }
 void DsManager::queue_read(i32 id, std::string_view hex) {
@@ -200,14 +258,16 @@ void DsManager::queue_read(i32 id, std::string_view hex) {
     auto bytes = hex_decode(hex);
     BinaryReader r(bytes);
     auto ver = r.read_u32();
-    auto cnt = r.read_u32();
-    if (!ver || !cnt || (ver.value() != 200u && ver.value() != 201u)) return;
-    it->second.clear();
-    for (u32 i = 0; i < cnt.value(); ++i) {
-        auto v = read_ds_rvalue(r);
-        if (!v) break;
-        it->second.push_back(std::move(v.value()));
-    }
+    auto write_pos = r.read_u32();
+    auto read_pos = r.read_u32();
+    auto capacity = r.read_u32();
+    if (!ver || ver.value() != 201u || !write_pos || !read_pos || !capacity) return;
+    if (read_pos.value() > write_pos.value() || write_pos.value() > capacity.value()) return;
+    Queue queue;
+    queue.read_pos = read_pos.value();
+    queue.write_pos = write_pos.value();
+    if (!read_ds_values(r, capacity.value(), queue.slots)) return;
+    it->second = std::move(queue);
 }
 
 // ---- List ----
@@ -272,11 +332,16 @@ void DsManager::list_sort(i32 id, bool ascending) {
         return ascending ? (cmp < 0) : (cmp > 0);
     });
 }
-void DsManager::list_shuffle(i32 id, u32 seed) {
+void DsManager::list_shuffle(i32 id, GmlRandom& rng) {
     const auto it = lists_.find(id);
     if (it == lists_.end()) return;
-    std::mt19937 rng(seed);
-    std::shuffle(it->second.begin(), it->second.end(), rng);
+    auto& values = it->second;
+    const auto count = static_cast<u32>(values.size());
+    for (usize i = 0; i < values.size() * 8; ++i) {
+        const u32 first = rng.below(count);
+        const u32 second = rng.below(count);
+        std::swap(values[first], values[second]);
+    }
 }
 std::string DsManager::list_write(i32 id) const {
     const auto it = lists_.find(id);
@@ -294,13 +359,8 @@ void DsManager::list_read(i32 id, std::string_view hex) {
     BinaryReader r(bytes);
     auto ver = r.read_u32();
     auto cnt = r.read_u32();
-    if (!ver || !cnt || (ver.value() != 300u && ver.value() != 301u)) return;
-    it->second.clear();
-    it->second.reserve(cnt.value());
-    for (u32 i = 0; i < cnt.value(); ++i) {
-        auto v = read_ds_rvalue(r);
-        if (!v) break;
-        it->second.push_back(std::move(v.value()));
+    if (ver && ver.value() == 301u && cnt) {
+        read_ds_values(r, cnt.value(), it->second);
     }
 }
 
@@ -328,12 +388,9 @@ void DsManager::map_add(i32 id, RValue key, RValue val) {
     if (it == maps_.end()) return;
     auto& vec = it->second.entries;
     const f64 prec = precision_;
-    auto pos = std::lower_bound(vec.begin(), vec.end(), key, [prec](const auto& pair, const RValue& k) {
-        return RValue::compare_for_ds(pair.first, k, prec) < 0;
+    auto pos = std::upper_bound(vec.begin(), vec.end(), key, [prec](const RValue& k, const auto& pair) {
+        return RValue::compare_for_ds(k, pair.first, prec) < 0;
     });
-    if (pos != vec.end() && RValue::compare_for_ds(pos->first, key, prec) == 0) {
-        return; // GM8 ds_map_add ignores duplicate key (use ds_map_replace to overwrite)
-    }
     vec.emplace(pos, std::move(key), std::move(val));
 }
 
@@ -347,8 +404,6 @@ void DsManager::map_replace(i32 id, const RValue& key, RValue val) {
     });
     if (pos != vec.end() && RValue::compare_for_ds(pos->first, key, prec) == 0) {
         pos->second = std::move(val);
-    } else {
-        vec.emplace(pos, key, std::move(val));
     }
 }
 
@@ -432,8 +487,8 @@ std::string DsManager::map_write(i32 id) const {
     std::vector<u8> buf;
     append_u32_le(buf, 401u);
     append_u32_le(buf, static_cast<u32>(vec.size()));
-    for (const auto& [k, v] : vec) { (void)v; write_ds_rvalue(buf, k); }
-    for (const auto& [k, v] : vec) { (void)k; write_ds_rvalue(buf, v); }
+    for (const auto& entry : vec) write_ds_rvalue(buf, entry.first);
+    for (const auto& entry : vec) write_ds_rvalue(buf, entry.second);
     return hex_encode(buf, true);
 }
 
@@ -444,21 +499,20 @@ void DsManager::map_read(i32 id, std::string_view hex) {
     BinaryReader r(bytes);
     auto ver = r.read_u32();
     auto cnt = r.read_u32();
-    if (!ver || !cnt || (ver.value() != 400u && ver.value() != 401u)) return;
-
-    std::vector<RValue> keys;
-    keys.reserve(cnt.value());
+    if (!ver || ver.value() != 401u || !cnt || cnt.value() > r.remaining() / (2 * kDsValueHeaderSize)) return;
+    DsMap parsed;
+    parsed.entries.reserve(cnt.value());
     for (u32 i = 0; i < cnt.value(); ++i) {
-        auto k = read_ds_rvalue(r);
-        if (!k) return;
-        keys.push_back(std::move(k.value()));
+        auto key = read_ds_rvalue(r);
+        if (!key) return;
+        parsed.entries.emplace_back(std::move(key.value()), RValue{});
     }
-    it->second.entries.clear();
-    for (u32 i = 0; i < cnt.value(); ++i) {
-        auto v = read_ds_rvalue(r);
-        if (!v) break;
-        map_replace(id, keys[i], std::move(v.value()));
+    for (auto& entry : parsed.entries) {
+        auto value = read_ds_rvalue(r);
+        if (!value) return;
+        entry.second = std::move(value.value());
     }
+    it->second = std::move(parsed);
 }
 
 // ---- Priority Queue ----
@@ -479,36 +533,55 @@ i32 DsManager::priority_size(i32 id) const {
     return it != priorities_.end() ? static_cast<i32>(it->second.entries.size()) : 0;
 }
 bool DsManager::priority_empty(i32 id) const { return priority_size(id) == 0; }
-void DsManager::priority_add(i32 id, RValue val, f64 prio) {
+void DsManager::priority_add(i32 id, RValue val, RValue prio) {
     if (auto it = priorities_.find(id); it != priorities_.end()) {
-        it->second.entries.emplace_back(std::move(val), prio);
+        it->second.entries.push_back({std::move(val), std::move(prio)});
     }
 }
-void DsManager::priority_change_priority(i32 id, const RValue& val, f64 prio) {
+void DsManager::priority_change_priority(i32 id, const RValue& val, RValue prio) {
     const auto it = priorities_.find(id);
     if (it == priorities_.end()) return;
-    for (auto& [v, p] : it->second.entries) {
-        if (RValue::compare_for_ds(v, val, precision_) == 0) {
-            p = prio;
+    for (auto& entry : it->second.entries) {
+        if (RValue::compare_for_ds(entry.value, val, precision_) == 0) {
+            entry.priority = std::move(prio);
             return;
         }
     }
 }
-f64 DsManager::priority_find_priority(i32 id, const RValue& val) const {
+RValue DsManager::priority_find_priority(i32 id, const RValue& val) const {
     const auto it = priorities_.find(id);
-    if (it == priorities_.end()) return 0.0;
-    for (const auto& [v, p] : it->second.entries) {
-        if (RValue::compare_for_ds(v, val, precision_) == 0) return p;
+    if (it == priorities_.end()) return RValue(0.0);
+    for (const auto& entry : it->second.entries) {
+        if (RValue::compare_for_ds(entry.value, val, precision_) == 0) return entry.priority;
     }
-    return 0.0;
+    return RValue(0.0);
 }
+
+usize DsPriority::extreme_index(bool maximum, f64 precision) const {
+    usize best = 0;
+    for (usize i = 1; i < entries.size(); ++i) {
+        const i32 cmp = RValue::compare_for_ds(entries[i].priority, entries[best].priority, precision);
+        if (maximum ? cmp > 0 : cmp < 0) best = i;
+    }
+    return best;
+}
+
+RValue DsPriority::remove_at(usize index) {
+    RValue value = std::move(entries[index].value);
+    // The runner fills the vacancy with the last entry. This also affects
+    // which value wins the next tie and the order in ds_priority_write.
+    if (index != entries.size() - 1) entries[index] = std::move(entries.back());
+    entries.pop_back();
+    return value;
+}
+
 void DsManager::priority_delete_value(i32 id, const RValue& val) {
     const auto it = priorities_.find(id);
     if (it == priorities_.end()) return;
-    auto& vec = it->second.entries;
-    for (usize i = 0; i < vec.size(); ++i) {
-        if (RValue::compare_for_ds(vec[i].first, val, precision_) == 0) {
-            vec.erase(vec.begin() + static_cast<std::ptrdiff_t>(i));
+    auto& queue = it->second;
+    for (usize i = 0; i < queue.entries.size(); ++i) {
+        if (RValue::compare_for_ds(queue.entries[i].value, val, precision_) == 0) {
+            queue.remove_at(i);
             return;
         }
     }
@@ -516,75 +589,61 @@ void DsManager::priority_delete_value(i32 id, const RValue& val) {
 RValue DsManager::priority_find_min(i32 id) const {
     const auto it = priorities_.find(id);
     if (it == priorities_.end() || it->second.entries.empty()) return RValue(0.0);
-    usize best = 0;
-    for (usize i = 1; i < it->second.entries.size(); ++i) {
-        if (it->second.entries[i].second < it->second.entries[best].second) best = i;
-    }
-    return it->second.entries[best].first;
+    const auto& queue = it->second;
+    return queue.entries[queue.extreme_index(false, precision_)].value;
 }
 RValue DsManager::priority_delete_min(i32 id) {
     const auto it = priorities_.find(id);
     if (it == priorities_.end() || it->second.entries.empty()) return RValue(0.0);
-    auto& vec = it->second.entries;
-    usize best = 0;
-    for (usize i = 1; i < vec.size(); ++i) {
-        if (vec[i].second < vec[best].second) best = i;
-    }
-    RValue v = std::move(vec[best].first);
-    vec.erase(vec.begin() + static_cast<std::ptrdiff_t>(best));
-    return v;
+    auto& queue = it->second;
+    return queue.remove_at(queue.extreme_index(false, precision_));
 }
 RValue DsManager::priority_find_max(i32 id) const {
     const auto it = priorities_.find(id);
     if (it == priorities_.end() || it->second.entries.empty()) return RValue(0.0);
-    usize best = 0;
-    for (usize i = 1; i < it->second.entries.size(); ++i) {
-        if (it->second.entries[i].second > it->second.entries[best].second) best = i;
-    }
-    return it->second.entries[best].first;
+    const auto& queue = it->second;
+    return queue.entries[queue.extreme_index(true, precision_)].value;
 }
 RValue DsManager::priority_delete_max(i32 id) {
     const auto it = priorities_.find(id);
     if (it == priorities_.end() || it->second.entries.empty()) return RValue(0.0);
-    auto& vec = it->second.entries;
-    usize best = 0;
-    for (usize i = 1; i < vec.size(); ++i) {
-        if (vec[i].second > vec[best].second) best = i;
-    }
-    RValue v = std::move(vec[best].first);
-    vec.erase(vec.begin() + static_cast<std::ptrdiff_t>(best));
-    return v;
+    auto& queue = it->second;
+    return queue.remove_at(queue.extreme_index(true, precision_));
 }
 std::string DsManager::priority_write(i32 id) const {
     const auto it = priorities_.find(id);
     if (it == priorities_.end()) return {};
+    const auto& entries = it->second.entries;
     std::vector<u8> buf;
     append_u32_le(buf, 501u);
-    append_u32_le(buf, static_cast<u32>(it->second.entries.size()));
-    for (const auto& [v, p] : it->second.entries) { (void)p; write_ds_rvalue(buf, v); }
-    for (const auto& [v, p] : it->second.entries) { (void)v; append_f64_le(buf, p); }
+    append_u32_le(buf, static_cast<u32>(entries.size()));
+    for (const auto& entry : entries) write_ds_rvalue(buf, entry.priority);
+    for (const auto& entry : entries) write_ds_rvalue(buf, entry.value);
     return hex_encode(buf, true);
 }
 void DsManager::priority_read(i32 id, std::string_view hex) {
     const auto it = priorities_.find(id);
     if (it == priorities_.end()) return;
-    auto bytes = hex_decode(hex);
-    BinaryReader r(bytes);
-    auto ver = r.read_u32();
-    auto cnt = r.read_u32();
-    if (!ver || !cnt || (ver.value() != 500u && ver.value() != 501u)) return;
-    std::vector<RValue> vals;
-    for (u32 i = 0; i < cnt.value(); ++i) {
-        auto v = read_ds_rvalue(r);
-        if (!v) return;
-        vals.push_back(std::move(v.value()));
+    const auto bytes = hex_decode(hex);
+    BinaryReader reader(bytes);
+    const auto version = reader.read_u32();
+    const auto count = reader.read_u32();
+    if (!version || version.value() != 501u || !count ||
+        count.value() > reader.remaining() / (2 * kDsValueHeaderSize)) return;
+
+    DsPriority restored;
+    restored.entries.resize(count.value());
+    for (auto& entry : restored.entries) {
+        auto priority = read_ds_rvalue(reader);
+        if (!priority) return;
+        entry.priority = std::move(priority.value());
     }
-    it->second.entries.clear();
-    for (u32 i = 0; i < cnt.value(); ++i) {
-        auto p = r.read_f64();
-        if (!p) break;
-        it->second.entries.emplace_back(std::move(vals[i]), p.value());
+    for (auto& entry : restored.entries) {
+        auto value = read_ds_rvalue(reader);
+        if (!value) return;
+        entry.value = std::move(value.value());
     }
+    it->second = std::move(restored);
 }
 
 // ---- Grid (column-major matching CDS_Grid) ----
@@ -756,15 +815,11 @@ void DsManager::grid_read(i32 id, std::string_view hex) {
     auto ver = r.read_u32();
     auto w = r.read_i32();
     auto h = r.read_i32();
-    if (!ver || !w || !h || (ver.value() != 600u && ver.value() != 601u) || w.value() < 0 || h.value() < 0) return;
-    it->second.width = w.value();
-    it->second.height = h.value();
-    const usize total = static_cast<usize>(w.value()) * static_cast<usize>(h.value());
-    it->second.cells.assign(total, RValue(0.0));
-    for (usize i = 0; i < total; ++i) {
-        auto v = read_ds_rvalue(r);
-        if (!v) break;
-        it->second.cells[i] = std::move(v.value());
+    if (!ver || ver.value() != 601u || !w || !h || w.value() < 0 || h.value() < 0) return;
+    const u64 total = static_cast<u64>(w.value()) * static_cast<u64>(h.value());
+    if (read_ds_values(r, total, it->second.cells)) {
+        it->second.width = w.value();
+        it->second.height = h.value();
     }
 }
 

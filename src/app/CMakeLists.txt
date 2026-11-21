@@ -16,6 +16,10 @@ target_link_libraries(gmrunner
         gm_runtime
 )
 
+if(WIN32)
+    target_link_libraries(gmrunner PRIVATE SDL3::SDL3-static)
+endif()
+
 if(EMSCRIPTEN)
     set_target_properties(gmrunner PROPERTIES SUFFIX ".html")
     target_link_options(gmrunner PRIVATE

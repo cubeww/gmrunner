@@ -50,7 +50,8 @@ public:
     void register_virtual_pipe(std::string_view pipe_path, std::vector<u8> data, bool one_shot = true);
     void unregister_virtual_pipe(std::string_view pipe_path);
 
-    // Path normalization & resolution (accepts UTF-8 paths with '\' or '/').
+    // GameMaker 8.0 paths use the game's Windows codepage. Host paths start in UTF-8.
+    void set_game_path_codepage(u32 codepage) noexcept { game_path_codepage_ = codepage; }
     [[nodiscard]] static std::string normalize_separators(std::string_view path);
     [[nodiscard]] std::filesystem::path resolve_for_read(std::string_view gm_path) const;
     [[nodiscard]] std::filesystem::path resolve_for_write(std::string_view gm_path) const;
@@ -87,6 +88,7 @@ private:
     [[nodiscard]] std::filesystem::path resolve_case_insensitive(
         const std::filesystem::path& base,
         std::string_view relative_norm) const;
+    [[nodiscard]] std::filesystem::path resolve_normalized_for_read(std::string_view utf8_path) const;
 
     [[nodiscard]] static bool wildcard_match_ci(std::string_view pattern, std::string_view text) noexcept;
     [[nodiscard]] std::string make_registry_key(std::string_view key, std::string_view name) const;
@@ -95,6 +97,7 @@ private:
     std::filesystem::path save_root_;
     std::filesystem::path temp_dir_;
     bool owns_temp_dir_ = false;
+    u32 game_path_codepage_ = 65001;
 
     mutable std::mutex pipe_mutex_;
     std::unordered_map<std::string, VirtualPipeEntry> virtual_pipes_;

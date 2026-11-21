@@ -46,6 +46,10 @@ set(SDL_INSTALL       OFF CACHE BOOL "" FORCE)
 set(SDL_DISABLE_INSTALL ON CACHE BOOL "" FORCE)
 set(SDL_CAMERA        OFF CACHE BOOL "" FORCE)
 set(SDL_SENSOR        OFF CACHE BOOL "" FORCE)
+if(APPLE)
+    # The built-in SDL converter only covers Unicode, ASCII, and Latin-1.
+    set(SDL_SYSTEM_ICONV ON CACHE BOOL "Use system iconv for GM8 legacy codepages" FORCE)
+endif()
 add_subdirectory(third_party/SDL EXCLUDE_FROM_ALL)
 
 # glad2 OpenGL 3.3 Core loader (Desktop only; Android & Emscripten use native GLES3/WebGL2)

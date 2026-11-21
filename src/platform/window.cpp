@@ -333,6 +333,10 @@ void PlatformWindow::set_title(std::string_view title) {
     }
 }
 
+std::string_view PlatformWindow::title() const noexcept {
+    return window_ ? SDL_GetWindowTitle(window_) : "";
+}
+
 void PlatformWindow::set_size(i32 width, i32 height) {
     if (window_) {
         SDL_SetWindowSize(window_, width, height);

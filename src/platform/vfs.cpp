@@ -143,7 +143,7 @@ std::string Vfs::working_directory_gm() const {
     if (!s.empty() && s.back() != '/' && s.back() != '\\') {
         s.push_back('/');
     }
-    return s;
+    return utf8_to_codepage(s, game_path_codepage_);
 }
 
 std::string Vfs::temp_directory_gm() const {
@@ -151,7 +151,7 @@ std::string Vfs::temp_directory_gm() const {
     if (!s.empty() && s.back() != '/' && s.back() != '\\') {
         s.push_back('/');
     }
-    return s;
+    return utf8_to_codepage(s, game_path_codepage_);
 }
 
 std::filesystem::path Vfs::resolve_case_insensitive(
@@ -206,7 +206,10 @@ std::filesystem::path Vfs::resolve_case_insensitive(
 }
 
 std::filesystem::path Vfs::resolve_for_read(std::string_view gm_path) const {
-    const std::string norm = normalize_separators(gm_path);
+    return resolve_normalized_for_read(normalize_separators(codepage_to_utf8(gm_path, game_path_codepage_)));
+}
+
+std::filesystem::path Vfs::resolve_normalized_for_read(std::string_view norm) const {
     std::error_code ec;
 
     if (is_absolute_gm_path(norm)) {
@@ -232,7 +235,7 @@ std::filesystem::path Vfs::resolve_for_read(std::string_view gm_path) const {
 }
 
 std::filesystem::path Vfs::resolve_for_write(std::string_view gm_path) const {
-    const std::string norm = normalize_separators(gm_path);
+    const std::string norm = normalize_separators(codepage_to_utf8(gm_path, game_path_codepage_));
     if (is_absolute_gm_path(norm)) {
         return path_from_utf8(norm);
     }
@@ -363,7 +366,10 @@ bool Vfs::wildcard_match_ci(std::string_view pattern, std::string_view text) noe
     };
 
     while (t < text.size()) {
-        if (p < pattern.size() && (pattern[p] == '?' || lower(pattern[p]) == lower(text[t]))) {
+        if (p < pattern.size() && pattern[p] == '?') {
+            ++p;
+            (void)utf8_decode_next(text, t);
+        } else if (p < pattern.size() && lower(pattern[p]) == lower(text[t])) {
             ++p;
             ++t;
         } else if (p < pattern.size() && pattern[p] == '*') {
@@ -371,7 +377,8 @@ bool Vfs::wildcard_match_ci(std::string_view pattern, std::string_view text) noe
             star_t = t;
         } else if (star_p != std::string_view::npos) {
             p = star_p + 1;
-            t = ++star_t;
+            (void)utf8_decode_next(text, star_t);
+            t = star_t;
         } else {
             return false;
         }
@@ -383,12 +390,12 @@ bool Vfs::wildcard_match_ci(std::string_view pattern, std::string_view text) noe
 }
 
 std::vector<std::string> Vfs::find_files(std::string_view gm_pattern, u32 attr_mask) const {
-    const std::string norm = normalize_separators(gm_pattern);
+    const std::string norm = normalize_separators(codepage_to_utf8(gm_pattern, game_path_codepage_));
     const usize last_slash = norm.rfind('/');
     const std::string_view dir_part = (last_slash == std::string_view::npos) ? std::string_view{} : std::string_view(norm).substr(0, last_slash);
     const std::string_view mask_part = (last_slash == std::string_view::npos) ? std::string_view(norm) : std::string_view(norm).substr(last_slash + 1);
 
-    const std::filesystem::path dir = dir_part.empty() ? game_root_ : resolve_for_read(dir_part);
+    const std::filesystem::path dir = dir_part.empty() ? game_root_ : resolve_normalized_for_read(dir_part);
     std::vector<std::string> results;
 
     std::error_code ec;
@@ -405,7 +412,7 @@ std::vector<std::string> Vfs::find_files(std::string_view gm_pattern, u32 attr_m
         }
         const std::string name = path_to_utf8(entry.path().filename());
         if (wildcard_match_ci(mask_part, name)) {
-            results.push_back(name);
+            results.push_back(utf8_to_codepage(name, game_path_codepage_));
         }
     }
 

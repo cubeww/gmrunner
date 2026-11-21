@@ -24,6 +24,9 @@ public:
     explicit RValue(std::string s) noexcept : kind_(Kind::String), real_(0.0), str_(std::move(s)) {}
     explicit RValue(std::string_view s) : kind_(Kind::String), real_(0.0), str_(s) {}
     explicit RValue(const char* s) : kind_(Kind::String), real_(0.0), str_(s ? s : "") {}
+    // DS streams store both fields, even when only one is visible to GML.
+    RValue(Kind kind, f64 real, std::string str) noexcept
+        : kind_(kind), real_(real), str_(std::move(str)) {}
 
     [[nodiscard]] Kind kind() const noexcept { return kind_; }
     [[nodiscard]] bool is_real() const noexcept { return kind_ == Kind::Real; }

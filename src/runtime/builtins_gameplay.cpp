@@ -6,7 +6,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <limits>
 
 namespace gm {
 
@@ -130,6 +129,23 @@ bool build_sprite_from_strip(
     return true;
 }
 
+i32 extreme_distance_instance(const Runner& r, i32 target, f64 x, f64 y, bool nearest) {
+    if (target >= 100000) return -4; // These two functions accept only an object or all.
+    return r.with_instance_selection(target, [&](auto& instances) {
+        f64 best_d2 = nearest ? 1.0e10 : -1.0;
+        i32 best_id = -4;
+        for (const Instance& inst : instances) {
+            const f64 dx = inst.x - x, dy = inst.y - y;
+            const f64 d2 = dx * dx + dy * dy;
+            if (nearest ? d2 < best_d2 : d2 > best_d2) {
+                best_d2 = d2;
+                best_id = inst.id;
+            }
+        }
+        return best_id;
+    });
+}
+
 } // namespace
 
 void Runner::register_builtins_gameplay() {
@@ -143,57 +159,40 @@ void Runner::register_builtins_gameplay() {
         r.destroy_instance(self_id, true);
         return RValue(0.0);
     });
-    register_builtin("instance_exists", [](Runner& r, i32, i32, std::span<const RValue> a) {
+    register_builtin("instance_exists", [](Runner& r, i32 self, i32 other, std::span<const RValue> a) {
         const i32 target = arg_i32(a, 0, -4);
-        if (target == -4) return RValue(false);
-        if (target >= 100000) {
-            const auto* inst = r.find_instance(target);
-            return RValue(inst != nullptr && !inst->destroyed && !inst->deactivated);
+        if (target == -1 || target == -2) {
+            const auto* inst = r.find_instance(target == -1 ? self : other);
+            return RValue(inst && !inst->destroyed);
         }
-        for (const auto& up : r.instances()) {
-            if (!up->destroyed && !up->deactivated && r.object_matches(up->object_index, target)) {
-                return RValue(true);
-            }
-        }
-        return RValue(false);
+        return r.with_instance_selection(target, [](auto& group) {
+            return RValue(!std::ranges::empty(group));
+        });
     });
-    register_builtin("instance_number", [](Runner& r, i32, i32, std::span<const RValue> a) {
+    register_builtin("instance_number", [](Runner& r, i32 self, i32 other, std::span<const RValue> a) {
         const i32 target = arg_i32(a, 0, -4);
-        if (target == -4) return RValue(0);
-        i32 cnt = 0;
-        for (const auto& up : r.instances()) {
-            if (!up->destroyed && !up->deactivated && r.object_matches(up->object_index, target)) {
-                ++cnt;
-            }
+        if (target == -1 || target == -2) {
+            const auto* inst = r.find_instance(target == -1 ? self : other);
+            return RValue(inst && !inst->destroyed);
         }
-        return RValue(cnt);
+        return r.with_instance_selection(target, [](auto& group) {
+            return RValue(static_cast<i32>(std::ranges::distance(group)));
+        });
     });
     register_builtin("instance_find", [](Runner& r, i32, i32, std::span<const RValue> a) {
         const i32 target = arg_i32(a, 0, -4);
         const i32 n = arg_i32(a, 1, 0);
         if (target == -4 || n < 0) return RValue(-4);
-        i32 cur = 0;
-        for (const auto& up : r.instances()) {
-            if (up->destroyed || up->deactivated) continue;
-            if (r.object_matches(up->object_index, target)) {
-                if (cur == n) return RValue(up->id);
-                ++cur;
-            }
-        }
-        return RValue(-4);
+        i32 index = 0;
+        return RValue(r.find_matching_instance(target, [&](const Instance&) { return index++ == n; }));
     });
     register_builtin("instance_position", [](Runner& r, i32, i32, std::span<const RValue> a) {
         const f64 px = arg_real(a, 0);
         const f64 py = arg_real(a, 1);
         const i32 target = arg_i32(a, 2, -3);
-        for (const auto& up : r.instances()) {
-            if (up->destroyed || up->deactivated) continue;
-            if (target >= 100000 ? (up->id != target) : !r.object_matches(up->object_index, target)) continue;
-            if (check_point_collision(*up, px, py, true, r.game(), r.version_mode())) {
-                return RValue(up->id);
-            }
-        }
-        return RValue(-4);
+        return RValue(r.find_matching_instance(target, [&](const Instance& inst) {
+            return check_point_collision(inst, px, py, true, r.game(), r.version_mode());
+        }));
     });
     register_builtin("instance_place", [](Runner& r, i32 self_id, i32, std::span<const RValue> a) {
         const auto* self = r.find_instance(self_id);
@@ -201,42 +200,10 @@ void Runner::register_builtins_gameplay() {
         return RValue(r.find_collision_instance(*self, arg_real(a, 0), arg_real(a, 1), arg_i32(a, 2, -3), false));
     });
     register_builtin("instance_nearest", [](Runner& r, i32, i32, std::span<const RValue> a) {
-        const f64 px = arg_real(a, 0);
-        const f64 py = arg_real(a, 1);
-        const i32 target = arg_i32(a, 2, -3);
-        i32 best_id = -4;
-        f64 best_d2 = std::numeric_limits<f64>::infinity();
-        for (const auto& up : r.instances()) {
-            if (up->destroyed || up->deactivated) continue;
-            if (target >= 100000 ? (up->id != target) : !r.object_matches(up->object_index, target)) continue;
-            const f64 dx = up->x - px;
-            const f64 dy = up->y - py;
-            const f64 d2 = dx * dx + dy * dy;
-            if (d2 < best_d2) {
-                best_d2 = d2;
-                best_id = up->id;
-            }
-        }
-        return RValue(best_id);
+        return RValue(extreme_distance_instance(r, arg_i32(a, 2, -3), arg_real(a, 0), arg_real(a, 1), true));
     });
     register_builtin("instance_furthest", [](Runner& r, i32, i32, std::span<const RValue> a) {
-        const f64 px = arg_real(a, 0);
-        const f64 py = arg_real(a, 1);
-        const i32 target = arg_i32(a, 2, -3);
-        i32 best_id = -4;
-        f64 best_d2 = -1.0;
-        for (const auto& up : r.instances()) {
-            if (up->destroyed || up->deactivated) continue;
-            if (target >= 100000 ? (up->id != target) : !r.object_matches(up->object_index, target)) continue;
-            const f64 dx = up->x - px;
-            const f64 dy = up->y - py;
-            const f64 d2 = dx * dx + dy * dy;
-            if (d2 > best_d2) {
-                best_d2 = d2;
-                best_id = up->id;
-            }
-        }
-        return RValue(best_id);
+        return RValue(extreme_distance_instance(r, arg_i32(a, 2, -3), arg_real(a, 0), arg_real(a, 1), false));
     });
     register_builtin("instance_copy", [](Runner& r, i32 self_id, i32, std::span<const RValue> a) {
         return RValue(r.copy_instance(self_id, arg_bool(a, 0, true)));
@@ -249,8 +216,8 @@ void Runner::register_builtins_gameplay() {
         r.deactivate_all(arg_bool(a, 0, true), self_id);
         return RValue(0.0);
     });
-    register_builtin("instance_deactivate_object", [](Runner& r, i32 self_id, i32, std::span<const RValue> a) {
-        r.deactivate_object(arg_i32(a, 0, -4), self_id);
+    register_builtin("instance_deactivate_object", [](Runner& r, i32 self_id, i32 other_id, std::span<const RValue> a) {
+        r.deactivate_object(arg_i32(a, 0, -4), self_id, other_id);
         return RValue(0.0);
     });
     register_builtin("instance_deactivate_region", [](Runner& r, i32 self_id, i32, std::span<const RValue> a) {
@@ -262,8 +229,8 @@ void Runner::register_builtins_gameplay() {
         r.activate_all();
         return RValue(0.0);
     });
-    register_builtin("instance_activate_object", [](Runner& r, i32, i32, std::span<const RValue> a) {
-        r.activate_object(arg_i32(a, 0, -4));
+    register_builtin("instance_activate_object", [](Runner& r, i32 self_id, i32 other_id, std::span<const RValue> a) {
+        r.activate_object(arg_i32(a, 0, -4), self_id, other_id);
         return RValue(0.0);
     });
     register_builtin("instance_activate_region", [](Runner& r, i32, i32, std::span<const RValue> a) {
@@ -302,9 +269,9 @@ void Runner::register_builtins_gameplay() {
         const auto* self = r.find_instance(self_id);
         return RValue(self ? r.check_place_empty(*self, arg_real(a, 0), arg_real(a, 1)) : true);
     });
-    register_builtin("place_meeting", [](Runner& r, i32 self_id, i32, std::span<const RValue> a) {
+    register_builtin("place_meeting", [](Runner& r, i32 self_id, i32 other_id, std::span<const RValue> a) {
         const auto* self = r.find_instance(self_id);
-        return RValue(self ? r.check_place_meeting(*self, arg_real(a, 0), arg_real(a, 1), arg_i32(a, 2, -3)) : false);
+        return RValue(self ? r.check_place_meeting(*self, arg_real(a, 0), arg_real(a, 1), arg_i32(a, 2, -3), r.find_instance(other_id)) : false);
     });
     register_builtin("place_snapped", [](Runner& r, i32 self_id, i32, std::span<const RValue> a) {
         const auto* self = r.find_instance(self_id);
@@ -397,53 +364,52 @@ void Runner::register_builtins_gameplay() {
         const f64 dy = std::max({0.0, static_cast<f64>(self->bbox_top) - py, py - static_cast<f64>(self->bbox_bottom)});
         return RValue(std::hypot(dx, dy));
     });
-    register_builtin("distance_to_object", [](Runner& r, i32 self_id, i32, std::span<const RValue> a) {
+    register_builtin("distance_to_object", [](Runner& r, i32 self_id, i32 other_id, std::span<const RValue> a) {
         const auto* self = r.find_instance(self_id);
         if (!self) return RValue(1000000.0);
         ensure_instance_bbox(*self, r.game());
         const i32 target = arg_i32(a, 0, -4);
         f64 best = 1000000.0;
-        for (const auto& up : r.instances()) {
-            if (up->destroyed || up->deactivated || up->id == self_id) continue;
-            if (target >= 100000 ? (up->id != target) : !r.object_matches(up->object_index, target)) continue;
-            ensure_instance_bbox(*up, r.game());
-            const f64 dx = std::max({0.0, static_cast<f64>(self->bbox_left - up->bbox_right), static_cast<f64>(up->bbox_left - self->bbox_right)});
-            const f64 dy = std::max({0.0, static_cast<f64>(self->bbox_top - up->bbox_bottom), static_cast<f64>(up->bbox_top - self->bbox_bottom)});
+        const auto measure = [&](const Instance& inst) {
+            if (&inst == self) return;
+            ensure_instance_bbox(inst, r.game());
+            const f64 dx = std::max({0.0, static_cast<f64>(self->bbox_left) - inst.bbox_right,
+                                     static_cast<f64>(inst.bbox_left) - self->bbox_right});
+            const f64 dy = std::max({0.0, static_cast<f64>(self->bbox_top) - inst.bbox_bottom,
+                                     static_cast<f64>(inst.bbox_top) - self->bbox_bottom});
             best = std::min(best, std::hypot(dx, dy));
+        };
+        if (target >= 100000 || target == -2) {
+            // Like with(id), this query stops at the first room slot with the
+            // requested ID even if instance_change has marked that slot dead.
+            const i32 handle = target == -2 ? other_id : r.target_instance_at(target, 0, TargetUse::With);
+            if (const Instance* inst = r.find_instance(handle); inst && !inst->destroyed) measure(*inst);
+            return RValue(best);
         }
-        return RValue(best);
+        return r.with_instance_selection(target, [&](auto& instances) {
+            for (const Instance& inst : instances) measure(inst);
+            return RValue(best);
+        });
     });
     register_builtin("position_empty", [](Runner& r, i32, i32, std::span<const RValue> a) {
         const f64 px = arg_real(a, 0);
         const f64 py = arg_real(a, 1);
-        for (const auto& up : r.instances()) {
-            if (!up->destroyed && !up->deactivated && check_point_collision(*up, px, py, true, r.game(), r.version_mode())) {
-                return RValue(false);
-            }
-        }
-        return RValue(true);
+        return RValue(r.find_matching_instance(-3, [&](const Instance& inst) {
+            return check_point_collision(inst, px, py, true, r.game(), r.version_mode());
+        }) == -4);
     });
-    register_builtin("position_meeting", [](Runner& r, i32, i32, std::span<const RValue> a) {
+    register_builtin("position_meeting", [](Runner& r, i32 self, i32 other, std::span<const RValue> a) {
         const f64 px = arg_real(a, 0);
         const f64 py = arg_real(a, 1);
         const i32 target = arg_i32(a, 2, -3);
-        for (const auto& up : r.instances()) {
-            if (up->destroyed || up->deactivated) continue;
-            if (target >= 100000 ? (up->id != target) : !r.object_matches(up->object_index, target)) continue;
-            if (check_point_collision(*up, px, py, true, r.game(), r.version_mode())) return RValue(true);
-        }
-        return RValue(false);
+        return RValue(r.find_matching_instance(target, [&](const Instance& inst) {
+            return check_point_collision(inst, px, py, true, r.game(), r.version_mode());
+        }, r.find_instance(self), r.find_instance(other)) != -4);
     });
     register_builtin("position_destroy", [](Runner& r, i32, i32, std::span<const RValue> a) {
         const f64 px = arg_real(a, 0);
         const f64 py = arg_real(a, 1);
-        std::vector<i32> hits;
-        for (const auto& up : r.instances()) {
-            if (!up->destroyed && !up->deactivated && check_point_collision(*up, px, py, true, r.game(), r.version_mode())) {
-                hits.push_back(up->id);
-            }
-        }
-        for (i32 id : hits) r.destroy_instance(id, true);
+        r.for_instances_at_position(px, py, [&](i32 handle) { r.destroy_instance(handle, true); });
         return RValue(0.0);
     });
     register_builtin("position_change", [](Runner& r, i32, i32, std::span<const RValue> a) {
@@ -451,13 +417,7 @@ void Runner::register_builtins_gameplay() {
         const f64 py = arg_real(a, 1);
         const i32 obj = arg_i32(a, 2, -1);
         const bool perf = arg_bool(a, 3, true);
-        std::vector<i32> hits;
-        for (const auto& up : r.instances()) {
-            if (!up->destroyed && !up->deactivated && check_point_collision(*up, px, py, true, r.game(), r.version_mode())) {
-                hits.push_back(up->id);
-            }
-        }
-        for (i32 id : hits) r.change_instance(id, obj, perf);
+        r.for_instances_at_position(px, py, [&](i32 handle) { r.change_instance(handle, obj, perf); });
         return RValue(0.0);
     });
 
@@ -466,56 +426,46 @@ void Runner::register_builtins_gameplay() {
         const f64 x = arg_real(a, 0), y = arg_real(a, 1);
         const i32 target = arg_i32(a, 2, -3);
         const bool prec = arg_bool(a, 3, true), notme = arg_bool(a, 4, true);
-        for (const auto& up : r.instances()) {
-            if (up->destroyed || up->deactivated || (notme && up->id == self_id)) continue;
-            if (target >= 100000 ? (up->id != target) : !r.object_matches(up->object_index, target)) continue;
-            if (check_point_collision(*up, x, y, prec, r.game(), r.version_mode())) return RValue(up->id);
-        }
-        return RValue(-4);
+        const Instance* excluded = notme ? r.find_instance(self_id) : nullptr;
+        return RValue(r.find_matching_instance(target, [&](const Instance& inst) {
+            return &inst != excluded && check_point_collision(inst, x, y, prec, r.game(), r.version_mode());
+        }));
     });
     register_builtin("collision_rectangle", [](Runner& r, i32 self_id, i32, std::span<const RValue> a) {
         const f64 x1 = arg_real(a, 0), y1 = arg_real(a, 1), x2 = arg_real(a, 2), y2 = arg_real(a, 3);
         const i32 target = arg_i32(a, 4, -3);
         const bool prec = arg_bool(a, 5, true), notme = arg_bool(a, 6, true);
-        for (const auto& up : r.instances()) {
-            if (up->destroyed || up->deactivated || (notme && up->id == self_id)) continue;
-            if (target >= 100000 ? (up->id != target) : !r.object_matches(up->object_index, target)) continue;
-            if (check_rect_collision(*up, x1, y1, x2, y2, prec, r.game(), r.version_mode())) return RValue(up->id);
-        }
-        return RValue(-4);
+        const Instance* excluded = notme ? r.find_instance(self_id) : nullptr;
+        return RValue(r.find_matching_instance(target, [&](const Instance& inst) {
+            return &inst != excluded && check_rect_collision(inst, x1, y1, x2, y2, prec, r.game(), r.version_mode());
+        }));
     });
     register_builtin("collision_circle", [](Runner& r, i32 self_id, i32, std::span<const RValue> a) {
         const f64 cx = arg_real(a, 0), cy = arg_real(a, 1), rad = arg_real(a, 2);
         const i32 target = arg_i32(a, 3, -3);
         const bool prec = arg_bool(a, 4, true), notme = arg_bool(a, 5, true);
-        for (const auto& up : r.instances()) {
-            if (up->destroyed || up->deactivated || (notme && up->id == self_id)) continue;
-            if (target >= 100000 ? (up->id != target) : !r.object_matches(up->object_index, target)) continue;
-            if (check_circle_collision(*up, cx, cy, rad, prec, r.game(), r.version_mode())) return RValue(up->id);
-        }
-        return RValue(-4);
+        const Instance* excluded = notme ? r.find_instance(self_id) : nullptr;
+        return RValue(r.find_matching_instance(target, [&](const Instance& inst) {
+            return &inst != excluded && check_circle_collision(inst, cx, cy, rad, prec, r.game(), r.version_mode());
+        }));
     });
     register_builtin("collision_ellipse", [](Runner& r, i32 self_id, i32, std::span<const RValue> a) {
         const f64 x1 = arg_real(a, 0), y1 = arg_real(a, 1), x2 = arg_real(a, 2), y2 = arg_real(a, 3);
         const i32 target = arg_i32(a, 4, -3);
         const bool prec = arg_bool(a, 5, true), notme = arg_bool(a, 6, true);
-        for (const auto& up : r.instances()) {
-            if (up->destroyed || up->deactivated || (notme && up->id == self_id)) continue;
-            if (target >= 100000 ? (up->id != target) : !r.object_matches(up->object_index, target)) continue;
-            if (check_ellipse_collision(*up, x1, y1, x2, y2, prec, r.game(), r.version_mode())) return RValue(up->id);
-        }
-        return RValue(-4);
+        const Instance* excluded = notme ? r.find_instance(self_id) : nullptr;
+        return RValue(r.find_matching_instance(target, [&](const Instance& inst) {
+            return &inst != excluded && check_ellipse_collision(inst, x1, y1, x2, y2, prec, r.game(), r.version_mode());
+        }));
     });
     register_builtin("collision_line", [](Runner& r, i32 self_id, i32, std::span<const RValue> a) {
         const f64 x1 = arg_real(a, 0), y1 = arg_real(a, 1), x2 = arg_real(a, 2), y2 = arg_real(a, 3);
         const i32 target = arg_i32(a, 4, -3);
         const bool prec = arg_bool(a, 5, true), notme = arg_bool(a, 6, true);
-        for (const auto& up : r.instances()) {
-            if (up->destroyed || up->deactivated || (notme && up->id == self_id)) continue;
-            if (target >= 100000 ? (up->id != target) : !r.object_matches(up->object_index, target)) continue;
-            if (check_line_collision(*up, x1, y1, x2, y2, prec, r.game(), r.version_mode())) return RValue(up->id);
-        }
-        return RValue(-4);
+        const Instance* excluded = notme ? r.find_instance(self_id) : nullptr;
+        return RValue(r.find_matching_instance(target, [&](const Instance& inst) {
+            return &inst != excluded && check_line_collision(inst, x1, y1, x2, y2, prec, r.game(), r.version_mode());
+        }));
     });
 
     // -----------------------------------------------------------------------
@@ -648,34 +598,34 @@ void Runner::register_builtins_gameplay() {
         r.mp_grids().add_rectangle(arg_i32(a, 0), arg_real(a, 1), arg_real(a, 2), arg_real(a, 3), arg_real(a, 4));
         return RValue(0.0);
     });
-    register_builtin("mp_grid_add_instances", [](Runner& r, i32, i32, std::span<const RValue> a) {
+    register_builtin("mp_grid_add_instances", [](Runner& r, i32 self, i32 other, std::span<const RValue> a) {
         const i32 gid = arg_i32(a, 0);
         const i32 target = arg_i32(a, 1, -3);
         const bool prec = arg_bool(a, 2, false);
         auto* g = r.mp_grids().get(gid);
         if (!g) return RValue(0.0);
-        for (const auto& up : r.instances()) {
-            if (up->destroyed || up->deactivated) continue;
-            if (target >= 100000 ? (up->id != target) : !r.object_matches(up->object_index, target)) continue;
-            ensure_instance_bbox(*up, r.game());
-            if (!prec) {
-                r.mp_grids().add_rectangle(gid, up->bbox_left, up->bbox_top, up->bbox_right, up->bbox_bottom);
-            } else {
-                const i32 x0 = std::max(0, static_cast<i32>(std::floor((up->bbox_left - g->left) / g->cell_w)));
-                const i32 y0 = std::max(0, static_cast<i32>(std::floor((up->bbox_top - g->top) / g->cell_h)));
-                const i32 x1 = std::min(g->hcells - 1, static_cast<i32>(std::floor((up->bbox_right - g->left) / g->cell_w)));
-                const i32 y1 = std::min(g->vcells - 1, static_cast<i32>(std::floor((up->bbox_bottom - g->top) / g->cell_h)));
-                for (i32 cy = y0; cy <= y1; ++cy) {
-                    for (i32 cx = x0; cx <= x1; ++cx) {
-                        const f64 rx1 = g->left + cx * g->cell_w;
-                        const f64 ry1 = g->top + cy * g->cell_h;
-                        if (check_rect_collision(*up, rx1, ry1, rx1 + g->cell_w, ry1 + g->cell_h, true, r.game(), r.version_mode())) {
-                            r.mp_grids().add_cell(gid, cx, cy);
+        r.with_instance_selection(target, [&](auto& instances) {
+            for (const Instance& inst : instances) {
+                ensure_instance_bbox(inst, r.game());
+                if (!prec) {
+                    r.mp_grids().add_rectangle(gid, inst.bbox_left, inst.bbox_top, inst.bbox_right, inst.bbox_bottom);
+                } else {
+                    const i32 x0 = std::max(0, static_cast<i32>(std::floor((inst.bbox_left - g->left) / g->cell_w)));
+                    const i32 y0 = std::max(0, static_cast<i32>(std::floor((inst.bbox_top - g->top) / g->cell_h)));
+                    const i32 x1 = std::min(g->hcells - 1, static_cast<i32>(std::floor((inst.bbox_right - g->left) / g->cell_w)));
+                    const i32 y1 = std::min(g->vcells - 1, static_cast<i32>(std::floor((inst.bbox_bottom - g->top) / g->cell_h)));
+                    for (i32 cy = y0; cy <= y1; ++cy) {
+                        for (i32 cx = x0; cx <= x1; ++cx) {
+                            const f64 rx1 = g->left + cx * g->cell_w;
+                            const f64 ry1 = g->top + cy * g->cell_h;
+                            if (check_rect_collision(inst, rx1, ry1, rx1 + g->cell_w, ry1 + g->cell_h, true, r.game(), r.version_mode())) {
+                                r.mp_grids().add_cell(gid, cx, cy);
+                            }
                         }
                     }
                 }
             }
-        }
+        }, r.find_instance(self), r.find_instance(other));
         return RValue(0.0);
     });
     register_builtin("mp_grid_path", [](Runner& r, i32, i32, std::span<const RValue> a) {
@@ -1193,7 +1143,7 @@ void Runner::register_builtins_gameplay() {
     });
     register_builtin("object_set_parent", [](Runner& r, i32, i32, std::span<const RValue> a) {
         const i32 id = arg_i32(a, 0, -1);
-        if (r.object_exists(id)) r.game().objects[static_cast<usize>(id)].parent_index = arg_i32(a, 1, -100);
+        r.set_object_parent(id, arg_i32(a, 1, -100));
         return RValue(0.0);
     });
 

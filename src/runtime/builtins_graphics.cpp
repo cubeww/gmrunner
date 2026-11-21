@@ -1,7 +1,9 @@
 #include "runtime/runner.h"
 
+#include "base/encoding.h"
 #include "base/math.h"
 #include "graphics/renderer2d.h"
+#include "platform/platform.h"
 
 #include <algorithm>
 #include <cmath>
@@ -610,8 +612,7 @@ void Runner::register_builtins_graphics() {
         return RValue(r.renderer().surface_set_target(arg_i32(a, 0, -1)));
     });
     register_builtin("surface_reset_target", [](Runner& r, i32, i32, std::span<const RValue>) {
-        r.renderer().surface_reset_target();
-        return RValue(0.0);
+        return RValue(r.renderer().surface_reset_target());
     });
     register_builtin("draw_surface", [](Runner& r, i32, i32, std::span<const RValue> a) {
         r.renderer().draw_surface_ext(arg_i32(a, 0, -1), static_cast<f32>(arg_real(a, 1)), static_cast<f32>(arg_real(a, 2)), 1.0f, 1.0f, 0.0f, 0xFFFFFFu, 1.0f);
@@ -760,11 +761,12 @@ void Runner::register_builtins_graphics() {
     // Window, Display & Screen
     // -----------------------------------------------------------------------
     register_builtin("window_set_caption", [](Runner& r, i32, i32, std::span<const RValue> a) {
-        r.room_caption_ = std::string(arg_str(a, 0));
-        r.window().set_title(r.room_caption_);
+        r.window().set_title(codepage_to_utf8(arg_str(a, 0), r.game().meta.string_codepage()));
         return RValue(0.0);
     });
-    register_builtin("window_get_caption", [](Runner& r, i32, i32, std::span<const RValue>) { return RValue(r.room_caption_); });
+    register_builtin("window_get_caption", [](Runner& r, i32, i32, std::span<const RValue>) {
+        return RValue(utf8_to_codepage(r.window().title(), r.game().meta.string_codepage()));
+    });
     register_builtin("window_set_fullscreen", [](Runner& r, i32, i32, std::span<const RValue> a) {
         r.window().set_fullscreen(arg_bool(a, 0));
         return RValue(0.0);
@@ -832,6 +834,7 @@ void Runner::register_builtins_graphics() {
         return RValue(0.0);
     });
     register_builtin("screen_refresh", [](Runner& r, i32, i32, std::span<const RValue>) {
+        r.renderer().flush();
         r.window().swap_buffers();
         return RValue(0.0);
     });
@@ -849,8 +852,9 @@ void Runner::register_builtins_graphics() {
         return RValue(0.0);
     });
     register_builtin("set_application_title", [](Runner& r, i32, i32, std::span<const RValue> a) {
-        r.room_caption_ = std::string(arg_str(a, 0));
-        r.window().set_title(r.room_caption_);
+        if (!a.empty() && a[0].is_string()) {
+            Platform::set_application_title(codepage_to_utf8(a[0].as_string(), r.game().meta.string_codepage()));
+        }
         return RValue(0.0);
     });
 }

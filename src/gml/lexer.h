@@ -13,6 +13,7 @@ enum class TokenKind : u8 {
     Number,
     String,
     Identifier,
+    DndCodeAction, DndActionStart, DndEventEnd, // Produced only by lex_dnd_event.
 
     // Keywords
     KwVar,

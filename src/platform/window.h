@@ -70,6 +70,7 @@ public:
     void swap_buffers();
 
     void set_title(std::string_view title);
+    [[nodiscard]] std::string_view title() const noexcept;
     void set_size(i32 width, i32 height);
     void set_position(i32 x, i32 y);
     void center();

@@ -10,7 +10,7 @@ namespace gm {
 
 // Maps Windows GDI FONT CHARSET ID (stored in GMFont (First >> 16) & 0xFF)
 // to its corresponding Windows codepage number.
-[[nodiscard]] u32 gdi_charset_to_codepage(u8 charset) noexcept;
+[[nodiscard]] u32 gdi_charset_to_codepage(u8 charset, u32 default_codepage = 1252) noexcept;
 
 // UTF-8 <-> UTF-16 & codepoint utilities.
 [[nodiscard]] usize utf8_char_count(std::string_view utf8) noexcept;
@@ -25,6 +25,12 @@ void utf8_append_codepoint(std::string& out, u32 cp);
 // Platform layer may register a native multi-byte fallback (e.g., for CJK CP936/CP932).
 [[nodiscard]] std::string codepage_to_utf8(std::string_view bytes, u32 codepage);
 [[nodiscard]] std::string utf8_to_codepage(std::string_view utf8, u32 codepage);
+
+[[nodiscard]] u32 system_ansi_codepage() noexcept;
+
+// Decode one byte as GM8.1 chr() does. Codepage 0 uses the system ANSI
+// codepage on Windows and Windows-1252 on other platforms.
+[[nodiscard]] std::string codepage_byte_to_utf8(u8 byte, u32 codepage);
 
 using CodepageToUtf8Hook = std::function<bool(std::string_view, u32, std::string&)>;
 using Utf8ToCodepageHook = std::function<bool(std::string_view, u32, std::string&)>;

@@ -27,13 +27,12 @@ Result<u32> pack_array_index(i32 i0, i32 i1, u8 dims) noexcept {
 } // namespace
 
 bool VariableTable::exists(u32 var_id) const noexcept {
-    const auto it = slots_.find(var_id);
-    return it != slots_.end() && (it->second.initialized || !it->second.array.empty());
+    return slots_.contains(var_id);
 }
 
 const RValue* VariableTable::get_scalar(u32 var_id) const noexcept {
     const auto it = slots_.find(var_id);
-    if (it == slots_.end() || !it->second.initialized) {
+    if (it == slots_.end()) {
         return nullptr;
     }
     return &it->second.scalar;
@@ -42,7 +41,6 @@ const RValue* VariableTable::get_scalar(u32 var_id) const noexcept {
 void VariableTable::set_scalar(u32 var_id, RValue value) {
     auto& slot = slots_[var_id];
     slot.scalar = std::move(value);
-    slot.initialized = true;
 }
 
 Result<const RValue*> VariableTable::get_array(u32 var_id, i32 i0, i32 i1, u8 dims) const noexcept {
@@ -55,10 +53,16 @@ Result<const RValue*> VariableTable::get_array(u32 var_id, i32 i0, i32 i1, u8 di
         return static_cast<const RValue*>(nullptr);
     }
     if (key == 0u) {
-        return it->second.initialized ? &it->second.scalar : static_cast<const RValue*>(nullptr);
+        return &it->second.scalar;
     }
-    const auto ait = it->second.array.find(key);
-    return (ait != it->second.array.end()) ? &ait->second : static_cast<const RValue*>(nullptr);
+    const u32 column = key % kGmArrayMaxDim;
+    const auto row = it->second.rows.find(key / kGmArrayMaxDim);
+    if (row == it->second.rows.end() || column >= row->second.length) {
+        return static_cast<const RValue*>(nullptr);
+    }
+    const auto value = row->second.values.find(column);
+    static const RValue zero(0.0);
+    return value != row->second.values.end() ? &value->second : &zero;
 }
 
 Result<void> VariableTable::set_array(u32 var_id, i32 i0, i32 i1, u8 dims, RValue value) {
@@ -69,9 +73,11 @@ Result<void> VariableTable::set_array(u32 var_id, i32 i0, i32 i1, u8 dims, RValu
     auto& slot = slots_[var_id];
     if (key == 0u) {
         slot.scalar = std::move(value);
-        slot.initialized = true;
     } else {
-        slot.array[key] = std::move(value);
+        auto& row = slot.rows[key / kGmArrayMaxDim];
+        const u32 column = key % kGmArrayMaxDim;
+        row.values[column] = std::move(value);
+        row.length = std::max(row.length, column + 1);
     }
     return Result<void>::success();
 }
@@ -84,9 +90,7 @@ std::vector<u32> VariableTable::all_var_ids() const {
     std::vector<u32> ids;
     ids.reserve(slots_.size());
     for (const auto& [id, slot] : slots_) {
-        if (slot.initialized || !slot.array.empty()) {
-            ids.push_back(id);
-        }
+        ids.push_back(id);
     }
     return ids;
 }
@@ -96,8 +100,31 @@ GmlVm::GmlVm(CompiledProgram& program, IVmHost* host)
     const_slots_.resize(program_.const_init_chunks.size());
 }
 
-Result<u32> GmlVm::compute_array_key(i32 i0, i32 i1, u8 dims) noexcept {
-    return pack_array_index(i0, i1, dims);
+bool GmlVm::is_declared_global(u32 var_id) const noexcept {
+    const u32 index = var_id - kUserVarIdBase;
+    return index < declared_globals_.size() && declared_globals_[index];
+}
+
+void GmlVm::reset_globals() {
+    globals_.clear();
+    declared_globals_.clear();
+    standalone_instances_.clear();
+}
+
+GmlVm::TargetIterator GmlVm::begin_targets(i32 target, TargetUse use) const {
+    if (target == -1 || target == -2 || target == -6) return {target, use, 1};
+    return {target, use, host_ ? host_->target_instance_count(target) : 0};
+}
+
+i32 GmlVm::next_target(TargetIterator& it, i32 self_id, i32 other_id) const {
+    while (it.next_index < it.count) {
+        const usize index = it.next_index++;
+        if (it.target == -1 || it.target == -6) return self_id;
+        if (it.target == -2) return other_id;
+        const i32 id = host_->target_instance_at(it.target, index, it.use);
+        if (id != -4) return id;
+    }
+    return -4;
 }
 
 RValue GmlVm::get_argument(i32 idx) const noexcept {
@@ -141,7 +168,6 @@ Result<RValue> GmlVm::execute_ext_gml(u32 ext_gml_id, i32 self_id, i32 other_id,
 }
 
 Result<RValue> GmlVm::execute_string(std::string_view code, i32 self_id, i32 other_id, std::span<const RValue> args) {
-    GmlCompiler::prescan_globalvars(code, program_.symbols);
     auto chunk_res = GmlCompiler::compile_chunk("<execute_string>", code, program_.symbols);
     if (!chunk_res) return chunk_res.error();
     return execute(chunk_res.value(), self_id, other_id, args);
@@ -181,11 +207,12 @@ Result<RValue> GmlVm::execute(
     std::vector<RValue> stack;
     stack.reserve(64);
 
-    std::vector<VarSlot> locals(chunk.local_count);
+    VariableTable locals;
+    std::vector<RValue> temps(chunk.temp_count);
     std::vector<WithFrame> with_stack;
 
-    i32 cur_self = self_id;
-    i32 cur_other = other_id;
+    i32 cur_self = host_ ? host_->instance_handle(self_id) : self_id;
+    i32 cur_other = host_ ? host_->instance_handle(other_id) : other_id;
     const bool uninit_zero = host_ ? host_->treat_uninitialized_as_zero() : true;
 
     auto pop = [&]() -> RValue {
@@ -204,12 +231,53 @@ Result<RValue> GmlVm::execute(
         }
     };
 
-    auto handle_uninit = [&](u32 var_id) -> Result<RValue> {
-        if (uninit_zero) {
-            return RValue(0.0);
+    auto push_variable = [&](const RValue* value, u32 var_id) -> Result<void> {
+        if (value) {
+            stack.push_back(*value);
+        } else if (uninit_zero) {
+            stack.emplace_back(0.0);
+        } else {
+            const auto name = program_.symbols.user_var_name(var_id);
+            return Error{"Unknown variable " + std::string(name) + " in " + chunk.debug_name};
         }
-        const std::string_view vname = program_.symbols.user_var_name(var_id);
-        return Error{"Unknown variable " + std::string(vname) + " in " + chunk.debug_name};
+        return Result<void>::success();
+    };
+
+    auto push_array = [&](VariableTable* vars, const Instruction& ins, i32 i0, i32 i1) -> Result<void> {
+        if (!vars) return push_variable(nullptr, ins.operand);
+        auto value = vars->get_array(ins.operand, i0, i1, ins.aux);
+        if (!value) return value.error();
+        return push_variable(value.value(), ins.operand);
+    };
+
+    auto user_vars = [&](const Instruction& ins) -> VariableTable* {
+        switch (ins.op) {
+            case OpCode::LoadLocal: case OpCode::StoreLocal:
+            case OpCode::LoadLocalArr: case OpCode::StoreLocalArr:
+                return &locals;
+            case OpCode::LoadGlobalVar: case OpCode::StoreGlobalVar:
+            case OpCode::LoadGlobalArr: case OpCode::StoreGlobalArr:
+                return &globals_;
+            case OpCode::LoadVar: case OpCode::StoreVar:
+            case OpCode::LoadArr: case OpCode::StoreArr:
+                if (is_declared_global(ins.operand)) return &globals_;
+                break;
+            default:
+                break;
+        }
+        return host_ ? host_->get_instance_vars(cur_self) : &standalone_instances_[cur_self];
+    };
+
+    // GM8 uses -6 for an unqualified target and -7 for the current code's locals.
+    auto field_vars = [&](i32& target, u32 var_id) -> VariableTable* {
+        if (target == -6) target = is_declared_global(var_id) ? -5 : -1;
+        if (target == -7) return &locals;
+        if (target == -5) return &globals_;
+        if (!host_ && var_id >= kUserVarIdBase) {
+            if (target == -1 || target == cur_self) return &standalone_instances_[cur_self];
+            if (target == -2 || target == cur_other) return &standalone_instances_[cur_other];
+        }
+        return nullptr;
     };
 
     const auto& code = chunk.code;
@@ -242,13 +310,13 @@ Result<RValue> GmlVm::execute(
                 }
                 break;
 
-            case OpCode::Dup:
-                stack.push_back(stack.back());
+            case OpCode::Swap:
+                std::iter_swap(stack.end() - 1, stack.end() - 2);
                 break;
 
             case OpCode::DupN: {
                 const usize n = ins.aux;
-                const usize base = stack.size() - n;
+                const usize base = stack.size() - n - ins.operand;
                 for (usize k = 0; k < n; ++k) {
                     stack.push_back(stack[base + k]);
                 }
@@ -259,265 +327,115 @@ Result<RValue> GmlVm::execute(
                 stack.pop_back();
                 break;
 
-            // ---- Local variables ----
-            case OpCode::LoadLocal: {
-                const auto& slot = locals[ins.operand];
-                if (slot.initialized) {
-                    stack.push_back(slot.scalar);
-                } else if (uninit_zero) {
-                    stack.emplace_back(0.0);
-                } else {
-                    return Error{"Uninitialized local variable in " + chunk.debug_name};
-                }
+            case OpCode::LoadTemp:
+                stack.push_back(temps[ins.operand]);
+                break;
+
+            case OpCode::StoreTemp:
+                temps[ins.operand] = pop();
+                break;
+
+            case OpCode::DeclareGlobal: {
+                const u32 index = ins.operand - kUserVarIdBase;
+                if (index >= declared_globals_.size()) declared_globals_.resize(index + 1);
+                declared_globals_[index] = true;
+                if (!globals_.exists(ins.operand)) globals_.set_scalar(ins.operand, RValue(0.0));
                 break;
             }
 
-            case OpCode::StoreLocal: {
-                locals[ins.operand].scalar = pop();
-                locals[ins.operand].initialized = true;
-                break;
-            }
-
-            case OpCode::LoadLocalArr: {
-                i32 i0 = 0, i1 = 0;
-                pop_indices(ins.aux, i0, i1);
-                auto key_res = compute_array_key(i0, i1, ins.aux);
-                if (!key_res) return key_res.error();
-                const auto& slot = locals[ins.operand];
-                if (key_res.value() == 0u) {
-                    stack.push_back(slot.initialized ? slot.scalar : RValue(0.0));
-                } else {
-                    const auto it = slot.array.find(key_res.value());
-                    stack.push_back(it != slot.array.end() ? it->second : RValue(0.0));
-                }
-                break;
-            }
-
-            case OpCode::StoreLocalArr: {
-                RValue val = pop();
-                i32 i0 = 0, i1 = 0;
-                pop_indices(ins.aux, i0, i1);
-                auto key_res = compute_array_key(i0, i1, ins.aux);
-                if (!key_res) return key_res.error();
-                auto& slot = locals[ins.operand];
-                if (key_res.value() == 0u) {
-                    slot.scalar = std::move(val);
-                    slot.initialized = true;
-                } else {
-                    slot.array[key_res.value()] = std::move(val);
-                }
-                break;
-            }
-
-            // ---- Self user variables ----
-            case OpCode::LoadSelfVar: {
-                VariableTable* vt = host_ ? host_->get_instance_vars(cur_self) : &globals_;
-                const RValue* v = vt ? vt->get_scalar(ins.operand) : nullptr;
-                if (v) {
-                    stack.push_back(*v);
-                } else {
-                    auto u = handle_uninit(ins.operand);
-                    if (!u) return u.error();
-                    stack.push_back(std::move(u.value()));
-                }
-                break;
-            }
-
-            case OpCode::StoreSelfVar: {
-                RValue val = pop();
-                if (VariableTable* vt = host_ ? host_->get_instance_vars(cur_self) : &globals_) {
-                    vt->set_scalar(ins.operand, std::move(val));
-                }
-                break;
-            }
-
-            case OpCode::LoadSelfArr: {
-                i32 i0 = 0, i1 = 0;
-                pop_indices(ins.aux, i0, i1);
-                VariableTable* vt = host_ ? host_->get_instance_vars(cur_self) : &globals_;
-                if (!vt) {
-                    stack.emplace_back(0.0);
-                } else {
-                    auto r = vt->get_array(ins.operand, i0, i1, ins.aux);
-                    if (!r) return r.error();
-                    if (r.value()) {
-                        stack.push_back(*r.value());
-                    } else {
-                        auto u = handle_uninit(ins.operand);
-                        if (!u) return u.error();
-                        stack.push_back(std::move(u.value()));
-                    }
-                }
-                break;
-            }
-
-            case OpCode::StoreSelfArr: {
-                RValue val = pop();
-                i32 i0 = 0, i1 = 0;
-                pop_indices(ins.aux, i0, i1);
-                if (VariableTable* vt = host_ ? host_->get_instance_vars(cur_self) : &globals_) {
-                    if (auto e = vt->set_array(ins.operand, i0, i1, ins.aux, std::move(val)); !e) {
-                        return e.error();
-                    }
-                }
-                break;
-            }
-
-            // ---- Global user variables ----
+            case OpCode::LoadLocal:
+            case OpCode::LoadVar:
+            case OpCode::LoadSelfVar:
             case OpCode::LoadGlobalVar: {
-                if (const RValue* v = globals_.get_scalar(ins.operand)) {
-                    stack.push_back(*v);
-                } else {
-                    auto u = handle_uninit(ins.operand);
-                    if (!u) return u.error();
-                    stack.push_back(std::move(u.value()));
-                }
+                auto* vars = user_vars(ins);
+                auto r = push_variable(vars ? vars->get_scalar(ins.operand) : nullptr, ins.operand);
+                if (!r) return r.error();
                 break;
             }
 
-            case OpCode::StoreGlobalVar:
-                globals_.set_scalar(ins.operand, pop());
+            case OpCode::StoreLocal:
+            case OpCode::StoreVar:
+            case OpCode::StoreSelfVar:
+            case OpCode::StoreGlobalVar: {
+                RValue value = pop();
+                if (auto* vars = user_vars(ins)) vars->set_scalar(ins.operand, std::move(value));
                 break;
+            }
 
+            case OpCode::LoadLocalArr:
+            case OpCode::LoadArr:
+            case OpCode::LoadSelfArr:
             case OpCode::LoadGlobalArr: {
                 i32 i0 = 0, i1 = 0;
                 pop_indices(ins.aux, i0, i1);
-                auto r = globals_.get_array(ins.operand, i0, i1, ins.aux);
-                if (!r) return r.error();
-                if (r.value()) {
-                    stack.push_back(*r.value());
-                } else {
-                    auto u = handle_uninit(ins.operand);
-                    if (!u) return u.error();
-                    stack.push_back(std::move(u.value()));
-                }
+                if (auto r = push_array(user_vars(ins), ins, i0, i1); !r) return r.error();
                 break;
             }
 
+            case OpCode::StoreLocalArr:
+            case OpCode::StoreArr:
+            case OpCode::StoreSelfArr:
             case OpCode::StoreGlobalArr: {
-                RValue val = pop();
+                RValue value = pop();
                 i32 i0 = 0, i1 = 0;
                 pop_indices(ins.aux, i0, i1);
-                if (auto e = globals_.set_array(ins.operand, i0, i1, ins.aux, std::move(val)); !e) {
-                    return e.error();
+                if (auto* vars = user_vars(ins)) {
+                    auto r = vars->set_array(ins.operand, i0, i1, ins.aux, std::move(value));
+                    if (!r) return r.error();
                 }
                 break;
             }
 
             // ---- Dynamic target fields ----
-            case OpCode::LoadField: {
-                const i32 target = pop().as_i32();
-                if (target == -5) { // global
-                    const RValue* v = globals_.get_scalar(ins.operand);
-                    stack.push_back(v ? *v : RValue(0.0));
-                    break;
-                }
-                std::vector<i32> targets;
-                if (host_) {
-                    host_->resolve_target_instances(target, cur_self, cur_other, targets);
-                }
-                if (targets.empty()) {
-                    auto u = handle_uninit(ins.operand);
-                    if (!u) return u.error();
-                    stack.push_back(std::move(u.value()));
-                } else if (ins.operand < kUserVarIdBase) {
-                    auto r = host_->get_builtin_inst(targets[0], ins.operand, 0, false);
-                    if (!r) return r.error();
-                    stack.push_back(std::move(r.value()));
-                } else {
-                    VariableTable* vt = host_->get_instance_vars(targets[0]);
-                    const RValue* v = vt ? vt->get_scalar(ins.operand) : nullptr;
-                    if (v) {
-                        stack.push_back(*v);
-                    } else {
-                        auto u = handle_uninit(ins.operand);
-                        if (!u) return u.error();
-                        stack.push_back(std::move(u.value()));
-                    }
-                }
-                break;
-            }
-
-            case OpCode::StoreField: {
-                RValue val = pop();
-                const i32 target = pop().as_i32();
-                if (target == -5) {
-                    globals_.set_scalar(ins.operand, std::move(val));
-                    break;
-                }
-                std::vector<i32> targets;
-                if (host_) {
-                    host_->resolve_target_instances(target, cur_self, cur_other, targets);
-                }
-                for (i32 tid : targets) {
-                    if (ins.operand < kUserVarIdBase) {
-                        if (auto e = host_->set_builtin_inst(tid, ins.operand, 0, false, val); !e) {
-                            return e.error();
-                        }
-                    } else if (VariableTable* vt = host_->get_instance_vars(tid)) {
-                        vt->set_scalar(ins.operand, val);
-                    }
-                }
-                break;
-            }
-
+            case OpCode::LoadField:
             case OpCode::LoadFieldArr: {
                 i32 i0 = 0, i1 = 0;
-                pop_indices(ins.aux, i0, i1);
-                const i32 target = pop().as_i32();
-                if (target == -5) {
-                    auto r = globals_.get_array(ins.operand, i0, i1, ins.aux);
-                    if (!r) return r.error();
-                    stack.push_back(r.value() ? *r.value() : RValue(0.0));
-                    break;
-                }
-                std::vector<i32> targets;
-                if (host_) {
-                    host_->resolve_target_instances(target, cur_self, cur_other, targets);
-                }
-                if (targets.empty()) {
-                    stack.emplace_back(0.0);
-                } else if (ins.operand < kUserVarIdBase) {
-                    auto r = host_->get_builtin_inst(targets[0], ins.operand, i0, true);
-                    if (!r) return r.error();
-                    stack.push_back(std::move(r.value()));
-                } else {
-                    VariableTable* vt = host_->get_instance_vars(targets[0]);
-                    if (!vt) {
-                        stack.emplace_back(0.0);
-                    } else {
-                        auto r = vt->get_array(ins.operand, i0, i1, ins.aux);
-                        if (!r) return r.error();
-                        stack.push_back(r.value() ? *r.value() : RValue(0.0));
+                if (ins.aux) pop_indices(ins.aux, i0, i1);
+                i32 target = pop().as_i32();
+                VariableTable* vars = field_vars(target, ins.operand);
+                if (!vars) {
+                    auto it = begin_targets(target, TargetUse::ReadField);
+                    const i32 id = next_target(it, cur_self, cur_other);
+                    if (id != -4 && host_) {
+                        if (ins.operand < kUserVarIdBase) {
+                            auto value = host_->get_builtin_inst(id, ins.operand, i0, ins.aux != 0);
+                            if (!value) return value.error();
+                            stack.push_back(std::move(value.value()));
+                            break;
+                        }
+                        vars = host_->get_instance_vars(id);
                     }
                 }
+                auto r = ins.aux ? push_array(vars, ins, i0, i1)
+                                 : push_variable(vars ? vars->get_scalar(ins.operand) : nullptr, ins.operand);
+                if (!r) return r.error();
                 break;
             }
 
+            case OpCode::StoreField:
             case OpCode::StoreFieldArr: {
                 RValue val = pop();
                 i32 i0 = 0, i1 = 0;
-                pop_indices(ins.aux, i0, i1);
-                const i32 target = pop().as_i32();
-                if (target == -5) {
-                    if (auto e = globals_.set_array(ins.operand, i0, i1, ins.aux, std::move(val)); !e) {
-                        return e.error();
-                    }
+                if (ins.aux) pop_indices(ins.aux, i0, i1);
+                i32 target = pop().as_i32();
+                auto store = [&](VariableTable& vars) -> Result<void> {
+                    if (ins.aux) return vars.set_array(ins.operand, i0, i1, ins.aux, val);
+                    vars.set_scalar(ins.operand, val);
+                    return Result<void>::success();
+                };
+                if (auto* vars = field_vars(target, ins.operand)) {
+                    if (auto r = store(*vars); !r) return r.error();
                     break;
                 }
-                std::vector<i32> targets;
-                if (host_) {
-                    host_->resolve_target_instances(target, cur_self, cur_other, targets);
-                }
-                for (i32 tid : targets) {
+                if (target == -4 || target < -7) return Error{"Cannot assign to the variable"};
+                if (!host_) break;
+                auto it = begin_targets(target, TargetUse::WriteField);
+                for (i32 id; (id = next_target(it, cur_self, cur_other)) != -4;) {
                     if (ins.operand < kUserVarIdBase) {
-                        if (auto e = host_->set_builtin_inst(tid, ins.operand, i0, true, val); !e) {
-                            return e.error();
-                        }
-                    } else if (VariableTable* vt = host_->get_instance_vars(tid)) {
-                        if (auto e = vt->set_array(ins.operand, i0, i1, ins.aux, val); !e) {
-                            return e.error();
-                        }
+                        auto r = host_->set_builtin_inst(id, ins.operand, i0, ins.aux != 0, val);
+                        if (!r) return r.error();
+                    } else if (auto* vars = host_->get_instance_vars(id)) {
+                        if (auto r = store(*vars); !r) return r.error();
                     }
                 }
                 break;
@@ -699,48 +617,43 @@ Result<RValue> GmlVm::execute(
                 if (cnt <= 0) {
                     ip = ins.operand;
                 } else {
-                    locals[ins.aux].scalar = RValue(cnt);
-                    locals[ins.aux].initialized = true;
+                    temps[ins.aux] = RValue(cnt);
                 }
                 break;
             }
 
             case OpCode::RepeatNext: {
-                const i64 rem = static_cast<i64>(locals[ins.aux].scalar.as_real()) - 1;
+                const i64 rem = static_cast<i64>(temps[ins.aux].as_real()) - 1;
                 if (rem > 0) {
-                    locals[ins.aux].scalar = RValue(rem);
+                    temps[ins.aux] = RValue(rem);
                     ip = ins.operand;
                 }
                 break;
             }
 
             case OpCode::WithPush: {
-                const i32 target = pop().as_i32();
-                WithFrame wf{};
-                wf.saved_self = cur_self;
-                wf.saved_other = cur_other;
-                if (host_) {
-                    host_->resolve_target_instances(target, cur_self, cur_other, wf.targets);
-                } else if (target == -1) {
-                    wf.targets.push_back(cur_self);
-                } else if (target == -2) {
-                    wf.targets.push_back(cur_other);
-                }
-                if (wf.targets.empty()) {
+                const RValue value = pop();
+                if (!value.is_real()) return Error{"Object id expected"};
+                const i32 target = value.as_i32();
+                if (target == -5) return Error{"Cannot use global in with statement."};
+                if (target == -7) return Error{"Cannot use local in with statement."};
+                WithFrame wf{begin_targets(target, TargetUse::With), cur_self, cur_other};
+                const i32 next = next_target(wf.targets, cur_self, cur_other);
+                if (next == -4) {
                     ip = ins.operand;
                 } else {
                     cur_other = cur_self;
-                    cur_self = wf.targets[0];
-                    with_stack.push_back(std::move(wf));
+                    cur_self = next;
+                    with_stack.push_back(wf);
                 }
                 break;
             }
 
             case OpCode::WithNext: {
                 auto& wf = with_stack.back();
-                ++wf.index;
-                if (wf.index < wf.targets.size()) {
-                    cur_self = wf.targets[wf.index];
+                const i32 next = next_target(wf.targets, wf.saved_self, wf.saved_other);
+                if (next != -4) {
+                    cur_self = next;
                     ip = ins.operand;
                 } else {
                     cur_self = wf.saved_self;
@@ -750,13 +663,13 @@ Result<RValue> GmlVm::execute(
                 break;
             }
 
-            case OpCode::WithPop: {
-                if (!with_stack.empty()) {
-                    const auto& wf = with_stack.back();
-                    cur_self = wf.saved_self;
-                    cur_other = wf.saved_other;
-                    with_stack.pop_back();
-                }
+            case OpCode::WithBreak: {
+                const auto& wf = with_stack.back();
+                const i32 target = wf.targets.target;
+                if (target == -3 || (target >= 0 && target < 100000)) ip = ins.operand;
+                cur_self = wf.saved_self;
+                cur_other = wf.saved_other;
+                with_stack.pop_back();
                 break;
             }
 
@@ -812,6 +725,15 @@ Result<RValue> GmlVm::execute(
                 stack.push_back(std::move(ret));
                 break;
             }
+
+            case OpCode::RunCodeAction: {
+                auto result = execute(chunk.code_actions[ins.operand], cur_self, cur_other);
+                if (!result) return result.error();
+                break;
+            }
+            case OpCode::JumpIfRoomChange:
+                if (host_ && host_->room_change_pending()) ip = ins.operand;
+                break;
 
             case OpCode::Return:
                 return pop();

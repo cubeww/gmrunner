@@ -22,7 +22,7 @@
 | **EXE Payload Discovery** | Scan from PE overlay (`1,980,000` / `2,000,000` `+10,000` stride) for `1234321` | Byte scan from PE overlay (`3,800,004`) for interleaved magic `0xF7140067` | Same `0xF7140067` magic, trimmed stub (`3,174,000` / PE overlay start) |
 | **Outer Encryption** | None | `DecryptWad`: UTF-16LE `"_MJD" + seed + "#RWK"` CRC-32 (no final XOR) + Marsaglia MWC XOR stream | Identical to GM 8.1 |
 | **Inner Encryption** | `StreamE`: junk ints + 256-byte swap table + reverse sub/swap passes | Identical `StreamE` | Identical `StreamE` + optional appended zlib event/collision table (`sub_5F783F`) |
-| **String Encoding** | Single-byte ANSI / Windows codepage (CP1252, CP936, CP932, etc.) | Internal UTF-8 (`CP_UTF8`); char ops use Unicode codepoints; `ansi_char`/`string_byte_*` use raw bytes | Identical to GM 8.1 |
+| **String Encoding** | Windows codepage (CP1252, CP936, CP932, etc.). `string_length` counts bytes. | Internal UTF-8. `chr` decodes the low byte of the rounded argument using the current font’s codepage. `string_length` counts characters by UTF-8 lead byte. `ansi_char` and `string_byte_*` operate on raw bytes. | Identical to GM 8.1 |
 | **Room Instances / Tiles** | Basic position/index/id/code | Adds instance `xscale`/`yscale`/`color`/`rotation` (`v811`) and tile `xscale`/`yscale`/`blend+alpha` | Adds `CreationEventOrder` toggle (Create vs Instance Creation Code) |
 | **Built-in Functions** | Core GM 8.0 set | 1,281 built-ins (adds `YoYo_*`, `os_*`, `display_reset`, `sprite_save_strip`, `dot_product*`, `point_distance_3d`, `d3d_set_zwriteenable`, `ansi_char`, `string_byte_*`) | Same 1,281 built-ins; 14 built-in `joystick_*` stubbed (delegated to `gm82joy`); bundled `gm82*` GEX extensions |
 | **Frame Pacing & Timing** | Legacy sleep-before-present | Legacy sleep-before-present | 1 ms timer resolution + Present-before-Sleep (eliminates 1-frame latency) |
@@ -110,7 +110,8 @@ gmrunner/
 - Preserves exact GM 8.x semantics: `RValue` (`double` / `string`), truthiness `>= 0.5`, float comparison epsilon `1e-13` (`ds_set_precision` default `1e-7`), Delphi banker's rounding (`round()`), non-short-circuiting `&&`/`||`, `div`/`mod` truncating toward zero, `real * string` repetition, 64-bit rounded bitwise ops, `32000`-stride 2D arrays aliasing index `0` to scalar, verbatim strings with `#` newlines, and D&D action lowering with `argument_relative` stack.
 
 ### 4.3 `gm_runtime` — Simulation, Events, Collisions & Built-ins
-- Executes the exact 17-stage step loop (`sub_60756C` / `sub_607868`) with `createCounter` mid-step guards, deferred destruction, room persistence, and instant step abort on room transition.
+- Executes the GM8 17-stage step loop (`sub_60756C` / `sub_607868`) with deferred destruction and room persistence.
+- Keeps ordered active and inactive room lists, plus exact-object and descendant-inclusive instance lists. Step and Alarm visit the objects registered for each sub-event. Each group captures its length on entry and reads the live slot at each iteration. GM 8.2 can supply the ordered event buckets and collision pairs in the executable.
 - `TMask` 2D `uint8` pixel masks (per-subimage or merged), AABB broadphase, exact scaled/rotated inverse-transform pixel checks, GM 8.2 zero-scale rejection, `solid` collision rollback -> event -> retry/rollback semantics, and `mp_*` motion planning.
 - Byte-compatible `ds_*_write`/`ds_*_read` hex serialization (`ds_map` v401 `91010000`, `ds_list` v301 `2D010000`, `ds_grid` v601, etc.).
 - Complete 13-module built-in library (1,281 built-ins + 331 constants).

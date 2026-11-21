@@ -16,6 +16,11 @@
 #include <memory>
 #include <vector>
 
+#if defined(_WIN32)
+// SDL obtains the wide command line and supplies UTF-8 argv on Windows.
+#include <SDL3/SDL_main.h>
+#endif
+
 #if defined(__EMSCRIPTEN__)
 #include <emscripten/emscripten.h>
 #endif
@@ -202,7 +207,8 @@ int main(int argc, char** argv) {
     }
 
     gm::WindowConfig win_cfg{};
-    win_cfg.title = "gmrunner";
+    // GM sets the game window caption after the first Draw.
+    win_cfg.title = loaded_game ? "" : "gmrunner";
     win_cfg.width = opts.window_width;
     win_cfg.height = opts.window_height;
     win_cfg.fullscreen = opts.fullscreen;
@@ -235,7 +241,6 @@ int main(int argc, char** argv) {
                 }
                 win_cfg.width = std::max(1, w);
                 win_cfg.height = std::max(1, h);
-                win_cfg.title = !rm.caption.empty() ? rm.caption : rm.name;
             }
         }
     }

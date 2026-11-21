@@ -12,6 +12,8 @@
 
 namespace gm {
 
+class BinaryReader;
+
 struct DsGrid {
     i32 width = 0;
     i32 height = 0;
@@ -24,12 +26,20 @@ struct DsMap {
 };
 
 struct DsPriority {
-    std::vector<std::pair<RValue, f64>> entries;
+    struct Entry {
+        RValue value;
+        RValue priority;
+    };
+    std::vector<Entry> entries;
+
+    [[nodiscard]] usize extreme_index(bool maximum, f64 precision) const;
+    RValue remove_at(usize index);
 };
 
 class DsManager {
 public:
     void clear_all();
+    void set_string_encoding(EncodingMode encoding) noexcept { string_encoding_ = encoding; }
     void set_precision(f64 prec) noexcept { precision_ = prec; }
     [[nodiscard]] f64 precision() const noexcept { return precision_; }
 
@@ -76,7 +86,7 @@ public:
     [[nodiscard]] i32 list_find_index(i32 id, const RValue& val) const;
     [[nodiscard]] RValue list_find_value(i32 id, i32 pos) const;
     void list_sort(i32 id, bool ascending);
-    void list_shuffle(i32 id, u32 seed);
+    void list_shuffle(i32 id, GmlRandom& rng);
     [[nodiscard]] std::string list_write(i32 id) const;
     void list_read(i32 id, std::string_view hex);
 
@@ -106,9 +116,9 @@ public:
     void priority_copy(i32 dst, i32 src);
     [[nodiscard]] i32 priority_size(i32 id) const;
     [[nodiscard]] bool priority_empty(i32 id) const;
-    void priority_add(i32 id, RValue val, f64 prio);
-    void priority_change_priority(i32 id, const RValue& val, f64 prio);
-    [[nodiscard]] f64 priority_find_priority(i32 id, const RValue& val) const;
+    void priority_add(i32 id, RValue val, RValue prio);
+    void priority_change_priority(i32 id, const RValue& val, RValue prio);
+    [[nodiscard]] RValue priority_find_priority(i32 id, const RValue& val) const;
     void priority_delete_value(i32 id, const RValue& val);
     RValue priority_delete_min(i32 id);
     [[nodiscard]] RValue priority_find_min(i32 id) const;
@@ -139,10 +149,20 @@ public:
     void grid_read(i32 id, std::string_view hex);
 
 private:
+    struct Queue {
+        std::vector<RValue> slots;
+        usize read_pos = 0;
+        usize write_pos = 0;
+    };
+
     f64 precision_ = kDefaultDsPrecision;
+    EncodingMode string_encoding_ = EncodingMode::LegacyAnsi;
+    void write_ds_rvalue(std::vector<u8>& buf, const RValue& val) const;
+    Result<RValue> read_ds_rvalue(BinaryReader& reader) const;
+    bool read_ds_values(BinaryReader& reader, u64 count, std::vector<RValue>& values) const;
 
     std::unordered_map<i32, std::vector<RValue>> stacks_;
-    std::unordered_map<i32, std::vector<RValue>> queues_;
+    std::unordered_map<i32, Queue> queues_;
     std::unordered_map<i32, std::vector<RValue>> lists_;
     std::unordered_map<i32, DsMap> maps_;
     std::unordered_map<i32, DsPriority> priorities_;

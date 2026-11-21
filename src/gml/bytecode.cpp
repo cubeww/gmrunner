@@ -13,9 +13,16 @@ const char* opcode_name(OpCode op) noexcept {
         case OpCode::PushString:           return "PUSH_STR";
         case OpCode::PushZero:             return "PUSH_ZERO";
         case OpCode::LoadConstSlot:        return "LOAD_CONST_SLOT";
-        case OpCode::Dup:                  return "DUP";
+        case OpCode::Swap:                 return "SWAP";
         case OpCode::DupN:                 return "DUP_N";
         case OpCode::Pop:                  return "POP";
+        case OpCode::LoadTemp:             return "LOAD_TEMP";
+        case OpCode::StoreTemp:            return "STORE_TEMP";
+        case OpCode::DeclareGlobal:        return "DECLARE_GLOBAL";
+        case OpCode::LoadVar:              return "LOAD_VAR";
+        case OpCode::StoreVar:             return "STORE_VAR";
+        case OpCode::LoadArr:              return "LOAD_ARR";
+        case OpCode::StoreArr:             return "STORE_ARR";
         case OpCode::LoadLocal:            return "LOAD_LOCAL";
         case OpCode::StoreLocal:           return "STORE_LOCAL";
         case OpCode::LoadLocalArr:         return "LOAD_LOCAL_ARR";
@@ -71,11 +78,13 @@ const char* opcode_name(OpCode op) noexcept {
         case OpCode::RepeatNext:           return "REPEAT_NEXT";
         case OpCode::WithPush:             return "WITH_PUSH";
         case OpCode::WithNext:             return "WITH_NEXT";
-        case OpCode::WithPop:              return "WITH_POP";
+        case OpCode::WithBreak:            return "WITH_BREAK";
         case OpCode::CallBuiltin:          return "CALL_BUILTIN";
         case OpCode::CallScript:           return "CALL_SCRIPT";
         case OpCode::CallExtGml:           return "CALL_EXT_GML";
         case OpCode::CallExtDll:           return "CALL_EXT_DLL";
+        case OpCode::RunCodeAction:        return "RUN_CODE_ACTION";
+        case OpCode::JumpIfRoomChange:     return "JMP_ROOM_CHANGE";
         case OpCode::Return:               return "RETURN";
         case OpCode::Exit:                 return "EXIT";
     }
@@ -124,7 +133,14 @@ std::string BytecodeChunk::disassemble() const {
         }
         out.push_back('\n');
     }
+    for (const auto& action : code_actions) out += action.disassemble();
     return out;
+}
+
+usize BytecodeChunk::instruction_count() const noexcept {
+    usize count = code.size();
+    for (const auto& action : code_actions) count += action.code.size();
+    return count;
 }
 
 } // namespace gm

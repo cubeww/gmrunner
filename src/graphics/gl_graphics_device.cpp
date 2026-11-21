@@ -377,6 +377,8 @@ Result<FramebufferHandle> GlGraphicsDevice::create_framebuffer(std::span<const T
     }
 
     GLuint fbo = 0;
+    GLint previous_framebuffer = 0;
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &previous_framebuffer);
     glGenFramebuffers(1, &fbo);
     glBindFramebuffer(GL_FRAMEBUFFER, fbo);
 
@@ -399,7 +401,7 @@ Result<FramebufferHandle> GlGraphicsDevice::create_framebuffer(std::span<const T
     }
 
     const GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(previous_framebuffer));
 
     if (status != GL_FRAMEBUFFER_COMPLETE) {
         if (depth_rbo != 0) glDeleteRenderbuffers(1, &depth_rbo);

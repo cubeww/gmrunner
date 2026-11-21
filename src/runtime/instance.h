@@ -12,6 +12,7 @@ namespace gm {
 
 struct Instance {
     i32 id = 0;
+    i32 handle = 0; // VM context identity; instance_change preserves id on a new instance.
     i32 object_index = -1;
 
     f64 x = 0.0;
@@ -73,12 +74,9 @@ struct Instance {
     bool timeline_running = true;
     bool timeline_loop = false;
 
-    // Lifecycle & event guards
-    u64 create_counter = 0;
+    // Lifecycle
     bool destroyed = false;
     bool deactivated = false;
-    bool outside_room_prev = false;
-    bool mouse_inside_prev = false;
 
     VariableTable vars;
 

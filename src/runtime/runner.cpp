@@ -16,6 +16,12 @@ namespace gm {
 
 namespace {
 
+const SpriteData* instance_sprite(const Instance& inst, const GameData& game) noexcept {
+    if (inst.sprite_index < 0 || static_cast<usize>(inst.sprite_index) >= game.sprites.size()) return nullptr;
+    const auto& sprite = game.sprites[static_cast<usize>(inst.sprite_index)];
+    return sprite.exists ? &sprite : nullptr;
+}
+
 std::string trim_ascii(std::string_view s) {
     usize b = 0;
     while (b < s.size() && (s[b] == ' ' || s[b] == '\t' || s[b] == '\r' || s[b] == '\n')) ++b;
@@ -50,12 +56,19 @@ Runner::~Runner() {
 
 Result<void> Runner::init(GameData game, CompiledProgram program, std::vector<std::string> cmd_args) {
     game_ = std::move(game);
+    ds_.set_string_encoding(game_.meta.encoding);
     program_ = std::move(program);
+    use_precomputed_events_ = true;
+    generated_event_tables_.reset();
     cmd_args_ = std::move(cmd_args);
+    const u32 game_codepage = game_.meta.string_codepage();
+    vfs_.set_game_path_codepage(game_codepage);
+    if (game_codepage != 65001u) {
+        for (auto& arg : cmd_args_) arg = utf8_to_codepage(arg, game_codepage);
+    }
 
     next_instance_id_ = std::max(100001, game_.room_max_id + 1);
     next_tile_id_ = std::max(10000001, game_.room_max_tile_id + 1);
-    next_create_counter_ = 1;
     window_color_ = game_.options.window_color;
     sync_vsync_ = (game_.options.sync_vertex != 0);
 
@@ -119,13 +132,18 @@ Result<void> Runner::init(GameData game, CompiledProgram program, std::vector<st
         for (const auto& c : program_.script_chunks) if (c) scan_chunk(*c);
         for (const auto& c : program_.ext_gml_chunks) scan_chunk(c);
         for (const auto& c : program_.trigger_chunks) if (c) scan_chunk(*c);
+        auto scan_event = [&](const BytecodeChunk& event) {
+            scan_chunk(event);
+            for (const auto& action : event.code_actions) scan_chunk(action);
+        };
         for (const auto& arr : program_.object_event_chunks)
             for (const auto& mp : arr)
-                for (const auto& [_, c] : mp) scan_chunk(c);
+                for (const auto& [_, c] : mp) scan_event(c);
         for (const auto& mp : program_.timeline_chunks)
-            for (const auto& [_, c] : mp) scan_chunk(c);
+            for (const auto& [_, c] : mp) scan_event(c);
         for (const auto& c : program_.room_creation_chunks) if (c) scan_chunk(*c);
-        for (const auto& [_, c] : program_.instance_creation_chunks) scan_chunk(c);
+        for (const auto& room : program_.instance_creation_chunks)
+            for (const auto& [_, c] : room) scan_chunk(c);
         for (const auto& c : program_.library_init_chunks) scan_chunk(c);
     }
 
@@ -183,11 +201,7 @@ void Runner::shutdown() noexcept {
 
     if (vm_ && current_room_ >= 0) {
         // Fire Game End event on remaining active instances.
-        std::vector<i32> snap;
-        snapshot_active_instances(snap, next_create_counter_);
-        for (i32 id : snap) {
-            perform_event_on_instance(id, -1, 7, 3, id); // ev_other, ev_game_end
-        }
+        broadcast_event(7, 3); // ev_other, ev_game_end
     }
 
     // Flush open files & INI.
@@ -210,6 +224,8 @@ void Runner::shutdown() noexcept {
     bin_files_.clear();
 
     instances_.clear();
+    inactive_instances_.clear();
+    object_instances_.clear();
     inst_by_id_.clear();
     tiles_.clear();
     saved_rooms_.clear();
@@ -225,7 +241,7 @@ void Runner::shutdown() noexcept {
 void Runner::register_builtin(std::string_view name, BuiltinFn fn) {
     if (const auto* info = BuiltinsCatalog::find_function(name)) {
         if (info->id < builtins_.size()) {
-            builtins_[info->id] = fn;
+            builtins_[info->id] = std::move(fn);
         }
     }
 }
@@ -245,6 +261,8 @@ void Runner::register_all_builtins() {
 
 void Runner::start_game() {
     instances_.clear();
+    inactive_instances_.clear();
+    object_instances_.clear();
     inst_by_id_.clear();
     tiles_.clear();
     saved_rooms_.clear();
@@ -279,15 +297,11 @@ void Runner::start_room(i32 room_id, bool is_game_start) {
 
     // 1. Leave previous room (if any)
     if (!is_game_start && current_room_ >= 0) {
-        std::vector<i32> snap;
-        snapshot_active_instances(snap, next_create_counter_);
-        for (i32 id : snap) {
-            perform_event_on_instance(id, -1, 7, 5, id); // ev_other, ev_room_end
-        }
+        broadcast_event(7, 5); // ev_other, ev_room_end
         remove_marked_instances();
 
+        SavedRoomState state{};
         if (room_persistent_) {
-            SavedRoomState state{};
             state.tiles = tiles_;
             state.backgrounds = backgrounds_;
             state.views = views_;
@@ -299,35 +313,32 @@ void Runner::start_room(i32 room_id, bool is_game_start) {
             state.speed = room_speed_;
             state.caption = room_caption_;
 
-            std::vector<std::unique_ptr<Instance>> persistent_kept;
-            inst_by_id_.clear();
-            for (auto& up : instances_) {
-                if (up->destroyed) continue;
-                if (up->persistent) {
-                    inst_by_id_[up->id] = up.get();
-                    persistent_kept.push_back(std::move(up));
-                } else {
-                    state.instances.push_back(*up);
-                }
-            }
-            instances_ = std::move(persistent_kept);
-            saved_rooms_[current_room_] = std::move(state);
-        } else {
-            std::vector<std::unique_ptr<Instance>> persistent_kept;
-            inst_by_id_.clear();
-            for (auto& up : instances_) {
-                if (!up->destroyed && up->persistent) {
-                    inst_by_id_[up->id] = up.get();
-                    persistent_kept.push_back(std::move(up));
-                }
-            }
-            instances_ = std::move(persistent_kept);
         }
+        std::vector<std::unique_ptr<Instance>> travelling;
+        inst_by_id_.clear();
+        for (auto& inst : instances_) {
+            if (inst->persistent) {
+                inst_by_id_[inst->id] = inst.get();
+                inst_by_id_[inst->handle] = inst.get();
+                travelling.push_back(std::move(inst));
+            } else if (room_persistent_) {
+                state.instances.push_back(std::move(*inst));
+            }
+        }
+        if (room_persistent_) {
+            for (auto& inst : inactive_instances_) state.instances.push_back(std::move(*inst));
+            saved_rooms_[current_room_] = std::move(state);
+        }
+        instances_ = std::move(travelling);
+        inactive_instances_.clear();
+        rebuild_object_instances();
         tiles_.clear();
     }
 
     current_room_ = room_id;
     const auto& rm = game_.rooms[static_cast<usize>(room_id)];
+    const auto travelling_count = instances_.size();
+    std::vector<i32> created_ids;
     bool restored_from_save = false;
 
     if (auto it = saved_rooms_.find(room_id); it != saved_rooms_.end()) {
@@ -348,10 +359,10 @@ void Runner::start_room(i32 room_id, bool is_game_start) {
         tiles_ = std::move(state.tiles);
 
         for (auto& saved_inst : state.instances) {
+            if (find_instance(saved_inst.id)) continue; // A travelling instance owns this ID.
             auto up = std::make_unique<Instance>(std::move(saved_inst));
             up->mark_bbox_dirty();
-            inst_by_id_[up->id] = up.get();
-            instances_.push_back(std::move(up));
+            add_room_instance(std::move(up));
         }
     } else {
         room_width_ = rm.width;
@@ -423,11 +434,19 @@ void Runner::start_room(i32 room_id, bool is_game_start) {
             t.visible = true;
             tiles_.push_back(t);
         }
+    }
 
+    // GM8 sets the room's screen region before instance creation code, including on re-entry.
+    i32 vx, vy, vw, vh, cw, ch;
+    compute_canvas_viewport(vx, vy, vw, vh, cw, ch);
+    renderer_.set_screen_region(window_.drawable_width(), window_.drawable_height(),
+                                cw, ch, ViewportRect{vx, vy, vw, vh});
+
+    if (!restored_from_save) {
         // First allocate all room instances so creation codes can reference each other by ID.
-        std::vector<i32> created_ids;
         created_ids.reserve(rm.instances.size());
         for (const auto& ri : rm.instances) {
+            if (find_instance(ri.id)) continue; // Keep the travelling instance, including its variables.
             const i32 id = create_instance(
                 static_cast<f64>(ri.x), static_cast<f64>(ri.y),
                 ri.object_index, /*run_create=*/false, ri.id);
@@ -438,40 +457,41 @@ void Runner::start_room(i32 room_id, bool is_game_start) {
                 inst->image_blend = ri.color & 0x00FFFFFFu;
                 inst->image_alpha = static_cast<f64>((ri.color >> 24u) & 0xFFu) / 255.0;
                 inst->mark_bbox_dirty();
-                created_ids.push_back(id);
-            }
-        }
-
-        // Execute Create events and instance creation codes in GM8 order.
-        for (i32 id : created_ids) {
-            if (pending_action_ != PendingRoomAction::None) break;
-            auto* inst = find_instance(id);
-            if (!inst || inst->destroyed) continue;
-
-            if (game_.options.creation_event_order) {
-                if (auto cc_it = program_.instance_creation_chunks.find(id);
-                    cc_it != program_.instance_creation_chunks.end() && !cc_it->second.code.empty()) {
-                    auto r = vm_->execute(cc_it->second, id, id);
-                    if (!r) GM_LOG_WARN("runtime", "Instance %d creation code error: %s", id, r.error_message().c_str());
-                }
-                if (find_instance(id) && !find_instance(id)->destroyed) {
-                    perform_event_on_instance(id, -1, 0, 0, id); // ev_create
-                }
-            } else {
-                perform_event_on_instance(id, -1, 0, 0, id); // ev_create
-                if (pending_action_ != PendingRoomAction::None) break;
-                if (find_instance(id) && !find_instance(id)->destroyed) {
-                    if (auto cc_it = program_.instance_creation_chunks.find(id);
-                        cc_it != program_.instance_creation_chunks.end() && !cc_it->second.code.empty()) {
-                        auto r = vm_->execute(cc_it->second, id, id);
-                        if (!r) GM_LOG_WARN("runtime", "Instance %d creation code error: %s", id, r.error_message().c_str());
-                    }
-                }
+                created_ids.push_back(inst->handle);
             }
         }
     }
 
-    update_window_caption();
+    // GM appends travelling instances after the new room's own instances.
+    if (travelling_count > 0) {
+        std::rotate(instances_.begin(), instances_.begin() + travelling_count, instances_.end());
+        rebuild_object_instances();
+    }
+    for (i32 id : created_ids) {
+        if (pending_action_ != PendingRoomAction::None) break;
+        auto* inst = find_instance(id);
+        if (!inst || inst->destroyed) continue;
+
+        if (game_.options.creation_event_order) {
+            perform_event_on_instance(id, -1, 0, 0, id);
+            if (pending_action_ != PendingRoomAction::None) break;
+        }
+        if (static_cast<usize>(room_id) < program_.instance_creation_chunks.size()) {
+            const auto& chunks = program_.instance_creation_chunks[static_cast<usize>(room_id)];
+            if (auto it = chunks.find(inst->id); it != chunks.end()) {
+                auto result = vm_->execute(it->second, id, id);
+                if (!result) GM_LOG_WARN("runtime", "Instance %d creation code error: %s", inst->id, result.error_message().c_str());
+            }
+        }
+        if (!game_.options.creation_event_order && pending_action_ == PendingRoomAction::None) {
+            execute_instance_event(id, inst->object_index, 0, 0, id);
+        }
+    }
+
+    // The first room's creation code sees globals initialized by Game Start.
+    if (is_game_start && pending_action_ == PendingRoomAction::None) {
+        broadcast_event(7, 2);
+    }
 
     // Update room creation code (only on first visit to room)
     if (!restored_from_save && pending_action_ == PendingRoomAction::None) {
@@ -482,34 +502,25 @@ void Runner::start_room(i32 room_id, bool is_game_start) {
                 auto r = vm_->execute(chunk, -1, -1);
                 if (!r) {
                     GM_LOG_WARN("runtime", "Room '%s' creation code error: %s",
-                                rm.name.c_str(), r.error_message().c_str());
+                                game_.rooms[static_cast<usize>(room_id)].name.c_str(), r.error_message().c_str());
                 }
             }
         }
     }
 
-    // Fire Game Start (first room only)
-    if (is_game_start && pending_action_ == PendingRoomAction::None) {
-        std::vector<i32> snap;
-        snapshot_active_instances(snap, next_create_counter_);
-        for (i32 id : snap) {
-            if (pending_action_ != PendingRoomAction::None) break;
-            perform_event_on_instance(id, -1, 7, 2, id); // ev_other, ev_game_start
-        }
-    }
-
     // Fire Room Start
     if (pending_action_ == PendingRoomAction::None) {
-        std::vector<i32> snap;
-        snapshot_active_instances(snap, next_create_counter_);
-        for (i32 id : snap) {
-            if (pending_action_ != PendingRoomAction::None) break;
-            perform_event_on_instance(id, -1, 7, 4, id); // ev_other, ev_room_start
-        }
+        broadcast_event(7, 4); // ev_other, ev_room_start
     }
 
     remove_marked_instances();
-    update_view_following();
+    if (pending_action_ == PendingRoomAction::None && auto_draw_) {
+        // Room Start draws the initial image before the new room's first step.
+        render_current_frame();
+        window_.swap_buffers();
+    } else {
+        update_view_following();
+    }
 }
 
 void Runner::process_pending_room_action() {
@@ -530,6 +541,7 @@ void Runner::process_pending_room_action() {
                 start_room(current_room_, false);
                 break;
             case PendingRoomAction::RestartGame:
+                vm_->reset_globals();
                 start_game();
                 return;
             case PendingRoomAction::EndGame:
@@ -598,15 +610,7 @@ void Runner::tick_frame() {
 
     if (ev.quit_requested) {
         // Fire ev_close_button (ev_other=7, sub=30) if any object handles it, then quit if close_sec allows.
-        bool handled_close = false;
-        std::vector<i32> snap;
-        snapshot_active_instances(snap, next_create_counter_);
-        for (i32 id : snap) {
-            if (auto* inst = find_instance(id); inst && object_has_event(inst->object_index, 7, 30)) {
-                handled_close = true;
-                perform_event_on_instance(id, -1, 7, 30, id);
-            }
-        }
+        const bool handled_close = broadcast_event(7, 30);
         if (!handled_close || pending_action_ == PendingRoomAction::EndGame) {
             running_ = false;
             return;
@@ -650,14 +654,7 @@ void Runner::tick_frame() {
 
     // Stage 3: Begin Step triggers (moment=1) + Begin Step (ev 3, sub 1)
     step_triggers(1);
-    if (pending_action_ == PendingRoomAction::None) {
-        std::vector<i32> snap;
-        snapshot_active_instances(snap, next_create_counter_);
-        for (i32 id : snap) {
-            if (pending_action_ != PendingRoomAction::None) break;
-            perform_event_on_instance(id, -1, 3, 1, id);
-        }
-    }
+    if (pending_action_ == PendingRoomAction::None) step_event(1);
     remove_marked_instances();
 
     // Stage 4: Timelines
@@ -684,14 +681,7 @@ void Runner::tick_frame() {
     if (pending_action_ == PendingRoomAction::None) {
         step_triggers(0);
     }
-    if (pending_action_ == PendingRoomAction::None) {
-        std::vector<i32> snap;
-        snapshot_active_instances(snap, next_create_counter_);
-        for (i32 id : snap) {
-            if (pending_action_ != PendingRoomAction::None) break;
-            perform_event_on_instance(id, -1, 3, 0, id);
-        }
-    }
+    if (pending_action_ == PendingRoomAction::None) step_event(0);
     remove_marked_instances();
 
     // Stage 9: Friction, gravity, paths, motion integration (x += hspeed; y += vspeed)
@@ -713,23 +703,16 @@ void Runner::tick_frame() {
     if (pending_action_ == PendingRoomAction::None) {
         step_triggers(2);
     }
-    if (pending_action_ == PendingRoomAction::None) {
-        std::vector<i32> snap;
-        snapshot_active_instances(snap, next_create_counter_);
-        for (i32 id : snap) {
-            if (pending_action_ != PendingRoomAction::None) break;
-            perform_event_on_instance(id, -1, 3, 2, id);
-        }
-    }
+    if (pending_action_ == PendingRoomAction::None) step_event(2);
 
     // Stage 13: Particle update & deferred destroy cleanup
     particles_.update_all();
     remove_marked_instances();
 
-    // Process room transitions requested during step BEFORE drawing.
+    // The new room draws on entry and starts advancing animations on its own first step.
     if (pending_action_ != PendingRoomAction::None) {
         process_pending_room_action();
-        if (!running_) return;
+        return;
     }
 
     // Stage 14: Draw pass (when automatic draw is enabled)
@@ -744,6 +727,7 @@ void Runner::tick_frame() {
     }
     if (pending_action_ != PendingRoomAction::None) {
         process_pending_room_action();
+        return;
     }
 
     // Stage 16: Present + FPS measurement
@@ -760,214 +744,313 @@ void Runner::tick_frame() {
     }
 }
 
+void Runner::invalidate_event_tables() {
+    // A change to object inheritance also invalidates the tables in a GM8.2 EXE.
+    use_precomputed_events_ = false;
+    generated_event_tables_.reset();
+}
+
+const Gm82EventTables& Runner::event_tables() {
+    if (use_precomputed_events_ && game_.meta.has_gm82_event_tables && version_mode() == VersionMode::GM82) {
+        return game_.gm82_event_tables;
+    }
+    if (generated_event_tables_) return *generated_event_tables_;
+
+    auto& tables = generated_event_tables_.emplace();
+    // GM8's sub_5BD6BC allocates these sub-event buckets before populating
+    // them in ascending object-resource order. Collision pairs live separately.
+    const std::array<usize, 12> sizes{1, 1, 13, 17, 0, 129, 129, 129, 1, 129, 129, game_.triggers.size()};
+    for (usize cat = 0; cat < sizes.size(); ++cat) tables.event_objects[cat].resize(sizes[cat]);
+
+    std::vector<std::vector<i32>> descendants(game_.objects.size());
+    for (i32 object = 0; static_cast<usize>(object) < game_.objects.size(); ++object) {
+        i32 owner = object;
+        while (object_exists(owner)) {
+            auto& children = descendants[owner];
+            if (!children.empty() && children.back() == object) break;
+            children.push_back(object);
+            if (static_cast<usize>(owner) < program_.object_event_chunks.size()) {
+                const auto& events = program_.object_event_chunks[owner];
+                for (usize cat = 0; cat < events.size(); ++cat) {
+                    for (const auto& [sub, chunk] : events[cat]) {
+                        if (sub >= 0 && static_cast<usize>(sub) < sizes[cat]) {
+                            auto& objects = tables.event_objects[cat][sub];
+                            if (objects.empty() || objects.back() != object) objects.push_back(object);
+                        }
+                    }
+                }
+            }
+            owner = game_.objects[owner].parent_index;
+        }
+    }
+    auto& pairs = tables.collision_pairs;
+    for (usize owner = 0; owner < descendants.size() && owner < program_.object_event_chunks.size(); ++owner) {
+        for (const auto& [sub, chunk] : program_.object_event_chunks[owner][4]) {
+            if (!object_exists(sub)) continue;
+            for (i32 a : descendants[owner]) {
+                for (i32 b : descendants[sub]) pairs.emplace_back(std::min(a, b), std::max(a, b));
+            }
+        }
+    }
+    std::sort(pairs.begin(), pairs.end());
+    pairs.erase(std::unique(pairs.begin(), pairs.end()), pairs.end());
+    return tables;
+}
+
+const std::vector<i32>& Runner::event_objects(i32 category, i32 sub) {
+    static const std::vector<i32> none;
+    if (category < 0 || category >= 12 || sub < 0) return none;
+    const auto& buckets = event_tables().event_objects[category];
+    return static_cast<usize>(sub) < buckets.size() ? buckets[sub] : none;
+}
+
+void Runner::step_event(i32 moment) {
+    for_event_instances(3, moment, [&](Instance& inst) {
+        execute_instance_event(inst.handle, inst.object_index, 3, moment, inst.handle);
+    });
+}
+
 void Runner::step_triggers(i32 moment) {
     for (usize tid = 0; tid < game_.triggers.size(); ++tid) {
-        if (pending_action_ != PendingRoomAction::None) return;
         const auto& tr = game_.triggers[tid];
         if (!tr.exists || tr.moment != moment) continue;
         if (tid >= program_.trigger_chunks.size() || !program_.trigger_chunks[tid].has_value()) continue;
         const auto& cond_chunk = *program_.trigger_chunks[tid];
         if (cond_chunk.code.empty()) continue;
 
-        std::vector<i32> snap;
-        snapshot_active_instances(snap, next_create_counter_);
-        for (i32 id : snap) {
-            if (pending_action_ != PendingRoomAction::None) return;
-            auto* inst = find_instance(id);
-            if (!inst || inst->destroyed || inst->deactivated) continue;
-            if (!object_has_event(inst->object_index, 11, static_cast<i32>(tid))) continue;
-
-            auto res = vm_->execute(cond_chunk, id, id);
-            if (res && res.value().is_truthy()) {
-                perform_event_on_instance(id, -1, 11, static_cast<i32>(tid), id);
+        const i32 sub = static_cast<i32>(tid);
+        for_event_instances(11, sub, [&](Instance& inst) {
+            const i32 handle = inst.handle;
+            auto res = vm_->execute(cond_chunk, handle, handle);
+            if (res && res.value().is_truthy() && pending_action_ == PendingRoomAction::None) {
+                execute_instance_event(handle, inst.object_index, 11, sub, handle);
             }
-        }
+        }, /*continue_after_transition=*/true); // GM still evaluates the remaining conditions.
     }
 }
 
 void Runner::step_timelines() {
-    std::vector<i32> snap;
-    snapshot_active_instances(snap, next_create_counter_);
-    for (i32 id : snap) {
-        if (pending_action_ != PendingRoomAction::None) return;
-        auto* inst = find_instance(id);
-        if (!inst || inst->destroyed || inst->deactivated) continue;
-        if (!inst->timeline_running || inst->timeline_index < 0) continue;
-        if (static_cast<usize>(inst->timeline_index) >= game_.timelines.size()) continue;
-        const auto& tl = game_.timelines[static_cast<usize>(inst->timeline_index)];
-        if (!tl.exists) continue;
-        const auto& chunks = program_.timeline_chunks[static_cast<usize>(inst->timeline_index)];
+    const usize count = instances_.size();
+    for (usize i = 0; i < count && i < instances_.size(); ++i) {
+        auto* inst = instances_[i].get();
+        if (inst->destroyed || inst->deactivated || !inst->timeline_running) continue;
+        const i32 index = inst->timeline_index;
+        if (index < 0 || static_cast<usize>(index) >= game_.timelines.size()) continue;
+        const auto& tl = game_.timelines[index];
+        if (!tl.exists || tl.moments.empty() || inst->timeline_speed == 0.0) continue;
+        const auto& chunks = program_.timeline_chunks[index];
 
-        const f64 prev_pos = inst->timeline_position;
-        const f64 next_pos = prev_pos + inst->timeline_speed;
-        const f64 lo = std::min(prev_pos, next_pos);
-        const f64 hi = std::max(prev_pos, next_pos);
-        const bool forward = inst->timeline_speed >= 0.0;
-
-        for (const auto& m : tl.moments) {
-            const f64 ms = static_cast<f64>(m.step);
-            const bool hit = forward ? (ms >= lo && ms < hi) : (ms > lo && ms <= hi);
-            if (!hit) continue;
-            if (auto it = chunks.find(m.step); it != chunks.end() && !it->second.code.empty()) {
-                auto r = vm_->execute(it->second, id, id);
-                if (!r) GM_LOG_WARN("runtime", "Timeline %d step %d error: %s", inst->timeline_index, m.step, r.error_message().c_str());
-                if (pending_action_ != PendingRoomAction::None) return;
-                inst = find_instance(id);
-                if (!inst || inst->destroyed) break;
-            }
+        const f64 prev = inst->timeline_position;
+        const f64 next = prev + inst->timeline_speed;
+        const bool forward = inst->timeline_speed > 0.0;
+        inst->timeline_position = next;
+        auto first = forward ? std::ranges::lower_bound(tl.moments, prev, {}, &TimelineMoment::step)
+                             : std::ranges::upper_bound(tl.moments, next, {}, &TimelineMoment::step);
+        auto end = forward ? std::ranges::lower_bound(tl.moments, next, {}, &TimelineMoment::step)
+                           : std::ranges::upper_bound(tl.moments, prev, {}, &TimelineMoment::step);
+        while (first < end && i < instances_.size() && pending_action_ == PendingRoomAction::None) {
+            const i32 step = (forward ? *first++ : *--end).step;
+            const auto it = chunks.find(step);
+            if (it == chunks.end() || it->second.code.empty()) continue;
+            // GM fetches the receiver from the current room slot for every moment.
+            const i32 handle = instances_[i]->handle;
+            const bool saved_rel = action_relative_;
+            action_relative_ = false;
+            event_stack_.push_back(EventFrame{100000, step, index, handle, handle, 0});
+            auto result = vm_->execute(it->second, handle, handle);
+            event_stack_.pop_back();
+            action_relative_ = saved_rel;
+            if (!result) GM_LOG_WARN("runtime", "Timeline %d step %d error: %s", index, step, result.error_message().c_str());
         }
-        if (inst && !inst->destroyed) {
-            inst->timeline_position = next_pos;
-            if (inst->timeline_loop && !tl.moments.empty()) {
-                const i32 max_step = tl.moments.back().step;
-                if (max_step > 0 && inst->timeline_position > static_cast<f64>(max_step)) {
-                    inst->timeline_position = 0.0;
-                }
-            }
+        if (inst->timeline_loop) {
+            const i32 last_step = tl.moments.back().step;
+            if (forward && inst->timeline_position > last_step) inst->timeline_position = 0;
+            if (!forward && inst->timeline_position < 0.0) inst->timeline_position = last_step;
         }
     }
 }
 
 void Runner::step_alarms() {
-    std::vector<i32> snap;
-    snapshot_active_instances(snap, next_create_counter_);
-    for (i32 id : snap) {
-        if (pending_action_ != PendingRoomAction::None) return;
-        auto* inst = find_instance(id);
-        if (!inst || inst->destroyed || inst->deactivated) continue;
-
-        for (i32 a = 0; a < 12; ++a) {
-            if (!object_has_event(inst->object_index, 2, a)) continue;
-            if (inst->alarm[static_cast<usize>(a)] >= 0) {
-                --inst->alarm[static_cast<usize>(a)];
-                if (inst->alarm[static_cast<usize>(a)] == 0) {
-                    perform_event_on_instance(id, -1, 2, a, id);
-                    if (pending_action_ != PendingRoomAction::None) return;
-                    inst = find_instance(id);
-                    if (!inst || inst->destroyed || inst->deactivated) break;
-                }
+    for (i32 alarm = 0; alarm < 12; ++alarm) {
+        for_event_instances(2, alarm, [&](Instance& inst) {
+            i32& ticks = inst.alarm[alarm];
+            if (ticks >= 0) --ticks;
+            if (ticks == 0 && pending_action_ == PendingRoomAction::None) {
+                execute_instance_event(inst.handle, inst.object_index, 2, alarm, inst.handle);
             }
-        }
+        }, /*continue_after_transition=*/true);
     }
 }
 
 void Runner::step_keyboard_events() {
-    const InputState& inp = window_.input();
-    bool any_down = false;
-    bool any_pressed = false;
-    bool any_released = false;
-    for (usize k = 2; k < 256; ++k) {
-        if (inp.key_down[k]) any_down = true;
-        if (inp.key_pressed[k]) any_pressed = true;
-        if (inp.key_released[k]) any_released = true;
-    }
-
-    auto dispatch_key_cat = [&](i32 cat, const std::array<bool, 256>& arr, bool any_flag) {
-        std::vector<i32> snap;
-        snapshot_active_instances(snap, next_create_counter_);
-        for (i32 id : snap) {
+    const InputState& input = window_.input();
+    for (const i32 cat : {5, 9, 10}) {
+        bool any = false;
+        auto dispatch = [&](i32 key) {
+            for_event_instances(cat, key, [&](Instance& inst) {
+                perform_event_on_instance(inst.handle, -1, cat, key, inst.handle);
+            });
+        };
+        for (i32 key = 8; key < 256; ++key) {
             if (pending_action_ != PendingRoomAction::None) return;
-            auto* inst = find_instance(id);
-            if (!inst || inst->destroyed || inst->deactivated) continue;
-
-            // Walk object + ancestors to collect distinct key sub-IDs handled by this object.
-            i32 cur_obj = inst->object_index;
-            std::vector<i32> keys;
-            for (int depth = 0; depth < 64 && object_exists(cur_obj); ++depth) {
-                const auto& ev_map = program_.object_event_chunks[static_cast<usize>(cur_obj)][static_cast<usize>(cat)];
-                for (const auto& [sub, _] : ev_map) {
-                    if (std::find(keys.begin(), keys.end(), sub) == keys.end()) {
-                        keys.push_back(sub);
-                    }
-                }
-                cur_obj = game_.objects[static_cast<usize>(cur_obj)].parent_index;
-            }
-            for (i32 key : keys) {
-                bool match = false;
-                if (key == 0) { // vk_nokey
-                    match = !any_flag;
-                } else if (key == 1) { // vk_anykey
-                    match = any_flag;
-                } else if (key >= 2 && key < 256) {
-                    match = arr[static_cast<usize>(key)];
-                }
-                if (match) {
-                    perform_event_on_instance(id, -1, cat, key, id);
-                    if (pending_action_ != PendingRoomAction::None) return;
-                    inst = find_instance(id);
-                    if (!inst || inst->destroyed || inst->deactivated) break;
-                }
+            const bool pressed = input.key_pressed[key];
+            const bool active = cat == 5 ? (input.key_down[key] || pressed)
+                              : cat == 9 ? pressed : input.key_released[key];
+            if (active) {
+                dispatch(key);
+                any = true;
             }
         }
-    };
-
-    dispatch_key_cat(5, inp.key_down, any_down);         // ev_keyboard
-    if (pending_action_ != PendingRoomAction::None) return;
-    dispatch_key_cat(9, inp.key_pressed, any_pressed);   // ev_keypress
-    if (pending_action_ != PendingRoomAction::None) return;
-    dispatch_key_cat(10, inp.key_released, any_released); // ev_keyrelease
+        dispatch(any ? 1 : 0); // vk_anykey / vk_nokey follow the individual keys.
+    }
 }
 
 void Runner::step_mouse_events() {
-    const InputState& inp = window_.input();
-    std::vector<i32> snap;
-    snapshot_active_instances(snap, next_create_counter_);
+    const InputState& input = window_.input();
+    const f64 previous_x = event_mouse_x_, previous_y = event_mouse_y_;
+    event_mouse_x_ = mouse_x_;
+    event_mouse_y_ = mouse_y_;
 
-    for (i32 id : snap) {
-        if (pending_action_ != PendingRoomAction::None) return;
-        auto* inst = find_instance(id);
-        if (!inst || inst->destroyed || inst->deactivated) continue;
-
-        const bool over = check_point_collision(*inst, mouse_x_, mouse_y_, true, game_, version_mode());
-        const bool entered = over && !inst->mouse_inside_prev;
-        const bool left = !over && inst->mouse_inside_prev;
-        inst->mouse_inside_prev = over;
-
-        auto fire_if = [&](i32 sub, bool cond) {
-            if (!cond || pending_action_ != PendingRoomAction::None) return;
-            if (inst && !inst->destroyed && !inst->deactivated && object_has_event(inst->object_index, 6, sub)) {
-                perform_event_on_instance(id, -1, 6, sub, id);
-                inst = find_instance(id);
+    auto dispatch = [&](i32 sub, bool global = false) {
+        for_event_instances(6, sub, [&](Instance& inst) {
+            if (!global) {
+                const bool over = check_point_collision(inst, event_mouse_x_, event_mouse_y_, true, game_, version_mode());
+                if (sub == 10 || sub == 11) {
+                    const bool was_over = check_point_collision(inst, previous_x, previous_y, true, game_, version_mode());
+                    if (was_over == over || over != (sub == 10)) return;
+                } else if (!over) {
+                    return;
+                }
             }
-        };
+            perform_event_on_instance(inst.handle, -1, 6, sub, inst.handle);
+        });
+    };
 
-        // Local mouse events (only when cursor is over instance)
-        if (over) {
-            fire_if(0, inp.mouse_down[1]);
-            fire_if(1, inp.mouse_down[2]);
-            fire_if(2, inp.mouse_down[3]);
-            fire_if(3, !inp.mouse_down[1] && !inp.mouse_down[2] && !inp.mouse_down[3]);
-            fire_if(4, inp.mouse_pressed[1]);
-            fire_if(5, inp.mouse_pressed[2]);
-            fire_if(6, inp.mouse_pressed[3]);
-            fire_if(7, inp.mouse_released[1]);
-            fire_if(8, inp.mouse_released[2]);
-            fire_if(9, inp.mouse_released[3]);
+    bool any = false;
+    for (i32 button = 1; button <= 3; ++button) {
+        if (input.mouse_down[button] || input.mouse_pressed[button]) {
+            dispatch(button - 1);
+            dispatch(button + 49, true);
+            any = true;
         }
-        fire_if(10, entered); // ev_mouse_enter
-        fire_if(11, left);    // ev_mouse_leave
-
-        // Global mouse events
-        fire_if(50, inp.mouse_down[1]);
-        fire_if(51, inp.mouse_down[2]);
-        fire_if(52, inp.mouse_down[3]);
-        fire_if(53, inp.mouse_pressed[1]);
-        fire_if(54, inp.mouse_pressed[2]);
-        fire_if(55, inp.mouse_pressed[3]);
-        fire_if(56, inp.mouse_released[1]);
-        fire_if(57, inp.mouse_released[2]);
-        fire_if(58, inp.mouse_released[3]);
-        fire_if(60, inp.mouse_wheel_up);
-        fire_if(61, inp.mouse_wheel_down);
     }
+    if (!any) dispatch(3);
+    for (i32 button = 1; button <= 3; ++button) {
+        if (input.mouse_pressed[button]) {
+            dispatch(button + 3);
+            dispatch(12, true);
+            dispatch(button + 52, true);
+        }
+    }
+    for (i32 button = 1; button <= 3; ++button) {
+        if (input.mouse_released[button]) {
+            dispatch(button + 6);
+            dispatch(13, true);
+            dispatch(button + 55, true);
+        }
+    }
+    dispatch(10);
+    dispatch(11);
+    if (input.mouse_wheel_up) dispatch(60, true);
+    if (input.mouse_wheel_down) dispatch(61, true);
+}
+
+// Path following and velocity are reapplied after a solid collision, without
+// applying gravity or friction a second time.
+static bool advance_instance_motion(Instance& inst, const GameData& game) {
+    if (inst.hspeed != 0.0 || inst.vspeed != 0.0) {
+        inst.x += inst.hspeed;
+        inst.y += inst.vspeed;
+        inst.mark_bbox_dirty();
+    }
+
+    if (inst.path_index >= 0 && static_cast<usize>(inst.path_index) < game.paths.size()) {
+        const auto& path = game.paths[static_cast<usize>(inst.path_index)];
+        if (path.exists && !path.points.empty() && inst.path_speed != 0.0) {
+            const f64 len = compute_path_length(path);
+            if (len > 1e-6) {
+                const f64 sp_step = inst.path_speed / (len * std::max(1e-6, std::fabs(inst.path_scale)));
+                inst.path_position += sp_step;
+                bool reached_end = false;
+                if (inst.path_position >= 1.0) {
+                    reached_end = true;
+                    switch (inst.path_endaction) {
+                        case 0: // stop
+                            inst.path_position = 1.0;
+                            inst.path_index = -1;
+                            inst.path_speed = 0.0;
+                            break;
+                        case 1: // restart
+                            inst.path_position -= 1.0;
+                            break;
+                        case 2: // continue from current
+                            inst.path_position -= 1.0;
+                            inst.path_xstart = inst.x;
+                            inst.path_ystart = inst.y;
+                            break;
+                        case 3: // reverse
+                            inst.path_position = 2.0 - inst.path_position;
+                            inst.path_speed = -inst.path_speed;
+                            break;
+                        default:
+                            inst.path_position = 1.0;
+                            inst.path_index = -1;
+                            break;
+                    }
+                } else if (inst.path_position <= 0.0) {
+                    reached_end = true;
+                    switch (inst.path_endaction) {
+                        case 0:
+                            inst.path_position = 0.0;
+                            inst.path_index = -1;
+                            inst.path_speed = 0.0;
+                            break;
+                        case 1:
+                            inst.path_position += 1.0;
+                            break;
+                        case 2:
+                            inst.path_position += 1.0;
+                            inst.path_xstart = inst.x;
+                            inst.path_ystart = inst.y;
+                            break;
+                        case 3:
+                            inst.path_position = -inst.path_position;
+                            inst.path_speed = -inst.path_speed;
+                            break;
+                        default:
+                            inst.path_position = 0.0;
+                            inst.path_index = -1;
+                            break;
+                    }
+                }
+
+                f64 px = 0.0, py = 0.0;
+                evaluate_path_point(path, std::clamp(inst.path_position, 0.0, 1.0), px, py);
+                if (inst.path_absolute) {
+                    inst.x = px;
+                    inst.y = py;
+                } else {
+                    const f64 dx = (px - path.points[0].x) * inst.path_scale;
+                    const f64 dy = (py - path.points[0].y) * inst.path_scale;
+                    const f64 rad = deg_to_rad(inst.path_orientation);
+                    const f64 c = std::cos(rad);
+                    const f64 s = std::sin(rad);
+                    inst.x = inst.path_xstart + dx * c + dy * s;
+                    inst.y = inst.path_ystart - dx * s + dy * c;
+                }
+                inst.mark_bbox_dirty();
+                return reached_end;
+            }
+        }
+    }
+    return false;
 }
 
 void Runner::step_physics_and_paths() {
-    std::vector<i32> end_of_path_ids;
-
-    for (auto& up : instances_) {
-        if (up->destroyed || up->deactivated) continue;
-        Instance& inst = *up;
+    const usize count = instances_.size();
+    for (usize i = 0; i < count && i < instances_.size(); ++i) {
+        Instance& inst = *instances_[i];
+        if (inst.destroyed) continue;
 
         // 1. Friction
         if (inst.friction != 0.0 && inst.speed != 0.0) {
@@ -987,292 +1070,118 @@ void Runner::step_physics_and_paths() {
             inst.sync_polar_from_hv();
         }
 
-        // 3. Motion integration
-        if (inst.hspeed != 0.0 || inst.vspeed != 0.0) {
-            inst.x += inst.hspeed;
-            inst.y += inst.vspeed;
-            inst.mark_bbox_dirty();
+        if (advance_instance_motion(inst, game_)) {
+            perform_event_on_instance(inst.handle, -1, 7, 8, inst.handle);
+            if (pending_action_ != PendingRoomAction::None) return;
         }
-
-        // 4. Path following
-        if (inst.path_index >= 0 && static_cast<usize>(inst.path_index) < game_.paths.size()) {
-            const auto& path = game_.paths[static_cast<usize>(inst.path_index)];
-            if (path.exists && !path.points.empty() && inst.path_speed != 0.0) {
-                const f64 len = compute_path_length(path);
-                if (len > 1e-6) {
-                    const f64 sp_step = inst.path_speed / (len * std::max(1e-6, std::fabs(inst.path_scale)));
-                    inst.path_position += sp_step;
-                    bool reached_end = false;
-                    if (inst.path_position >= 1.0) {
-                        reached_end = true;
-                        switch (inst.path_endaction) {
-                            case 0: // stop
-                                inst.path_position = 1.0;
-                                inst.path_index = -1;
-                                inst.path_speed = 0.0;
-                                break;
-                            case 1: // restart
-                                inst.path_position -= 1.0;
-                                break;
-                            case 2: // continue from current
-                                inst.path_position -= 1.0;
-                                inst.path_xstart = inst.x;
-                                inst.path_ystart = inst.y;
-                                break;
-                            case 3: // reverse
-                                inst.path_position = 2.0 - inst.path_position;
-                                inst.path_speed = -inst.path_speed;
-                                break;
-                            default:
-                                inst.path_position = 1.0;
-                                inst.path_index = -1;
-                                break;
-                        }
-                    } else if (inst.path_position <= 0.0) {
-                        reached_end = true;
-                        switch (inst.path_endaction) {
-                            case 0:
-                                inst.path_position = 0.0;
-                                inst.path_index = -1;
-                                inst.path_speed = 0.0;
-                                break;
-                            case 1:
-                                inst.path_position += 1.0;
-                                break;
-                            case 2:
-                                inst.path_position += 1.0;
-                                inst.path_xstart = inst.x;
-                                inst.path_ystart = inst.y;
-                                break;
-                            case 3:
-                                inst.path_position = -inst.path_position;
-                                inst.path_speed = -inst.path_speed;
-                                break;
-                            default:
-                                inst.path_position = 0.0;
-                                inst.path_index = -1;
-                                break;
-                        }
-                    }
-
-                    f64 px = 0.0, py = 0.0;
-                    evaluate_path_point(path, std::clamp(inst.path_position, 0.0, 1.0), px, py);
-                    if (inst.path_absolute) {
-                        inst.x = px;
-                        inst.y = py;
-                    } else {
-                        const f64 dx = (px - path.points[0].x) * inst.path_scale;
-                        const f64 dy = (py - path.points[0].y) * inst.path_scale;
-                        const f64 rad = deg_to_rad(inst.path_orientation);
-                        const f64 c = std::cos(rad);
-                        const f64 s = std::sin(rad);
-                        inst.x = inst.path_xstart + dx * c + dy * s;
-                        inst.y = inst.path_ystart - dx * s + dy * c;
-                    }
-                    inst.mark_bbox_dirty();
-                    if (reached_end) {
-                        end_of_path_ids.push_back(inst.id);
-                    }
-                }
-            }
-        }
-    }
-
-    for (i32 id : end_of_path_ids) {
-        if (pending_action_ != PendingRoomAction::None) return;
-        perform_event_on_instance(id, -1, 7, 8, id); // ev_other, ev_end_of_path
     }
 }
 
 void Runner::step_boundary_events() {
-    std::vector<i32> snap;
-    snapshot_active_instances(snap, next_create_counter_);
-
-    for (i32 id : snap) {
-        if (pending_action_ != PendingRoomAction::None) return;
-        auto* inst = find_instance(id);
-        if (!inst || inst->destroyed || inst->deactivated) continue;
-
-        ensure_instance_bbox(*inst, game_);
-        const bool outside = (inst->bbox_right < 0 || inst->bbox_left > room_width_ ||
-                              inst->bbox_bottom < 0 || inst->bbox_top > room_height_);
-        const bool intersect = !outside &&
-                               (inst->bbox_left < 0 || inst->bbox_right > room_width_ ||
-                                inst->bbox_top < 0 || inst->bbox_bottom > room_height_);
-
-        if (outside) {
-            perform_event_on_instance(id, -1, 7, 0, id); // ev_outside
-            if (pending_action_ != PendingRoomAction::None) return;
-            inst = find_instance(id);
-            if (!inst || inst->destroyed || inst->deactivated) continue;
-        }
-        if (intersect) {
-            perform_event_on_instance(id, -1, 7, 1, id); // ev_boundary
-            if (pending_action_ != PendingRoomAction::None) return;
-            inst = find_instance(id);
-            if (!inst || inst->destroyed || inst->deactivated) continue;
-        }
-
-        // View boundary/outside events (40..47 outside view, 50..57 boundary view)
-        if (view_enabled_) {
-            for (i32 v = 0; v < 8; ++v) {
-                const auto& vw = views_[static_cast<usize>(v)];
-                if (!vw.visible) continue;
-                const bool has_out = object_has_event(inst->object_index, 7, 40 + v);
-                const bool has_bnd = object_has_event(inst->object_index, 7, 50 + v);
-                if (!has_out && !has_bnd) continue;
-
-                ensure_instance_bbox(*inst, game_);
-                const bool v_out = (static_cast<f64>(inst->bbox_right) < vw.xview ||
-                                    static_cast<f64>(inst->bbox_left) > vw.xview + vw.wview ||
-                                    static_cast<f64>(inst->bbox_bottom) < vw.yview ||
-                                    static_cast<f64>(inst->bbox_top) > vw.yview + vw.hview);
-                const bool v_bnd = !v_out &&
-                                   (static_cast<f64>(inst->bbox_left) < vw.xview ||
-                                    static_cast<f64>(inst->bbox_right) > vw.xview + vw.wview ||
-                                    static_cast<f64>(inst->bbox_top) < vw.yview ||
-                                    static_cast<f64>(inst->bbox_bottom) > vw.yview + vw.hview);
-                if (has_out && v_out) {
-                    perform_event_on_instance(id, -1, 7, 40 + v, id);
-                    if (pending_action_ != PendingRoomAction::None) return;
-                    inst = find_instance(id);
-                    if (!inst || inst->destroyed || inst->deactivated) break;
-                }
-                if (has_bnd && v_bnd) {
-                    perform_event_on_instance(id, -1, 7, 50 + v, id);
-                    if (pending_action_ != PendingRoomAction::None) return;
-                    inst = find_instance(id);
-                    if (!inst || inst->destroyed || inst->deactivated) break;
-                }
+    // Outside Room, Boundary, all Outside View events, then all Boundary View events.
+    // Recheck both the bounds and the instance for each event as handlers can move either.
+    auto dispatch = [&](i32 sub, bool outside, const ActiveView* view) {
+        for_event_instances(7, sub, [&](Instance& inst) {
+            const f64 left = view ? view->xview : 0.0;
+            const f64 top = view ? view->yview : 0.0;
+            const f64 right = left + (view ? view->wview : room_width_);
+            const f64 bottom = top + (view ? view->hview : room_height_);
+            bool hit;
+            if (instance_mask_sprite(inst, game_)) {
+                ensure_instance_bbox(inst, game_);
+                hit = outside ? (inst.bbox_right < left || inst.bbox_left > right ||
+                                 inst.bbox_bottom < top || inst.bbox_top > bottom)
+                              : (inst.bbox_left < left || inst.bbox_right > right ||
+                                 inst.bbox_top < top || inst.bbox_bottom > bottom);
+            } else {
+                hit = inst.x < left || inst.x > right || inst.y < top || inst.y > bottom;
             }
+            if (hit) perform_event_on_instance(inst.handle, -1, 7, sub, inst.handle);
+        });
+    };
+
+    dispatch(0, true, nullptr);
+    dispatch(1, false, nullptr);
+    for (const i32 base : {40, 50}) {
+        for (i32 v = 0; v < 8; ++v) {
+            if (pending_action_ != PendingRoomAction::None) return;
+            if (view_enabled_ && views_[v].visible) dispatch(base + v, base == 40, &views_[v]);
         }
     }
 }
 
 void Runner::step_collisions() {
-    std::vector<i32> snap;
-    snapshot_active_instances(snap, next_create_counter_);
-
-    for (i32 id_a : snap) {
-        if (pending_action_ != PendingRoomAction::None) return;
-        auto* a = find_instance(id_a);
-        if (!a || a->destroyed || a->deactivated) continue;
-
-        // Collect all collision target object IDs defined on a's object or any ancestor.
-        std::vector<i32> targets;
-        i32 cur_obj = a->object_index;
-        for (int d = 0; d < 64 && object_exists(cur_obj); ++d) {
-            const auto& col_map = program_.object_event_chunks[static_cast<usize>(cur_obj)][4];
-            for (const auto& [sub, _] : col_map) {
-                if (std::find(targets.begin(), targets.end(), sub) == targets.end()) {
-                    targets.push_back(sub);
-                }
-            }
-            cur_obj = game_.objects[static_cast<usize>(cur_obj)].parent_index;
+    auto rollback = [](Instance& inst) {
+        inst.x = inst.xprevious;
+        inst.y = inst.yprevious;
+        inst.path_position = inst.path_positionprevious;
+        inst.mark_bbox_dirty();
+    };
+    const usize pair_count = event_tables().collision_pairs.size();
+    for (usize p = 0; p < pair_count; ++p) {
+        const auto& pairs = event_tables().collision_pairs;
+        if (p >= pairs.size()) break;
+        const auto [left, right] = pairs[p];
+        // A game can ship millions of pairs. An empty left group cannot run
+        // a callback that populates it before the next distinct left object.
+        if (!object_exists(left) || object_instances(left, false).empty()) {
+            const usize end = std::min(pair_count, pairs.size());
+            while (p + 1 < end && pairs[p + 1].first == left) ++p;
+            continue;
         }
-        if (targets.empty()) continue;
+        if (!object_exists(right) || object_instances(right, false).empty()) continue;
+        for_object_instances(left, 0, [&](Instance& a, usize i) {
+            // The right-hand count is sampled for each A. Its callback can
+            // create an instance that will collide with the next A this frame.
+            for_object_instances(right, left == right ? i + 1 : 0, [&](Instance& b, usize) {
+                if (!check_instance_collision(a, a.x, a.y, b, game_, version_mode())) return;
 
-        for (i32 target_obj : targets) {
-            if (pending_action_ != PendingRoomAction::None) return;
-            a = find_instance(id_a);
-            if (!a || a->destroyed || a->deactivated) break;
-
-            for (i32 id_b : snap) {
-                if (id_b == id_a) continue;
-                auto* b = find_instance(id_b);
-                if (!b || b->destroyed || b->deactivated) continue;
-                if (!object_matches(b->object_index, target_obj)) continue;
-
-                a = find_instance(id_a);
-                if (!a || a->destroyed || a->deactivated) break;
-
-                if (!check_instance_collision(*a, a->x, a->y, *b, game_, version_mode())) {
-                    continue;
+                if (a.solid || b.solid) {
+                    rollback(a);
+                    rollback(b);
                 }
-
-                const bool solid_pair = a->solid || b->solid;
-                if (solid_pair) {
-                    // Exact GM8 solid collision rollback -> event -> retry (hspeed, vspeed) -> rollback if still colliding.
-                    a->x = a->xprevious;
-                    a->y = a->yprevious;
-                    a->mark_bbox_dirty();
-                    const f64 bx_saved = b->x;
-                    const f64 by_saved = b->y;
-                    b->x = b->xprevious;
-                    b->y = b->yprevious;
-                    b->mark_bbox_dirty();
-
-                    perform_event_on_instance(id_a, -1, 4, target_obj, id_b);
-                    if (pending_action_ != PendingRoomAction::None) return;
-
-                    a = find_instance(id_a);
-                    b = find_instance(id_b);
-                    if (b && !b->destroyed) {
-                        // Restore b's position if b didn't get moved by the event.
-                        if (b->x == b->xprevious && b->y == b->yprevious) {
-                            b->x = bx_saved;
-                            b->y = by_saved;
-                            b->mark_bbox_dirty();
-                        }
-                    }
-                    if (!a || a->destroyed || a->deactivated) break;
-
-                    // Post-event slide retry along updated (hspeed, vspeed)
-                    if (a->hspeed != 0.0 || a->vspeed != 0.0) {
-                        const f64 pre_x = a->x;
-                        const f64 pre_y = a->y;
-                        const f64 try_x = pre_x + a->hspeed;
-                        const f64 try_y = pre_y + a->vspeed;
-                        const bool still_collides =
-                            (b && !b->destroyed && !b->deactivated &&
-                             check_instance_collision(*a, try_x, try_y, *b, game_, version_mode()));
-                        if (!still_collides) {
-                            a->x = try_x;
-                            a->y = try_y;
-                            a->mark_bbox_dirty();
-                        }
-                    }
-                } else {
-                    perform_event_on_instance(id_a, -1, 4, target_obj, id_b);
-                    if (pending_action_ != PendingRoomAction::None) return;
+                if (pending_action_ == PendingRoomAction::None) {
+                    execute_instance_event(a.handle, a.object_index, 4, b.object_index, b.handle);
                 }
-            }
-        }
+                // Both events belong to this contact, even when the first
+                // handler moves, destroys, or changes one of the participants.
+                if (pending_action_ == PendingRoomAction::None) {
+                    execute_instance_event(b.handle, b.object_index, 4, a.object_index, a.handle);
+                }
+                if (a.solid || b.solid) {
+                    advance_instance_motion(a, game_);
+                    advance_instance_motion(b, game_);
+                    if (check_instance_collision(a, a.x, a.y, b, game_, version_mode())) {
+                        rollback(a);
+                        rollback(b);
+                    }
+                }
+            });
+        });
     }
 }
 
 void Runner::step_animations() {
-    std::vector<i32> snap;
-    snapshot_active_instances(snap, next_create_counter_);
-
-    for (i32 id : snap) {
+    const usize instance_count = instances_.size();
+    for (usize i = 0; i < instance_count && i < instances_.size(); ++i) {
         if (pending_action_ != PendingRoomAction::None) return;
-        auto* inst = find_instance(id);
-        if (!inst || inst->destroyed || inst->deactivated) continue;
-        if (inst->sprite_index < 0 || static_cast<usize>(inst->sprite_index) >= game_.sprites.size()) continue;
-        const auto& sp = game_.sprites[static_cast<usize>(inst->sprite_index)];
-        if (!sp.exists || sp.images.empty()) continue;
-
-        const f64 count = static_cast<f64>(sp.images.size());
+        auto* inst = instances_[i].get();
+        if (inst->destroyed) continue;
+        const auto* sprite = instance_sprite(*inst, game_);
+        const f64 count = sprite ? static_cast<f64>(sprite->images.size()) : 0.0;
         const f64 prev_idx = inst->image_index;
         inst->image_index += inst->image_speed;
 
-        bool ended = false;
-        if (inst->image_index >= count) {
-            inst->image_index = std::fmod(inst->image_index, count);
-            if (inst->image_index < 0.0) inst->image_index += count;
-            ended = true;
-        } else if (inst->image_index < 0.0) {
-            inst->image_index = std::fmod(inst->image_index, count);
-            if (inst->image_index < 0.0) inst->image_index += count;
-            ended = true;
-        }
+        // GM subtracts image_number once, even when a sprite-less instance has zero frames.
+        const bool ended = inst->image_index >= count;
+        if (ended) inst->image_index -= count;
 
-        if (sp.separate_masks && static_cast<i32>(std::floor(prev_idx)) != static_cast<i32>(std::floor(inst->image_index))) {
-            inst->mark_bbox_dirty();
+        if (std::floor(prev_idx) != std::floor(inst->image_index)) {
+            const auto* mask = instance_mask_sprite(*inst, game_);
+            if (mask && mask->separate_masks) inst->mark_bbox_dirty();
         }
         if (ended) {
-            perform_event_on_instance(id, -1, 7, 7, id); // ev_other, ev_animation_end
+            perform_event_on_instance(inst->handle, -1, 7, 7, inst->handle); // ev_other, ev_animation_end
         }
     }
 }
@@ -1362,13 +1271,7 @@ void Runner::update_view_following() {
     for (auto& v : views_) {
         if (!v.visible || v.follow_object < 0) continue;
 
-        const Instance* target = nullptr;
-        for (const auto& up : instances_) {
-            if (!up->destroyed && !up->deactivated && object_matches(up->object_index, v.follow_object)) {
-                target = up.get();
-                break;
-            }
-        }
+        const Instance* target = find_instance(find_matching_instance(v.follow_object, [](const Instance&) { return true; }));
         if (!target) continue;
 
         const f64 hb = std::min(static_cast<f64>(v.hborder), v.wview * 0.5);
@@ -1410,6 +1313,7 @@ void Runner::render_current_frame() {
 
     i32 vx = 0, vy = 0, vw = 1, vh = 1, cw = 1, ch = 1;
     compute_canvas_viewport(vx, vy, vw, vh, cw, ch);
+    renderer_.set_screen_region(dw, dh, cw, ch, ViewportRect{vx, vy, vw, vh});
 
     if (!view_enabled_) {
         view_current_ = 0;
@@ -1438,6 +1342,8 @@ void Runner::render_current_frame() {
 
     gfx_.set_scissor(false);
     renderer_.end_frame();
+    // GM publishes the complete caption after all views' Draw events have finished.
+    update_window_caption();
 }
 
 void Runner::render_view(i32 /*view_idx*/, f32 vx, f32 vy, f32 vw, f32 vh, f32 angle, i32 px, i32 py, i32 pw, i32 ph) {
@@ -1492,7 +1398,7 @@ void Runner::render_view(i32 /*view_idx*/, f32 vx, f32 vy, f32 vw, f32 vh, f32 a
     for (usize i = 0; i < instances_.size(); ++i) {
         const auto& up = instances_[i];
         if (up->destroyed || up->deactivated || !up->visible) continue;
-        items.push_back(RenderItem{up->depth, 1, i, up->id});
+        items.push_back(RenderItem{up->depth, 1, i, up->handle});
     }
     const auto ps_list = particles_.auto_draw_systems();
     for (usize i = 0; i < ps_list.size(); ++i) {
@@ -1519,12 +1425,7 @@ void Runner::render_view(i32 /*view_idx*/, f32 vx, f32 vy, f32 vw, f32 vh, f32 a
             const auto* inst = find_instance(item.ref_id);
             if (!inst || inst->destroyed || inst->deactivated || !inst->visible) continue;
             if (object_has_event(inst->object_index, 8, 0)) {
-                perform_event_on_instance(inst->id, -1, 8, 0, inst->id);
-                // Re-bind view projection in case a Draw event temporarily switched surface target.
-                if (renderer_.current_surface_target() < 0) {
-                    renderer_.set_projection_ortho(vx, vy, vw, vh, angle, px, py, pw, ph);
-                    gfx_.set_scissor(true, ViewportRect{px, gl_y, pw, ph});
-                }
+                perform_event_on_instance(inst->handle, -1, 8, 0, inst->handle);
             } else {
                 draw_instance_default(*inst);
             }
@@ -1581,19 +1482,17 @@ void Runner::draw_instance_default(const Instance& inst) {
 
 void Runner::update_window_caption() {
     std::string cap = room_caption_;
-    if (cap.empty() && room_exists(current_room_)) {
-        cap = game_.rooms[static_cast<usize>(current_room_)].name;
+    const i32 score = static_cast<i32>(delphi_round(score_));
+    if (show_score_ && (show_score_explicit_ || score > 0)) {
+        cap += " " + caption_score_ + std::to_string(score);
     }
-    if (show_score_ && score_ != 0.0) {
-        cap += "  " + caption_score_ + std::to_string(delphi_round(score_));
-    }
-    if (show_lives_ && lives_ >= 0.0) {
-        cap += "  " + caption_lives_ + std::to_string(delphi_round(lives_));
+    if (show_lives_) {
+        cap += " " + caption_lives_ + std::to_string(static_cast<i32>(delphi_round(lives_)));
     }
     if (show_health_) {
-        cap += "  " + caption_health_ + std::to_string(delphi_round(health_));
+        cap += " " + caption_health_ + std::to_string(delphi_round(health_));
     }
-    window_.set_title(cap);
+    window_.set_title(codepage_to_utf8(cap, game_.meta.string_codepage()));
 }
 
 // ---------------------------------------------------------------------------
@@ -1610,6 +1509,64 @@ const Instance* Runner::find_instance(i32 id) const noexcept {
     return it != inst_by_id_.end() ? it->second : nullptr;
 }
 
+i32 Runner::instance_handle(i32 id) const noexcept {
+    if (id < 0) return id;
+    if (const auto* inst = find_instance(id)) return inst->handle;
+    return id;
+}
+
+const std::vector<Instance*>& Runner::object_instances(i32 object, bool include_descendants) const noexcept {
+    static const std::vector<Instance*> empty;
+    if (object < 0 || static_cast<usize>(object) >= object_instances_.size()) return empty;
+    const auto& group = object_instances_[static_cast<usize>(object)];
+    return include_descendants ? group.recursive : group.exact;
+}
+
+void Runner::index_instance(Instance& inst) {
+    if (object_instances_.size() < game_.objects.size()) object_instances_.resize(game_.objects.size());
+    i32 object = inst.object_index;
+    if (!object_exists(object)) return;
+    object_instances_[static_cast<usize>(object)].exact.push_back(&inst);
+    while (object_exists(object)) {
+        auto& group = object_instances_[static_cast<usize>(object)].recursive;
+        if (!group.empty() && group.back() == &inst) break; // Invalid cyclic parent chain.
+        group.push_back(&inst);
+        object = game_.objects[static_cast<usize>(object)].parent_index;
+    }
+}
+
+void Runner::rebuild_object_instances() {
+    for (auto& group : object_instances_) {
+        group.exact.clear();
+        group.recursive.clear();
+    }
+    for (const auto& inst : instances_) index_instance(*inst);
+}
+
+void Runner::add_room_instance(std::unique_ptr<Instance> inst) {
+    do {
+        inst->handle = next_handle_;
+        next_handle_ = next_handle_ == std::numeric_limits<i32>::min() ? -8 : next_handle_ - 1;
+    } while (inst_by_id_.contains(inst->handle));
+    inst_by_id_[inst->id] = inst.get();
+    inst_by_id_[inst->handle] = inst.get();
+    if (inst->deactivated) {
+        inactive_instances_.push_back(std::move(inst));
+    } else {
+        index_instance(*inst);
+        instances_.push_back(std::move(inst));
+    }
+}
+
+void Runner::set_object_parent(i32 object, i32 parent) {
+    if (!object_exists(object)) return;
+    if (parent >= 0 && (!object_exists(parent) || parent == object || object_is_ancestor(parent, object))) return;
+    game_.objects[static_cast<usize>(object)].parent_index = parent < 0 ? -1 : parent;
+    // GM rebuilds the event tables immediately. Existing instances keep their
+    // recursive memberships until the next room-list rebuild.
+    invalidate_event_tables();
+}
+
 bool Runner::object_exists(i32 obj_idx) const noexcept {
     return obj_idx >= 0 && static_cast<usize>(obj_idx) < game_.objects.size() &&
            game_.objects[static_cast<usize>(obj_idx)].exists;
@@ -1618,7 +1575,7 @@ bool Runner::object_exists(i32 obj_idx) const noexcept {
 bool Runner::object_is_ancestor(i32 child_obj, i32 parent_obj) const noexcept {
     if (!object_exists(child_obj) || !object_exists(parent_obj)) return false;
     i32 cur = game_.objects[static_cast<usize>(child_obj)].parent_index;
-    for (int guard = 0; guard < 64 && object_exists(cur); ++guard) {
+    for (usize depth = 0; depth < game_.objects.size() && object_exists(cur); ++depth) {
         if (cur == parent_obj) return true;
         cur = game_.objects[static_cast<usize>(cur)].parent_index;
     }
@@ -1654,12 +1611,10 @@ i32 Runner::create_instance(f64 x, f64 y, i32 obj_idx, bool run_create, i32 forc
     inst->depth = static_cast<f64>(obj.depth);
     inst->sprite_index = obj.sprite_index;
     inst->mask_index = obj.mask_index;
-    inst->create_counter = next_create_counter_++;
     inst->mark_bbox_dirty();
 
     const i32 id = inst->id;
-    inst_by_id_[id] = inst.get();
-    instances_.push_back(std::move(inst));
+    add_room_instance(std::move(inst));
 
     if (run_create) {
         perform_event_on_instance(id, -1, 0, 0, id); // ev_create
@@ -1671,35 +1626,34 @@ void Runner::destroy_instance(i32 inst_id, bool perform_event) {
     auto* inst = find_instance(inst_id);
     if (!inst || inst->destroyed) return;
     if (perform_event) {
-        perform_event_on_instance(inst_id, -1, 1, 0, inst_id); // ev_destroy
+        perform_event_on_instance(inst->handle, -1, 1, 0, inst->handle); // ev_destroy
     }
-    inst = find_instance(inst_id);
-    if (inst) {
-        inst->destroyed = true;
-    }
+    inst->destroyed = true;
 }
 
 void Runner::change_instance(i32 inst_id, i32 new_obj_idx, bool perform_events) {
     auto* inst = find_instance(inst_id);
     if (!inst || inst->destroyed || !object_exists(new_obj_idx)) return;
     if (perform_events) {
-        perform_event_on_instance(inst_id, -1, 1, 0, inst_id); // ev_destroy
-        inst = find_instance(inst_id);
-        if (!inst || inst->destroyed) return;
+        perform_event_on_instance(inst->handle, -1, 1, 0, inst->handle);
     }
+    // Native AddInstance appends a new slot. Assign copies the public ID; the
+    // current GML frame and its other still refer to the old, marked slot.
     const auto& obj = game_.objects[static_cast<usize>(new_obj_idx)];
-    inst->object_index = new_obj_idx;
-    inst->sprite_index = obj.sprite_index;
-    inst->solid = obj.solid;
-    inst->visible = obj.visible;
-    inst->persistent = obj.persistent;
-    inst->depth = static_cast<f64>(obj.depth);
-    inst->mask_index = obj.mask_index;
-    inst->mark_bbox_dirty();
-
-    if (perform_events) {
-        perform_event_on_instance(inst_id, -1, 0, 0, inst_id); // ev_create
-    }
+    auto changed = std::make_unique<Instance>(*inst);
+    changed->object_index = new_obj_idx;
+    changed->sprite_index = obj.sprite_index;
+    changed->solid = obj.solid;
+    changed->visible = obj.visible;
+    changed->persistent = obj.persistent;
+    changed->depth = static_cast<f64>(obj.depth);
+    changed->mask_index = obj.mask_index;
+    changed->mark_bbox_dirty();
+    ++next_instance_id_;
+    const i32 id = inst->id;
+    inst->destroyed = true;
+    add_room_instance(std::move(changed));
+    if (perform_events) perform_event_on_instance(id, -1, 0, 0, id);
 }
 
 i32 Runner::copy_instance(i32 src_id, bool perform_event) {
@@ -1707,12 +1661,10 @@ i32 Runner::copy_instance(i32 src_id, bool perform_event) {
     if (!src || src->destroyed) return -4;
     auto copy = std::make_unique<Instance>(*src);
     copy->id = next_instance_id_++;
-    copy->create_counter = next_create_counter_++;
     copy->mark_bbox_dirty();
 
     const i32 new_id = copy->id;
-    inst_by_id_[new_id] = copy.get();
-    instances_.push_back(std::move(copy));
+    add_room_instance(std::move(copy));
 
     if (perform_event) {
         perform_event_on_instance(new_id, -1, 0, 0, new_id);
@@ -1721,118 +1673,132 @@ i32 Runner::copy_instance(i32 src_id, bool perform_event) {
 }
 
 void Runner::remove_marked_instances() {
-    bool any = false;
-    for (const auto& up : instances_) {
-        if (up->destroyed) {
-            any = true;
-            break;
-        }
-    }
-    if (!any) return;
+    auto marked = [this](const auto& inst) {
+        if (!inst->destroyed) return false;
+        inst_by_id_.erase(inst->handle);
+        if (find_instance(inst->id) == inst.get()) inst_by_id_.erase(inst->id);
+        return true;
+    };
+    if (std::erase_if(instances_, marked) != 0) rebuild_object_instances();
+}
 
-    std::vector<std::unique_ptr<Instance>> kept;
-    kept.reserve(instances_.size());
-    for (auto& up : instances_) {
-        if (up->destroyed) {
-            inst_by_id_.erase(up->id);
-        } else {
-            kept.push_back(std::move(up));
-        }
+void Runner::move_deactivated(bool deactivate) {
+    auto& from = deactivate ? instances_ : inactive_instances_;
+    auto& to = deactivate ? inactive_instances_ : instances_;
+    const usize previous_size = to.size();
+    for (auto& inst : from) {
+        if (inst->deactivated == deactivate) to.push_back(std::move(inst));
     }
-    instances_ = std::move(kept);
+    if (to.size() != previous_size) {
+        std::erase(from, nullptr);
+        rebuild_object_instances();
+    }
 }
 
 void Runner::deactivate_all(bool notme, i32 self_id) {
-    for (auto& up : instances_) {
-        if (up->destroyed) continue;
-        if (notme && up->id == self_id) continue;
-        up->deactivated = true;
+    const auto* self = find_instance(self_id);
+    for (auto& inst : instances_) {
+        if (!notme || inst.get() != self) inst->deactivated = true;
     }
+    move_deactivated(true);
 }
 
-void Runner::deactivate_object(i32 target, i32 /*self_id*/) {
-    if (target >= 100000) {
-        if (auto* inst = find_instance(target)) inst->deactivated = true;
+void Runner::deactivate_object(i32 target, i32 self_id, i32 other_id) {
+    if (target == -3) {
+        deactivate_all(false, self_id);
         return;
     }
-    for (auto& up : instances_) {
-        if (up->destroyed) continue;
-        if (object_matches(up->object_index, target)) up->deactivated = true;
+    if (target == -1 || target == -2) {
+        if (auto* inst = find_instance(target == -1 ? self_id : other_id)) inst->deactivated = true;
+    } else if (target >= 100000) {
+        // During instance_change several room slots can carry the same public ID.
+        for (auto& inst : instances_) {
+            if (inst->id == target) inst->deactivated = true;
+        }
+    } else {
+        for (auto* inst : object_instances(target, true)) inst->deactivated = true;
     }
+    move_deactivated(true);
 }
 
 void Runner::deactivate_region(f64 left, f64 top, f64 w, f64 h, bool inside, bool notme, i32 self_id) {
-    const f64 right = left + w;
-    const f64 bottom = top + h;
-    for (auto& up : instances_) {
-        if (up->destroyed) continue;
-        if (notme && up->id == self_id) continue;
-        ensure_instance_bbox(*up, game_);
-        const bool in_box = !(static_cast<f64>(up->bbox_right) < left ||
-                              static_cast<f64>(up->bbox_left) > right ||
-                              static_cast<f64>(up->bbox_bottom) < top ||
-                              static_cast<f64>(up->bbox_top) > bottom);
-        if (in_box == inside) {
-            up->deactivated = true;
-        }
+    const auto* self = find_instance(self_id);
+    for (auto& inst : instances_) {
+        if (notme && inst.get() == self) continue;
+        ensure_instance_bbox(*inst, game_);
+        const bool overlaps = inst->bbox_right >= left && inst->bbox_left < left + w &&
+                              inst->bbox_bottom >= top && inst->bbox_top < top + h;
+        if (overlaps == inside) inst->deactivated = true;
     }
+    move_deactivated(true);
 }
 
 void Runner::activate_all() {
-    for (auto& up : instances_) {
-        if (!up->destroyed) up->deactivated = false;
-    }
+    for (auto& inst : inactive_instances_) inst->deactivated = false;
+    move_deactivated(false);
 }
 
-void Runner::activate_object(i32 target) {
-    if (target >= 100000) {
-        if (auto* inst = find_instance(target); inst && !inst->destroyed) inst->deactivated = false;
+void Runner::activate_object(i32 target, i32 self_id, i32 other_id) {
+    if (target == -3) {
+        activate_all();
         return;
     }
-    for (auto& up : instances_) {
-        if (up->destroyed) continue;
-        if (object_matches(up->object_index, target)) up->deactivated = false;
+    if (target == -1 || target == -2) {
+        if (auto* inst = find_instance(target == -1 ? self_id : other_id)) inst->deactivated = false;
+    } else if (target >= 100000) {
+        for (auto& inst : inactive_instances_) {
+            if (inst->id == target) inst->deactivated = false;
+        }
+    } else {
+        for (auto& inst : inactive_instances_) {
+            if (object_matches(inst->object_index, target)) inst->deactivated = false;
+        }
     }
+    move_deactivated(false);
 }
 
 void Runner::activate_region(f64 left, f64 top, f64 w, f64 h, bool inside) {
-    const f64 right = left + w;
-    const f64 bottom = top + h;
-    for (auto& up : instances_) {
-        if (up->destroyed || !up->deactivated) continue;
-        ensure_instance_bbox(*up, game_);
-        const bool in_box = !(static_cast<f64>(up->bbox_right) < left ||
-                              static_cast<f64>(up->bbox_left) > right ||
-                              static_cast<f64>(up->bbox_bottom) < top ||
-                              static_cast<f64>(up->bbox_top) > bottom);
-        if (in_box == inside) {
-            up->deactivated = false;
-        }
+    for (auto& inst : inactive_instances_) {
+        ensure_instance_bbox(*inst, game_);
+        const bool overlaps = inst->bbox_right >= left && inst->bbox_left < left + w &&
+                              inst->bbox_bottom >= top && inst->bbox_top < top + h;
+        if (overlaps == inside) inst->deactivated = false;
     }
+    move_deactivated(false);
 }
 
-void Runner::snapshot_active_instances(std::vector<i32>& out, u64 max_counter) const {
-    out.clear();
-    out.reserve(instances_.size());
-    for (const auto& up : instances_) {
-        if (!up->destroyed && !up->deactivated && up->create_counter < max_counter) {
-            out.push_back(up->id);
+bool Runner::broadcast_event(i32 category, i32 sub) {
+    bool handled = false;
+    const usize count = instances_.size();
+    for (usize i = 0; i < count && i < instances_.size(); ++i) {
+        if (pending_action_ != PendingRoomAction::None) break;
+        const auto& inst = *instances_[i];
+        if (!inst.destroyed && execute_instance_event(inst.handle, inst.object_index, category, sub, inst.handle)) {
+            handled = true;
         }
     }
+    return handled;
 }
 
 const BytecodeChunk* Runner::resolve_event_chunk(i32 obj_idx, i32 cat, i32 sub, i32& out_owner_obj) const noexcept {
     if (cat < 0 || cat >= 12) return nullptr;
-    i32 cur = obj_idx;
-    for (int guard = 0; guard < 64 && object_exists(cur); ++guard) {
-        if (static_cast<usize>(cur) < program_.object_event_chunks.size()) {
-            const auto& ev_map = program_.object_event_chunks[static_cast<usize>(cur)][static_cast<usize>(cat)];
-            if (auto it = ev_map.find(sub); it != ev_map.end()) {
-                out_owner_obj = cur;
-                return &it->second;
+    // For collisions GM first searches the owner's hierarchy for the exact
+    // target, then repeats that search for each parent of the target.
+    for (usize target_depth = 0; target_depth < game_.objects.size(); ++target_depth) {
+        i32 cur = obj_idx;
+        for (usize depth = 0; depth < game_.objects.size() && object_exists(cur); ++depth) {
+            if (static_cast<usize>(cur) < program_.object_event_chunks.size()) {
+                const auto& ev_map = program_.object_event_chunks[static_cast<usize>(cur)][static_cast<usize>(cat)];
+                if (auto it = ev_map.find(sub); it != ev_map.end()) {
+                    out_owner_obj = cur;
+                    return &it->second;
+                }
             }
+            cur = game_.objects[static_cast<usize>(cur)].parent_index;
         }
-        cur = game_.objects[static_cast<usize>(cur)].parent_index;
+        if (cat != 4 || !object_exists(sub)) break;
+        sub = game_.objects[static_cast<usize>(sub)].parent_index;
+        if (!object_exists(sub)) break;
     }
     return nullptr;
 }
@@ -1847,12 +1813,18 @@ void Runner::perform_event_on_instance(i32 inst_id, i32 obj_override, i32 cat, i
     if (!inst || inst->destroyed) return;
 
     const i32 start_obj = (obj_override >= 0) ? obj_override : inst->object_index;
+    execute_instance_event(inst_id, start_obj, cat, sub, other_id);
+}
+
+bool Runner::execute_instance_event(i32 inst_id, i32 obj_idx, i32 cat, i32 sub, i32 other_id) {
     i32 owner_obj = -1;
-    const BytecodeChunk* chunk = resolve_event_chunk(start_obj, cat, sub, owner_obj);
-    if (!chunk || chunk->code.empty()) return;
+    const BytecodeChunk* chunk = resolve_event_chunk(obj_idx, cat, sub, owner_obj);
+    if (!chunk || chunk->code.empty()) return false;
 
     const bool saved_rel = action_relative_;
     action_relative_ = false;
+    inst_id = instance_handle(inst_id);
+    other_id = instance_handle(other_id);
     event_stack_.push_back(EventFrame{cat, sub, owner_obj, inst_id, other_id, 0});
 
     auto res = vm_->execute(*chunk, inst_id, other_id);
@@ -1864,6 +1836,7 @@ void Runner::perform_event_on_instance(i32 inst_id, i32 obj_override, i32 cat, i
 
     event_stack_.pop_back();
     action_relative_ = saved_rel;
+    return true;
 }
 
 void Runner::perform_event_inherited(i32 self_id) {
@@ -1873,7 +1846,7 @@ void Runner::perform_event_inherited(i32 self_id) {
     const i32 parent = game_.objects[static_cast<usize>(cur.owner_obj)].parent_index;
     if (!object_exists(parent)) return;
 
-    perform_event_on_instance(self_id, parent, cur.cat, cur.sub, cur.other_id);
+    execute_instance_event(self_id, parent, cur.cat, cur.sub, cur.other_id);
 }
 
 // ---------------------------------------------------------------------------
@@ -1881,23 +1854,12 @@ void Runner::perform_event_inherited(i32 self_id) {
 // ---------------------------------------------------------------------------
 
 i32 Runner::find_collision_instance(
-    const Instance& self, f64 test_x, f64 test_y, i32 target, bool solid_only) const noexcept {
-    if (target == -4) return -4; // noone
-    if (target >= 100000) {
-        const auto* other = find_instance(target);
-        if (!other || other->destroyed || other->deactivated || other->id == self.id) return -4;
-        if (solid_only && !other->solid) return -4;
-        return check_instance_collision(self, test_x, test_y, *other, game_, version_mode()) ? other->id : -4;
-    }
-    for (const auto& up : instances_) {
-        if (up->destroyed || up->deactivated || up->id == self.id) continue;
-        if (solid_only && !up->solid) continue;
-        if (!object_matches(up->object_index, target)) continue;
-        if (check_instance_collision(self, test_x, test_y, *up, game_, version_mode())) {
-            return up->id;
-        }
-    }
-    return -4;
+    const Instance& self, f64 test_x, f64 test_y, i32 target, bool solid_only,
+    const Instance* context_other) const noexcept {
+    return find_matching_instance(target, [&](const Instance& inst) {
+        return &inst != &self && (!solid_only || inst.solid) &&
+               check_instance_collision(self, test_x, test_y, inst, game_, version_mode());
+    }, nullptr, context_other);
 }
 
 bool Runner::check_place_free(const Instance& self, f64 test_x, f64 test_y) const noexcept {
@@ -1908,8 +1870,9 @@ bool Runner::check_place_empty(const Instance& self, f64 test_x, f64 test_y) con
     return find_collision_instance(self, test_x, test_y, -3, /*solid_only=*/false) == -4;
 }
 
-bool Runner::check_place_meeting(const Instance& self, f64 test_x, f64 test_y, i32 target) const noexcept {
-    return find_collision_instance(self, test_x, test_y, target, /*solid_only=*/false) != -4;
+bool Runner::check_place_meeting(const Instance& self, f64 test_x, f64 test_y, i32 target,
+                                 const Instance* context_other) const noexcept {
+    return find_collision_instance(self, test_x, test_y, target, /*solid_only=*/false, context_other) != -4;
 }
 
 void Runner::move_contact(Instance& inst, f64 dir_deg, f64 max_dist, bool solid_only) {
@@ -2007,32 +1970,52 @@ VariableTable* Runner::get_instance_vars(i32 inst_id) {
     return inst ? &inst->vars : nullptr;
 }
 
-void Runner::resolve_target_instances(i32 target_id, i32 self_id, i32 other_id, std::vector<i32>& out) {
-    out.clear();
-    if (target_id == -1) { // self
-        if (auto* inst = find_instance(self_id); inst && !inst->destroyed) out.push_back(self_id);
-        return;
+usize Runner::target_instance_count(i32 target) const {
+    if (target == -3) return instances_.size();
+    if (target < 0) return 0;
+    if (target >= 100000) return 1;
+    return object_instances(target, true).size();
+}
+
+const Instance* Runner::field_target_by_id(i32 id, TargetUse use) const {
+    // GM8 shares these two room slots between field reads and writes. A write can
+    // hit the old, destroyed slot immediately after instance_change reused its ID.
+    for (usize index : cached_field_indices_) {
+        if (index >= instances_.size()) continue;
+        const auto* inst = instances_[index].get();
+        if (inst->id == id && (use == TargetUse::WriteField || !inst->destroyed)) return inst;
     }
-    if (target_id == -2) { // other
-        if (auto* inst = find_instance(other_id); inst && !inst->destroyed) out.push_back(other_id);
-        return;
-    }
-    if (target_id == -4) { // noone
-        return;
-    }
-    if (target_id >= 100000) { // specific instance ID
-        if (auto* inst = find_instance(target_id); inst && !inst->destroyed && !inst->deactivated) {
-            out.push_back(target_id);
-        }
-        return;
-    }
-    // all (-3) or object_index (0..99999)
-    for (const auto& up : instances_) {
-        if (up->destroyed || up->deactivated) continue;
-        if (target_id == -3 || object_matches(up->object_index, target_id)) {
-            out.push_back(up->id);
+    cached_field_indices_[1] = cached_field_indices_[0];
+    for (usize i = instances_.size(); i > 0; --i) {
+        if (instances_[i - 1]->id == id) {
+            cached_field_indices_[0] = i - 1;
+            return instances_[i - 1].get();
         }
     }
+    return nullptr;
+}
+
+i32 Runner::target_instance_at(i32 target, usize index, TargetUse use) const {
+    const Instance* instance = nullptr;
+    if (target == -3) {
+        if (index < instances_.size()) instance = instances_[index].get();
+    } else if (target >= 100000) {
+        if (index != 0) return -4;
+        if (use == TargetUse::With) {
+            for (const auto& inst : instances_) {
+                if (inst->id == target) {
+                    instance = inst.get();
+                    break;
+                }
+            }
+        } else {
+            instance = field_target_by_id(target, use);
+        }
+    } else if (target >= 0) {
+        const auto& members = object_instances(target, true);
+        if (index < members.size()) instance = members[index];
+    }
+    return instance && !instance->destroyed && !instance->deactivated ? instance->handle : -4;
 }
 
 Result<RValue> Runner::get_builtin_global(u32 var_id, i32 idx, bool has_idx) {
@@ -2056,22 +2039,11 @@ Result<RValue> Runner::get_builtin_global(u32 var_id, i32 idx, bool has_idx) {
         case 28u: return RValue(vfs_.working_directory_gm());
         case 29u: return RValue(vfs_.temp_directory_gm());
         case 30u: return RValue(vfs_.working_directory_gm());
-        case 31u: {
-            i32 cnt = 0;
-            for (const auto& up : instances_) {
-                if (!up->destroyed && !up->deactivated) ++cnt;
-            }
-            return RValue(cnt);
-        }
+        case 31u: return RValue(static_cast<i32>(instances_.size()));
         case 32u: {
             const i32 target_i = has_idx ? idx : 0;
-            i32 cur = 0;
-            for (const auto& up : instances_) {
-                if (up->destroyed || up->deactivated) continue;
-                if (cur == target_i) return RValue(up->id);
-                ++cur;
-            }
-            return RValue(-4);
+            return RValue(target_i >= 0 && static_cast<usize>(target_i) < instances_.size()
+                              ? instances_[static_cast<usize>(target_i)]->id : -4);
         }
         case 33u: return RValue(room_width_);
         case 34u: return RValue(room_height_);
@@ -2187,21 +2159,14 @@ Result<void> Runner::set_builtin_global(u32 var_id, i32 idx, bool has_idx, RValu
         case 23u: transition_steps_ = value.as_i32(); return Result<void>::success();
         case 24u:
             score_ = value.as_real();
-            if (show_score_) update_window_caption();
             return Result<void>::success();
         case 25u: {
             const f64 prev = lives_;
             lives_ = value.as_real();
             if (lives_ > 0.0) no_more_lives_armed_ = true;
-            if (show_lives_) update_window_caption();
             if (no_more_lives_armed_ && prev > 0.0 && lives_ <= 0.0) {
                 no_more_lives_armed_ = false;
-                std::vector<i32> snap;
-                snapshot_active_instances(snap, next_create_counter_);
-                for (i32 id : snap) {
-                    if (pending_action_ != PendingRoomAction::None) break;
-                    perform_event_on_instance(id, -1, 7, 6, id); // ev_no_more_lives
-                }
+                broadcast_event(7, 6); // ev_no_more_lives
             }
             return Result<void>::success();
         }
@@ -2209,21 +2174,14 @@ Result<void> Runner::set_builtin_global(u32 var_id, i32 idx, bool has_idx, RValu
             const f64 prev = health_;
             health_ = value.as_real();
             if (health_ > 0.0) no_more_health_armed_ = true;
-            if (show_health_) update_window_caption();
             if (no_more_health_armed_ && prev > 0.0 && health_ <= 0.0) {
                 no_more_health_armed_ = false;
-                std::vector<i32> snap;
-                snapshot_active_instances(snap, next_create_counter_);
-                for (i32 id : snap) {
-                    if (pending_action_ != PendingRoomAction::None) break;
-                    perform_event_on_instance(id, -1, 7, 9, id); // ev_no_more_health
-                }
+                broadcast_event(7, 9); // ev_no_more_health
             }
             return Result<void>::success();
         }
         case 35u:
             room_caption_ = value.is_string() ? value.as_string() : "";
-            update_window_caption();
             return Result<void>::success();
         case 36u: room_speed_ = std::max(1, value.as_i32()); return Result<void>::success();
         case 37u: room_persistent_ = value.is_truthy(); return Result<void>::success();
@@ -2265,9 +2223,9 @@ Result<void> Runner::set_builtin_global(u32 var_id, i32 idx, bool has_idx, RValu
         case 78u: window_.input_mut().last_char = value.is_string() ? value.as_string() : ""; return Result<void>::success();
         case 79u: window_.input_mut().keyboard_string = value.is_string() ? value.as_string() : ""; return Result<void>::success();
         case 80u: cursor_sprite_ = value.as_i32(); return Result<void>::success();
-        case 81u: show_score_ = value.is_truthy(); update_window_caption(); return Result<void>::success();
-        case 82u: show_lives_ = value.is_truthy(); update_window_caption(); return Result<void>::success();
-        case 83u: show_health_ = value.is_truthy(); update_window_caption(); return Result<void>::success();
+        case 81u: show_score_ = value.as_i64() > 0; show_score_explicit_ = true; return Result<void>::success();
+        case 82u: show_lives_ = value.as_i64() > 0; return Result<void>::success();
+        case 83u: show_health_ = value.as_i64() > 0; return Result<void>::success();
         case 84u: caption_score_ = value.is_string() ? value.as_string() : ""; return Result<void>::success();
         case 85u: caption_lives_ = value.is_string() ? value.as_string() : ""; return Result<void>::success();
         case 86u: caption_health_ = value.is_string() ? value.as_string() : ""; return Result<void>::success();
@@ -2282,10 +2240,7 @@ Result<RValue> Runner::get_builtin_inst(i32 inst_id, u32 var_id, i32 idx, bool h
     const auto* inst = find_instance(inst_id);
     if (!inst) return RValue(0.0);
 
-    const SpriteData* sp = (inst->sprite_index >= 0 && static_cast<usize>(inst->sprite_index) < game_.sprites.size() &&
-                            game_.sprites[static_cast<usize>(inst->sprite_index)].exists)
-                               ? &game_.sprites[static_cast<usize>(inst->sprite_index)]
-                               : nullptr;
+    const SpriteData* sp = instance_sprite(*inst, game_);
 
     switch (var_id) {
         case 115u: return RValue(inst->x);
@@ -2442,22 +2397,15 @@ Result<RValue> Runner::call_extension_dll(u32 ext_dll_id, std::span<const RValue
 // ---------------------------------------------------------------------------
 
 void Runner::set_random_seed(u32 seed) noexcept {
-    rng_seed_ = seed;
-    rng_.seed(seed);
+    rng_.seed = seed;
 }
 
 f64 Runner::random_uniform(f64 upper) noexcept {
-    std::uniform_real_distribution<f64> dist(0.0, 1.0);
-    return dist(rng_) * upper;
+    return static_cast<f64>(rng_.next()) * 0x1p-32 * upper;
 }
 
 i64 Runner::random_int_inclusive(i64 upper) noexcept {
-    if (upper < 0) {
-        std::uniform_int_distribution<i64> dist(upper, 0);
-        return dist(rng_);
-    }
-    std::uniform_int_distribution<i64> dist(0, upper);
-    return dist(rng_);
+    return static_cast<i32>(rng_.below(static_cast<u32>(upper) + 1u));
 }
 
 // ---------------------------------------------------------------------------
@@ -2523,14 +2471,12 @@ i32 Runner::bin_file_open(std::string_view gm_path, i32 mode) {
     bf.mode = mode;
     bf.gm_path = std::string(gm_path);
 
-    if (mode == 0 || mode == 2) {
-        if (auto bytes = vfs_.read_all_bytes(gm_path); bytes) {
-            bf.data = std::move(bytes.value());
-        } else if (mode == 0) {
-            return -1;
-        }
+    if (auto bytes = vfs_.read_all_bytes(gm_path); bytes) {
+        bf.data = std::move(bytes.value());
     } else {
-        bf.dirty = true;
+        if (vfs_.exists(gm_path) || !vfs_.write_all_bytes(gm_path, {})) return -1;
+        // GM opens a newly created binary file for both reading and writing.
+        bf.mode = 2;
     }
 
     const i32 id = next_bin_file_id_++;

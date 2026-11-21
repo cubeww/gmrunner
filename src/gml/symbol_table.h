@@ -8,7 +8,6 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 namespace gm {
@@ -85,9 +84,6 @@ public:
     [[nodiscard]] std::string_view user_var_name(u32 var_id) const noexcept;
     [[nodiscard]] usize user_var_count() const noexcept { return user_var_names_.size(); }
 
-    void mark_globalvar(u32 var_id);
-    [[nodiscard]] bool is_globalvar(u32 var_id) const noexcept;
-
     // Extension callable tables populated during populate_from_game()
     [[nodiscard]] const std::vector<ExtensionGmlFunction>& extension_gml_functions() const noexcept {
         return ext_gml_funcs_;
@@ -110,7 +106,6 @@ private:
     std::unordered_map<std::string, ConstantBinding> constants_;
     std::unordered_map<std::string, u32> user_var_ids_;
     std::vector<std::string> user_var_names_;
-    std::unordered_set<u32> globalvars_;
 
     std::vector<ExtensionGmlFunction> ext_gml_funcs_;
     std::vector<ExtensionDllFunction> ext_dll_funcs_;

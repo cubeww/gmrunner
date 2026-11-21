@@ -2,6 +2,7 @@
 
 #include <cctype>
 #include <cstdlib>
+#include <iterator>
 #include <string_view>
 #include <vector>
 
@@ -118,9 +119,17 @@ bool has_unclosed_block_comment(std::string_view code) noexcept {
     return in_block;
 }
 
+struct DndToken {
+    usize offset;
+    usize action_number;
+    TokenKind kind;
+    std::string_view source;
+};
+
 class DndLowerer {
 public:
-    DndLowerer(const EventData& ev, const GameData& game) : ev_(ev), game_(game) {}
+    DndLowerer(const EventData& ev, const GameData& game, std::vector<DndToken>* tokens = nullptr)
+        : ev_(ev), game_(game), tokens_(tokens) {}
 
     std::string lower() {
         if (ev_.actions.empty()) {
@@ -163,6 +172,9 @@ public:
             idx = emit_action(idx);
         }
 
+        if (tokens_ && ev_.actions.size() > 1) {
+            tokens_->push_back({out_.size(), idx + 1, TokenKind::DndEventEnd, {}});
+        }
         if (!rel_stack_.empty()) {
             out_.append("action_set_relative(0);\n");
             rel_stack_.pop_back();
@@ -363,12 +375,17 @@ private:
             }
         } else if (a.kind == kActCode) {
             const std::string_view code = (!a.args.empty()) ? std::string_view(a.args[0]) : std::string_view(a.code);
-            out_.append("{\n");
-            out_.append(code);
-            if (has_unclosed_block_comment(code)) {
-                out_.append("*/");
+            if (tokens_) {
+                tokens_->push_back({out_.size(), n + 1, TokenKind::DndCodeAction, code});
+                out_.push_back('\n');
+            } else {
+                out_.append("{\n");
+                out_.append(code);
+                if (has_unclosed_block_comment(code)) {
+                    out_.append("*/");
+                }
+                out_.append("\n}\n");
             }
-            out_.append("\n}\n");
         } else if (a.exe_type == kExeFunction) {
             if (a.name == "action_execute_script") {
                 emit_execute_script_call(a);
@@ -396,6 +413,9 @@ private:
     usize emit_action(usize n) {
         if (n >= ev_.actions.size()) return n;
         const auto& a = ev_.actions[n];
+        if (tokens_ && ev_.actions.size() > 1 && a.kind != kActEnd && a.kind != kActElse) {
+            tokens_->push_back({out_.size(), n + 1, TokenKind::DndActionStart, {}});
+        }
         switch (a.kind) {
             case kActExit:
                 if (!rel_stack_.empty()) {
@@ -421,6 +441,7 @@ private:
 
     const EventData& ev_;
     const GameData& game_;
+    std::vector<DndToken>* tokens_;
     std::string out_;
     std::vector<bool> rel_stack_;
     bool cond_var_declared_ = false;
@@ -431,6 +452,35 @@ private:
 std::string lower_dnd_event_to_gml(const EventData& event, const GameData& game) {
     DndLowerer lowerer(event, game);
     return lowerer.lower();
+}
+
+Result<LexResult> lex_dnd_event(const EventData& event, const GameData& game) {
+    std::vector<DndToken> markers;
+    const std::string wrapper = DndLowerer(event, game, &markers).lower();
+    if (markers.empty()) return lex_gml(wrapper);
+
+    // Lex the surrounding D&D control flow. Insert the original card as a single
+    // statement so its local variables and exits stay inside that card.
+    LexResult result;
+    usize pos = 0;
+    for (const auto& marker : markers) {
+        if (pos < marker.offset) {
+            auto part = lex_gml(std::string_view(wrapper).substr(pos, marker.offset - pos));
+            if (!part) return part.error();
+            auto& tokens = part.value().tokens;
+            result.tokens.insert(result.tokens.end(), std::make_move_iterator(tokens.begin()),
+                                 std::make_move_iterator(tokens.end() - 1)); // omit fragment EOF
+        }
+        result.tokens.push_back({marker.kind, static_cast<u32>(marker.action_number),
+                                 1, 0.0, std::string(marker.source)});
+        pos = marker.offset;
+    }
+    auto tail = lex_gml(std::string_view(wrapper).substr(pos));
+    if (!tail) return tail.error();
+    auto& tokens = tail.value().tokens;
+    result.tokens.insert(result.tokens.end(), std::make_move_iterator(tokens.begin()),
+                         std::make_move_iterator(tokens.end()));
+    return result;
 }
 
 } // namespace gm

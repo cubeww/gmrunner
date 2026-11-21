@@ -10,6 +10,7 @@ add_library(gm_base STATIC
     zlib_util.cpp
     encoding.h
     encoding.cpp
+    single_byte_codepages.h
     binary_reader.h
     binary_reader.cpp
 )

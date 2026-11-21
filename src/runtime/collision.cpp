@@ -104,8 +104,11 @@ void compute_bbox_at(
     out_b = static_cast<i32>(delphi_round(max_y)) - 1;
 }
 
-bool rect_overlaps_rect(f64 al, f64 at, f64 ar, f64 ab, f64 bl, f64 bt, f64 br, f64 bb) noexcept {
-    return al <= br && ar >= bl && at <= bb && ab >= bt;
+bool bbox_overlaps(const Instance& inst, f64 left, f64 top, f64 right, f64 bottom) noexcept {
+    // bbox_right/bottom are inclusive pixel indices; the last pixel occupies a whole unit.
+    return inst.bbox_left <= inst.bbox_right && inst.bbox_top <= inst.bbox_bottom &&
+           left < static_cast<f64>(inst.bbox_right) + 1.0 && right >= inst.bbox_left &&
+           top < static_cast<f64>(inst.bbox_bottom) + 1.0 && bottom >= inst.bbox_top;
 }
 
 } // namespace
@@ -258,18 +261,17 @@ bool check_point_collision(
     if (!sp || !mk) return false;
 
     ensure_instance_bbox(inst, game);
-    const i32 ipx = static_cast<i32>(delphi_round(px));
-    const i32 ipy = static_cast<i32>(delphi_round(py));
-    if (ipx < inst.bbox_left || ipx > inst.bbox_right || ipy < inst.bbox_top || ipy > inst.bbox_bottom) {
+    if (!bbox_overlaps(inst, px, py, px, py)) {
         return false;
     }
-    if (!prec && is_axis_aligned(inst)) {
+    if (!prec) {
         return true;
     }
     if (is_zero_scale(inst)) return false;
     const f64 rad = deg_to_rad(inst.image_angle);
     return sample_instance_mask_at(
-        inst, inst.x, inst.y, *sp, *mk, px, py,
+        inst, delphi_round_f64(inst.x), delphi_round_f64(inst.y), *sp, *mk,
+        delphi_round_f64(px), delphi_round_f64(py),
         std::cos(rad), std::sin(rad), 1.0 / inst.image_xscale, 1.0 / inst.image_yscale);
 }
 
@@ -286,10 +288,10 @@ bool check_rect_collision(
     if (y1 > y2) std::swap(y1, y2);
 
     ensure_instance_bbox(inst, game);
-    if (!rect_overlaps_rect(inst.bbox_left, inst.bbox_top, inst.bbox_right, inst.bbox_bottom, x1, y1, x2, y2)) {
+    if (!bbox_overlaps(inst, x1, y1, x2, y2)) {
         return false;
     }
-    if (!prec && is_axis_aligned(inst)) {
+    if (!prec) {
         return true;
     }
     if (is_zero_scale(inst)) return false;
@@ -335,7 +337,7 @@ bool check_ellipse_collision(
     if (x1 > x2) std::swap(x1, x2);
     if (y1 > y2) std::swap(y1, y2);
     ensure_instance_bbox(inst, game);
-    if (!rect_overlaps_rect(inst.bbox_left, inst.bbox_top, inst.bbox_right, inst.bbox_bottom, x1, y1, x2, y2)) {
+    if (!bbox_overlaps(inst, x1, y1, x2, y2)) {
         return false;
     }
 
@@ -343,15 +345,21 @@ bool check_ellipse_collision(
     const f64 cy = (y1 + y2) * 0.5;
     const f64 rx = (x2 - x1) * 0.5;
     const f64 ry = (y2 - y1) * 0.5;
-    if (rx <= 0.0 || ry <= 0.0) {
-        return check_point_collision(inst, cx, cy, prec, game, ver_mode);
+    const f64 left = delphi_round_f64(x1), right = delphi_round_f64(x2);
+    const f64 top = delphi_round_f64(y1), bottom = delphi_round_f64(y2);
+    if (left == right || top == bottom) {
+        return check_rect_collision(inst, x1, y1, x2, y2, prec, game, ver_mode);
     }
 
-    if (!prec && is_axis_aligned(inst)) {
-        const f64 closest_x = std::clamp(cx, static_cast<f64>(inst.bbox_left), static_cast<f64>(inst.bbox_right));
-        const f64 closest_y = std::clamp(cy, static_cast<f64>(inst.bbox_top), static_cast<f64>(inst.bbox_bottom));
-        const f64 nx = (closest_x - cx) / rx;
-        const f64 ny = (closest_y - cy) / ry;
+    if (!prec) {
+        if ((cx >= inst.bbox_left && cx <= inst.bbox_right) ||
+            (cy >= inst.bbox_top && cy <= inst.bbox_bottom)) return true;
+        // GM8 checks bbox corners against the ellipse with integer-rounded endpoints.
+        const f64 ecx = (left + right) * 0.5, ecy = (top + bottom) * 0.5;
+        const f64 closest_x = std::clamp(ecx, static_cast<f64>(inst.bbox_left), static_cast<f64>(inst.bbox_right));
+        const f64 closest_y = std::clamp(ecy, static_cast<f64>(inst.bbox_top), static_cast<f64>(inst.bbox_bottom));
+        const f64 nx = (closest_x - ecx) / ((right - left) * 0.5);
+        const f64 ny = (closest_y - ecy) / ((bottom - top) * 0.5);
         return (nx * nx + ny * ny) <= 1.0;
     }
 
@@ -398,7 +406,7 @@ bool check_line_collision(
     const f64 rx = std::max(x1, x2);
     const f64 ty = std::min(y1, y2);
     const f64 by = std::max(y1, y2);
-    if (!rect_overlaps_rect(inst.bbox_left, inst.bbox_top, inst.bbox_right, inst.bbox_bottom, lx, ty, rx, by)) {
+    if (!bbox_overlaps(inst, lx, ty, rx, by)) {
         return false;
     }
 
@@ -420,18 +428,19 @@ bool check_line_collision(
         return true;
     };
 
-    if (!clip(-dx, x1 - static_cast<f64>(inst.bbox_left)) ||
-        !clip(dx, static_cast<f64>(inst.bbox_right) - x1) ||
-        !clip(-dy, y1 - static_cast<f64>(inst.bbox_top)) ||
-        !clip(dy, static_cast<f64>(inst.bbox_bottom) - y1)) {
+    const f64 right = static_cast<f64>(inst.bbox_right) + 1.0;
+    const f64 bottom = static_cast<f64>(inst.bbox_bottom) + 1.0;
+    if (!clip(-dx, x1 - inst.bbox_left) || !clip(dx, right - x1)) {
         return false;
     }
 
-    if (!prec && is_axis_aligned(inst)) {
-        return true;
+    if (!prec) {
+        const f64 ya = y1 + t0 * dy, yb = y1 + t1 * dy;
+        return std::max(ya, yb) >= inst.bbox_top && std::min(ya, yb) < bottom;
     }
 
     if (is_zero_scale(inst)) return false;
+    if (!clip(-dy, y1 - inst.bbox_top) || !clip(dy, bottom - y1)) return false;
     const f64 sx = x1 + t0 * dx;
     const f64 sy = y1 + t0 * dy;
     const f64 ex = x1 + t1 * dx;

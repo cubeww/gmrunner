@@ -16,9 +16,12 @@ namespace gm {
 inline constexpr i32 kGmArrayMaxDim = 32000;
 
 struct VarSlot {
+    struct ArrayRow {
+        u32 length = 0;
+        std::unordered_map<u32, RValue> values;
+    };
     RValue scalar;
-    bool initialized = false;
-    std::unordered_map<u32, RValue> array; // linear key = row * 32000 + col (0 aliases scalar)
+    std::unordered_map<u32, ArrayRow> rows; // unwritten columns within a row's length read as zero
 };
 
 class VariableTable {
@@ -39,11 +42,14 @@ private:
 
 // Runtime host interface implemented by gm_runtime (Phases 3-6).
 // Allows gm_gml VM to run completely decoupled from graphics/audio/rooms.
+enum class TargetUse { With, ReadField, WriteField };
+
 class IVmHost {
 public:
     virtual ~IVmHost() = default;
 
     [[nodiscard]] virtual bool treat_uninitialized_as_zero() const noexcept { return true; }
+    [[nodiscard]] virtual bool room_change_pending() const noexcept { return false; }
 
     [[nodiscard]] virtual Result<RValue> get_builtin_global(u32 var_id, i32 idx, bool has_idx) = 0;
     [[nodiscard]] virtual Result<void> set_builtin_global(u32 var_id, i32 idx, bool has_idx, RValue value) = 0;
@@ -52,10 +58,12 @@ public:
     [[nodiscard]] virtual Result<void> set_builtin_inst(i32 inst_id, u32 var_id, i32 idx, bool has_idx, RValue value) = 0;
 
     [[nodiscard]] virtual VariableTable* get_instance_vars(i32 inst_id) = 0;
+    [[nodiscard]] virtual i32 instance_handle(i32 id) const { return id; }
 
-    // Resolves target_id (-1=self, -2=other, -3=all, -4=noone, 0..99999=object, >=100000=instance)
-    // into a snapshot list of active instance IDs.
-    virtual void resolve_target_instances(i32 target_id, i32 self_id, i32 other_id, std::vector<i32>& out) = 0;
+    // GM8 captures the slot count, then looks up each slot in the current room/object list.
+    // Returns an instance handle, or noone for a destroyed instance or a removed slot.
+    [[nodiscard]] virtual usize target_instance_count(i32 target) const = 0;
+    [[nodiscard]] virtual i32 target_instance_at(i32 target, usize index, TargetUse use) const = 0;
 
     [[nodiscard]] virtual Result<RValue> call_builtin(u32 func_id, i32 self_id, i32 other_id, std::span<const RValue> args) = 0;
     [[nodiscard]] virtual Result<RValue> call_extension_dll(u32 ext_dll_id, std::span<const RValue> args) = 0;
@@ -68,6 +76,7 @@ public:
     void set_host(IVmHost* host) noexcept { host_ = host; }
     [[nodiscard]] VariableTable& globals() noexcept { return globals_; }
     [[nodiscard]] const VariableTable& globals() const noexcept { return globals_; }
+    void reset_globals();
 
     // Evaluates all expression constants once at game startup.
     [[nodiscard]] Result<void> init_constants(i32 dummy_self_id = -1);
@@ -102,18 +111,28 @@ public:
     [[nodiscard]] i32 argument_count() const noexcept { return current_argc_; }
 
 private:
-    struct WithFrame {
-        std::vector<i32> targets;
-        usize index = 0;
-        i32 saved_self = -1;
-        i32 saved_other = -1;
+    struct TargetIterator {
+        i32 target;
+        TargetUse use;
+        usize count;
+        usize next_index = 0;
     };
 
-    static Result<u32> compute_array_key(i32 i0, i32 i1, u8 dims) noexcept;
+    struct WithFrame {
+        TargetIterator targets;
+        i32 saved_self;
+        i32 saved_other;
+    };
+
+    [[nodiscard]] TargetIterator begin_targets(i32 target, TargetUse use) const;
+    [[nodiscard]] i32 next_target(TargetIterator& it, i32 self_id, i32 other_id) const;
+    [[nodiscard]] bool is_declared_global(u32 var_id) const noexcept;
 
     CompiledProgram& program_;
     IVmHost* host_ = nullptr;
     VariableTable globals_;
+    std::unordered_map<i32, VariableTable> standalone_instances_;
+    std::vector<bool> declared_globals_;
     std::vector<RValue> const_slots_;
 
     std::array<RValue, 16> current_args_{};

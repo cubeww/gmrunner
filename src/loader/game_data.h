@@ -23,6 +23,10 @@ struct GameMetadata {
     usize payload_offset = 0;
     bool has_gm82_event_tables = false;
     u32 inferred_codepage = 1252;
+
+    [[nodiscard]] u32 string_codepage() const noexcept {
+        return encoding == EncodingMode::Utf8 ? 65001u : inferred_codepage;
+    }
 };
 
 struct GameOptions {
