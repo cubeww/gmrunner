@@ -44,7 +44,7 @@ struct CompiledProgram {
     std::vector<BytecodeChunk> ext_gml_chunks;
     std::vector<std::optional<BytecodeChunk>> trigger_chunks;
     std::vector<std::array<std::unordered_map<i32, BytecodeChunk>, 12>> object_event_chunks;
-    std::vector<std::unordered_map<i32, BytecodeChunk>> timeline_chunks;
+    std::vector<std::unordered_map<i32, std::shared_ptr<BytecodeChunk>>> timeline_chunks;
     std::vector<std::optional<BytecodeChunk>> room_creation_chunks;
     std::vector<std::unordered_map<i32, BytecodeChunk>> instance_creation_chunks; // room -> placed instance ID
     std::vector<BytecodeChunk> library_init_chunks;

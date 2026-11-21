@@ -4,10 +4,12 @@
 
 #include <filesystem>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <variant>
 #include <vector>
 
 namespace gm {
@@ -27,7 +29,7 @@ enum FileFindAttr : u32 {
 // - Resolves paths case-insensitively on case-sensitive filesystems (Linux/Android/APFS)
 // - Maintains working_directory (game root), writable save overlay, and ephemeral temp_directory
 // - Intercepts virtual named pipes (e.g. \\.\pipe\gm82netpipe.*) in memory for gm82buf/d3d_model_load
-// - Emulates Windows registry key/value storage in the writable save overlay
+// - Emulates the Windows registry in the runner's per-user data directory
 class Vfs : public NonCopyable {
 public:
     Vfs();
@@ -68,13 +70,14 @@ public:
     // Wildcard directory search (* and ?) matching GM8 file_find_first / file_find_next.
     [[nodiscard]] std::vector<std::string> find_files(std::string_view gm_pattern, u32 attr_mask = 0) const;
 
-    // Emulated Windows Registry storage (persisted inside save_root).
+    // An omitted key uses HKCU\Software\Game Maker\<game_id>, independent of the selected root.
+    void registry_init(i32 game_id);
     void registry_set_root(i32 root_id);
-    void registry_write_string(std::string_view key, std::string_view name, std::string_view value);
-    void registry_write_real(std::string_view key, std::string_view name, u32 value);
-    [[nodiscard]] std::string registry_read_string(std::string_view key, std::string_view name) const;
-    [[nodiscard]] u32 registry_read_real(std::string_view key, std::string_view name) const;
-    [[nodiscard]] bool registry_exists(std::string_view key, std::string_view name) const;
+    void registry_write_string(std::optional<std::string_view> key, std::string_view name, std::string_view value);
+    void registry_write_real(std::optional<std::string_view> key, std::string_view name, f64 value);
+    [[nodiscard]] std::string registry_read_string(std::optional<std::string_view> key, std::string_view name) const;
+    [[nodiscard]] f64 registry_read_real(std::optional<std::string_view> key, std::string_view name) const;
+    [[nodiscard]] bool registry_exists(std::optional<std::string_view> key, std::string_view name) const;
 
     [[nodiscard]] static std::filesystem::path path_from_utf8(std::string_view utf8);
     [[nodiscard]] static std::string path_to_utf8(const std::filesystem::path& path);
@@ -91,7 +94,9 @@ private:
     [[nodiscard]] std::filesystem::path resolve_normalized_for_read(std::string_view utf8_path) const;
 
     [[nodiscard]] static bool wildcard_match_ci(std::string_view pattern, std::string_view text) noexcept;
-    [[nodiscard]] std::string make_registry_key(std::string_view key, std::string_view name) const;
+    using RegistryValue = std::variant<f64, std::string>;
+    [[nodiscard]] std::optional<RegistryValue> access_registry_value(
+        std::optional<std::string_view> key, std::string_view name, const RegistryValue* replacement = nullptr) const;
 
     std::filesystem::path game_root_;
     std::filesystem::path save_root_;
@@ -103,8 +108,7 @@ private:
     std::unordered_map<std::string, VirtualPipeEntry> virtual_pipes_;
 
     i32 registry_root_ = 0; // 0 = HKCU
-    std::unordered_map<std::string, std::string> registry_strings_;
-    std::unordered_map<std::string, u32> registry_reals_;
+    std::string registry_game_key_;
 };
 
 } // namespace gm

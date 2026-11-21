@@ -728,6 +728,134 @@ void DsManager::grid_set_region(i32 id, i32 x1, i32 y1, i32 x2, i32 y2, const RV
         }
     }
 }
+void DsManager::grid_add_region(i32 id, i32 x1, i32 y1, i32 x2, i32 y2, const RValue& val) {
+    const auto it = grids_.find(id);
+    if (it == grids_.end()) return;
+    if (x1 > x2) std::swap(x1, x2);
+    if (y1 > y2) std::swap(y1, y2);
+    x1 = std::max(0, x1); y1 = std::max(0, y1);
+    x2 = std::min(it->second.width - 1, x2); y2 = std::min(it->second.height - 1, y2);
+    for (i32 x = x1; x <= x2; ++x)
+        for (i32 y = y1; y <= y2; ++y) {
+            auto& cell = it->second.cells[static_cast<usize>(x) * static_cast<usize>(it->second.height) + static_cast<usize>(y)];
+            if (auto r = RValue::add(cell, val); r) cell = std::move(r.value());
+        }
+}
+void DsManager::grid_multiply_region(i32 id, i32 x1, i32 y1, i32 x2, i32 y2, f64 factor) {
+    const auto it = grids_.find(id);
+    if (it == grids_.end()) return;
+    if (x1 > x2) std::swap(x1, x2);
+    if (y1 > y2) std::swap(y1, y2);
+    x1 = std::max(0, x1); y1 = std::max(0, y1);
+    x2 = std::min(it->second.width - 1, x2); y2 = std::min(it->second.height - 1, y2);
+    for (i32 x = x1; x <= x2; ++x)
+        for (i32 y = y1; y <= y2; ++y) {
+            auto& cell = it->second.cells[static_cast<usize>(x) * static_cast<usize>(it->second.height) + static_cast<usize>(y)];
+            if (cell.is_real()) cell = RValue(cell.as_real() * factor);
+        }
+}
+void DsManager::grid_set_disk(i32 id, f64 xm, f64 ym, f64 r, const RValue& val) {
+    const auto it = grids_.find(id);
+    if (it == grids_.end() || r < 0.0) return;
+    const f64 r2 = r * r;
+    const i32 x1 = std::max(0, static_cast<i32>(std::floor(xm - r)));
+    const i32 x2 = std::min(it->second.width - 1, static_cast<i32>(std::ceil(xm + r)));
+    const i32 y1 = std::max(0, static_cast<i32>(std::floor(ym - r)));
+    const i32 y2 = std::min(it->second.height - 1, static_cast<i32>(std::ceil(ym + r)));
+    for (i32 x = x1; x <= x2; ++x)
+        for (i32 y = y1; y <= y2; ++y) {
+            const f64 dx = static_cast<f64>(x) - xm, dy = static_cast<f64>(y) - ym;
+            if (dx * dx + dy * dy <= r2)
+                it->second.cells[static_cast<usize>(x) * static_cast<usize>(it->second.height) + static_cast<usize>(y)] = val;
+        }
+}
+void DsManager::grid_add_disk(i32 id, f64 xm, f64 ym, f64 r, const RValue& val) {
+    const auto it = grids_.find(id);
+    if (it == grids_.end() || r < 0.0) return;
+    const f64 r2 = r * r;
+    const i32 x1 = std::max(0, static_cast<i32>(std::floor(xm - r)));
+    const i32 x2 = std::min(it->second.width - 1, static_cast<i32>(std::ceil(xm + r)));
+    const i32 y1 = std::max(0, static_cast<i32>(std::floor(ym - r)));
+    const i32 y2 = std::min(it->second.height - 1, static_cast<i32>(std::ceil(ym + r)));
+    for (i32 x = x1; x <= x2; ++x)
+        for (i32 y = y1; y <= y2; ++y) {
+            const f64 dx = static_cast<f64>(x) - xm, dy = static_cast<f64>(y) - ym;
+            if (dx * dx + dy * dy <= r2) {
+                auto& cell = it->second.cells[static_cast<usize>(x) * static_cast<usize>(it->second.height) + static_cast<usize>(y)];
+                if (auto res = RValue::add(cell, val); res) cell = std::move(res.value());
+            }
+        }
+}
+void DsManager::grid_multiply_disk(i32 id, f64 xm, f64 ym, f64 r, f64 factor) {
+    const auto it = grids_.find(id);
+    if (it == grids_.end() || r < 0.0) return;
+    const f64 r2 = r * r;
+    const i32 x1 = std::max(0, static_cast<i32>(std::floor(xm - r)));
+    const i32 x2 = std::min(it->second.width - 1, static_cast<i32>(std::ceil(xm + r)));
+    const i32 y1 = std::max(0, static_cast<i32>(std::floor(ym - r)));
+    const i32 y2 = std::min(it->second.height - 1, static_cast<i32>(std::ceil(ym + r)));
+    for (i32 x = x1; x <= x2; ++x)
+        for (i32 y = y1; y <= y2; ++y) {
+            const f64 dx = static_cast<f64>(x) - xm, dy = static_cast<f64>(y) - ym;
+            if (dx * dx + dy * dy <= r2) {
+                auto& cell = it->second.cells[static_cast<usize>(x) * static_cast<usize>(it->second.height) + static_cast<usize>(y)];
+                if (cell.is_real()) cell = RValue(cell.as_real() * factor);
+            }
+        }
+}
+void DsManager::grid_set_grid_region(i32 id, i32 src_id, i32 x1, i32 y1, i32 x2, i32 y2, i32 xpos, i32 ypos) {
+    const auto dit = grids_.find(id);
+    const auto sit = grids_.find(src_id);
+    if (dit == grids_.end() || sit == grids_.end()) return;
+    if (x1 > x2) std::swap(x1, x2);
+    if (y1 > y2) std::swap(y1, y2);
+    const DsGrid src_copy = sit->second;
+    for (i32 sx = x1; sx <= x2; ++sx) {
+        for (i32 sy = y1; sy <= y2; ++sy) {
+            if (sx < 0 || sy < 0 || sx >= src_copy.width || sy >= src_copy.height) continue;
+            const i32 dx = xpos + (sx - x1), dy = ypos + (sy - y1);
+            if (dx < 0 || dy < 0 || dx >= dit->second.width || dy >= dit->second.height) continue;
+            dit->second.cells[static_cast<usize>(dx) * static_cast<usize>(dit->second.height) + static_cast<usize>(dy)] =
+                src_copy.cells[static_cast<usize>(sx) * static_cast<usize>(src_copy.height) + static_cast<usize>(sy)];
+        }
+    }
+}
+void DsManager::grid_add_grid_region(i32 id, i32 src_id, i32 x1, i32 y1, i32 x2, i32 y2, i32 xpos, i32 ypos) {
+    const auto dit = grids_.find(id);
+    const auto sit = grids_.find(src_id);
+    if (dit == grids_.end() || sit == grids_.end()) return;
+    if (x1 > x2) std::swap(x1, x2);
+    if (y1 > y2) std::swap(y1, y2);
+    const DsGrid src_copy = sit->second;
+    for (i32 sx = x1; sx <= x2; ++sx) {
+        for (i32 sy = y1; sy <= y2; ++sy) {
+            if (sx < 0 || sy < 0 || sx >= src_copy.width || sy >= src_copy.height) continue;
+            const i32 dx = xpos + (sx - x1), dy = ypos + (sy - y1);
+            if (dx < 0 || dy < 0 || dx >= dit->second.width || dy >= dit->second.height) continue;
+            auto& dst_cell = dit->second.cells[static_cast<usize>(dx) * static_cast<usize>(dit->second.height) + static_cast<usize>(dy)];
+            const auto& src_cell = src_copy.cells[static_cast<usize>(sx) * static_cast<usize>(src_copy.height) + static_cast<usize>(sy)];
+            if (auto r = RValue::add(dst_cell, src_cell); r) dst_cell = std::move(r.value());
+        }
+    }
+}
+void DsManager::grid_multiply_grid_region(i32 id, i32 src_id, i32 x1, i32 y1, i32 x2, i32 y2, i32 xpos, i32 ypos) {
+    const auto dit = grids_.find(id);
+    const auto sit = grids_.find(src_id);
+    if (dit == grids_.end() || sit == grids_.end()) return;
+    if (x1 > x2) std::swap(x1, x2);
+    if (y1 > y2) std::swap(y1, y2);
+    const DsGrid src_copy = sit->second;
+    for (i32 sx = x1; sx <= x2; ++sx) {
+        for (i32 sy = y1; sy <= y2; ++sy) {
+            if (sx < 0 || sy < 0 || sx >= src_copy.width || sy >= src_copy.height) continue;
+            const i32 dx = xpos + (sx - x1), dy = ypos + (sy - y1);
+            if (dx < 0 || dy < 0 || dx >= dit->second.width || dy >= dit->second.height) continue;
+            auto& dst_cell = dit->second.cells[static_cast<usize>(dx) * static_cast<usize>(dit->second.height) + static_cast<usize>(dy)];
+            const auto& src_cell = src_copy.cells[static_cast<usize>(sx) * static_cast<usize>(src_copy.height) + static_cast<usize>(sy)];
+            if (dst_cell.is_real() && src_cell.is_real()) dst_cell = RValue(dst_cell.as_real() * src_cell.as_real());
+        }
+    }
+}
 f64 DsManager::grid_get_sum(i32 id, i32 x1, i32 y1, i32 x2, i32 y2) const {
     const auto it = grids_.find(id);
     if (it == grids_.end()) return 0.0;
@@ -785,8 +913,11 @@ f64 DsManager::grid_get_mean(i32 id, i32 x1, i32 y1, i32 x2, i32 y2) const {
     return grid_get_sum(id, x1, y1, x2, y2) / cnt;
 }
 bool DsManager::grid_value_exists(i32 id, i32 x1, i32 y1, i32 x2, i32 y2, const RValue& val) const {
+    return grid_value_x(id, x1, y1, x2, y2, val) >= 0;
+}
+i32 DsManager::grid_value_x(i32 id, i32 x1, i32 y1, i32 x2, i32 y2, const RValue& val) const {
     const auto it = grids_.find(id);
-    if (it == grids_.end()) return false;
+    if (it == grids_.end()) return -1;
     if (x1 > x2) std::swap(x1, x2);
     if (y1 > y2) std::swap(y1, y2);
     x1 = std::max(0, x1); y1 = std::max(0, y1);
@@ -794,8 +925,126 @@ bool DsManager::grid_value_exists(i32 id, i32 x1, i32 y1, i32 x2, i32 y2, const 
     for (i32 x = x1; x <= x2; ++x)
         for (i32 y = y1; y <= y2; ++y)
             if (RValue::compare_for_ds(it->second.cells[static_cast<usize>(x) * static_cast<usize>(it->second.height) + static_cast<usize>(y)], val, precision_) == 0)
-                return true;
-    return false;
+                return x;
+    return -1;
+}
+i32 DsManager::grid_value_y(i32 id, i32 x1, i32 y1, i32 x2, i32 y2, const RValue& val) const {
+    const auto it = grids_.find(id);
+    if (it == grids_.end()) return -1;
+    if (x1 > x2) std::swap(x1, x2);
+    if (y1 > y2) std::swap(y1, y2);
+    x1 = std::max(0, x1); y1 = std::max(0, y1);
+    x2 = std::min(it->second.width - 1, x2); y2 = std::min(it->second.height - 1, y2);
+    for (i32 x = x1; x <= x2; ++x)
+        for (i32 y = y1; y <= y2; ++y)
+            if (RValue::compare_for_ds(it->second.cells[static_cast<usize>(x) * static_cast<usize>(it->second.height) + static_cast<usize>(y)], val, precision_) == 0)
+                return y;
+    return -1;
+}
+namespace {
+template <typename Visit>
+void for_each_disk_number(const DsGrid& grid, f64 xm, f64 ym, f64 radius, Visit visit) {
+    if (grid.width <= 0 || grid.height <= 0) return;
+    const f64 left = std::max(0.0, std::floor(xm - radius));
+    const f64 right = std::min(static_cast<f64>(grid.width - 1), std::ceil(xm + radius));
+    const f64 top = std::max(0.0, std::floor(ym - radius));
+    const f64 bottom = std::min(static_cast<f64>(grid.height - 1), std::ceil(ym + radius));
+    if (left > right || top > bottom) return;
+
+    const f64 radius_squared = radius * radius;
+    for (i32 x = static_cast<i32>(left); x <= static_cast<i32>(right); ++x) {
+        const f64 dx = static_cast<f64>(x) - xm;
+        for (i32 y = static_cast<i32>(top); y <= static_cast<i32>(bottom); ++y) {
+            const f64 dy = static_cast<f64>(y) - ym;
+            const auto& cell = grid.cells[static_cast<usize>(x) * grid.height + y];
+            if (dx * dx + dy * dy <= radius_squared && cell.is_real()) visit(cell.as_real());
+        }
+    }
+}
+} // namespace
+
+f64 DsManager::grid_get_disk_sum(i32 id, f64 xm, f64 ym, f64 r) const {
+    const auto it = grids_.find(id);
+    if (it == grids_.end()) return 0.0;
+    f64 sum = 0.0;
+    for_each_disk_number(it->second, xm, ym, r, [&](f64 value) { sum += value; });
+    return sum;
+}
+f64 DsManager::grid_get_disk_min(i32 id, f64 xm, f64 ym, f64 r) const {
+    const auto it = grids_.find(id);
+    if (it == grids_.end()) return 0.0;
+    f64 minimum = 1e8; // GM8 accumulator, including when the disk contains no numbers.
+    for_each_disk_number(it->second, xm, ym, r, [&](f64 value) { minimum = std::min(minimum, value); });
+    return minimum;
+}
+f64 DsManager::grid_get_disk_max(i32 id, f64 xm, f64 ym, f64 r) const {
+    const auto it = grids_.find(id);
+    if (it == grids_.end()) return 0.0;
+    f64 maximum = -1e8;
+    for_each_disk_number(it->second, xm, ym, r, [&](f64 value) { maximum = std::max(maximum, value); });
+    return maximum;
+}
+f64 DsManager::grid_get_disk_mean(i32 id, f64 xm, f64 ym, f64 r) const {
+    const auto it = grids_.find(id);
+    if (it == grids_.end()) return 0.0;
+    f64 sum = 0.0;
+    usize count = 0;
+    for_each_disk_number(it->second, xm, ym, r, [&](f64 value) {
+        sum += value;
+        ++count;
+    });
+    return count ? sum / static_cast<f64>(count) : 0.0;
+}
+bool DsManager::grid_value_disk_exists(i32 id, f64 xm, f64 ym, f64 r, const RValue& val) const {
+    return grid_value_disk_x(id, xm, ym, r, val) >= 0;
+}
+i32 DsManager::grid_value_disk_x(i32 id, f64 xm, f64 ym, f64 r, const RValue& val) const {
+    const auto it = grids_.find(id);
+    if (it == grids_.end() || r < 0.0) return -1;
+    const f64 r2 = r * r;
+    const i32 x1 = std::max(0, static_cast<i32>(std::floor(xm - r)));
+    const i32 x2 = std::min(it->second.width - 1, static_cast<i32>(std::ceil(xm + r)));
+    const i32 y1 = std::max(0, static_cast<i32>(std::floor(ym - r)));
+    const i32 y2 = std::min(it->second.height - 1, static_cast<i32>(std::ceil(ym + r)));
+    for (i32 x = x1; x <= x2; ++x)
+        for (i32 y = y1; y <= y2; ++y) {
+            const f64 dx = static_cast<f64>(x) - xm, dy = static_cast<f64>(y) - ym;
+            if (dx * dx + dy * dy <= r2 &&
+                RValue::compare_for_ds(it->second.cells[static_cast<usize>(x) * static_cast<usize>(it->second.height) + static_cast<usize>(y)], val, precision_) == 0)
+                return x;
+        }
+    return -1;
+}
+i32 DsManager::grid_value_disk_y(i32 id, f64 xm, f64 ym, f64 r, const RValue& val) const {
+    const auto it = grids_.find(id);
+    if (it == grids_.end() || r < 0.0) return -1;
+    const f64 r2 = r * r;
+    const i32 x1 = std::max(0, static_cast<i32>(std::floor(xm - r)));
+    const i32 x2 = std::min(it->second.width - 1, static_cast<i32>(std::ceil(xm + r)));
+    const i32 y1 = std::max(0, static_cast<i32>(std::floor(ym - r)));
+    const i32 y2 = std::min(it->second.height - 1, static_cast<i32>(std::ceil(ym + r)));
+    for (i32 x = x1; x <= x2; ++x)
+        for (i32 y = y1; y <= y2; ++y) {
+            const f64 dx = static_cast<f64>(x) - xm, dy = static_cast<f64>(y) - ym;
+            if (dx * dx + dy * dy <= r2 &&
+                RValue::compare_for_ds(it->second.cells[static_cast<usize>(x) * static_cast<usize>(it->second.height) + static_cast<usize>(y)], val, precision_) == 0)
+                return y;
+        }
+    return -1;
+}
+void DsManager::grid_shuffle(i32 id, GmlRandom& rng) {
+    const auto it = grids_.find(id);
+    if (it == grids_.end()) return;
+    auto& grid = it->second;
+    const auto width = static_cast<u32>(grid.width);
+    const auto height = static_cast<u32>(grid.height);
+    for (usize i = 0; i < grid.cells.size() * 8; ++i) {
+        const usize x1 = rng.below(width);
+        const usize x2 = rng.below(width);
+        const usize y1 = rng.below(height);
+        const usize y2 = rng.below(height);
+        std::swap(grid.cells[x1 * height + y1], grid.cells[x2 * height + y2]);
+    }
 }
 std::string DsManager::grid_write(i32 id) const {
     const auto it = grids_.find(id);

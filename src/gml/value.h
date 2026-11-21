@@ -8,6 +8,8 @@
 
 namespace gm {
 
+[[nodiscard]] std::string format_gm_real(f64 v);
+
 class RValue {
 public:
     enum class Kind : u8 {

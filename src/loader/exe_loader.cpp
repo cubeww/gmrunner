@@ -122,24 +122,31 @@ Result<GameOptions> parse_options(BinaryReader& outer) {
     return o;
 }
 
+Result<Bitmap32> read_bitmap32_v800(BinaryReader& r) {
+    Bitmap32 bmp{};
+    auto w = r.read_i32();
+    auto h = r.read_i32();
+    if (!w || !h || w.value() < 0 || h.value() < 0) return Error{"Bitmap32 v800: invalid dimensions"};
+    bmp.width = w.value();
+    bmp.height = h.value();
+    if (bmp.width > 0 && bmp.height > 0) {
+        auto pixels = r.read_length_prefixed_span();
+        const u64 size = static_cast<u64>(bmp.width) * bmp.height * 4u;
+        if (!pixels || size > pixels.value().size()) return Error{"Bitmap32 v800: truncated pixels"};
+        const auto image = pixels.value().first(static_cast<usize>(size));
+        bmp.bgra.assign(image.begin(), image.end());
+    }
+    return bmp;
+}
+
 Result<Bitmap32> parse_bitmap32(BinaryReader& r) {
     auto ver_res = r.read_i32();
     if (!ver_res) return ver_res.error();
     const i32 ver = ver_res.value();
+    if (ver == 800) return read_bitmap32_v800(r);
 
     Bitmap32 bmp{};
-    if (ver == 800) {
-        auto w = r.read_i32();
-        auto h = r.read_i32();
-        if (!w || !h) return Error{"Bitmap32 v800: failed reading dimensions"};
-        bmp.width = w.value();
-        bmp.height = h.value();
-        if (bmp.width > 0 && bmp.height > 0) {
-            auto span_res = r.read_length_prefixed_span();
-            if (!span_res) return Error{"Bitmap32 v800: failed reading pixels: " + span_res.error_message()};
-            bmp.bgra.assign(span_res.value().begin(), span_res.value().end());
-        }
-    } else if (ver == 540) {
+    if (ver == 540) {
         auto has_img = r.read_bool32();
         if (!has_img) return has_img.error();
         if (has_img.value()) {
@@ -1144,6 +1151,76 @@ usize count_existing(const std::vector<T>& items) noexcept {
 }
 
 } // namespace
+
+Result<SpriteMaskSettings> read_gmspr(std::span<const u8> bytes, SpriteData& sprite) {
+    BinaryReader outer(bytes);
+    auto magic = outer.read_u32();
+    if (!magic || magic.value() != 1234321) return Error{"Invalid GMSPR header"};
+    auto data = outer.read_compressed_stream();
+    if (!data) return data.error();
+
+    SpriteData empty{};
+    empty.exists = true;
+    empty.name = std::move(sprite.name);
+    empty.width = empty.height = 1;
+    sprite = std::move(empty);
+
+    BinaryReader r(data.value());
+    auto version = r.read_i32();
+    if (!version || version.value() != 800) return Error{"Unsupported GMSPR version"};
+    auto ox = r.read_i32();
+    auto oy = r.read_i32();
+    auto count = r.read_i32();
+    if (!ox || !oy || !count || count.value() < 0 ||
+        static_cast<usize>(count.value()) > r.remaining() / 12u) return Error{"Invalid GMSPR frame count"};
+
+    std::vector<Bitmap32> frames;
+    for (i32 i = 0; i < count.value(); ++i) {
+        auto bitmap_version = r.read_i32();
+        if (!bitmap_version || bitmap_version.value() != 800) return Error{"Invalid GMSPR bitmap version"};
+        auto frame = read_bitmap32_v800(r);
+        if (!frame) return frame.error();
+        auto& bmp = frame.value();
+        // GM borrows adjacent RGB for transparent texels so filtering preserves edge colors.
+        const usize stride = static_cast<usize>(bmp.width) * 4u;
+        for (usize p = 0; p < bmp.bgra.size(); p += 4u) {
+            if (bmp.bgra[p + 3] != 0) continue;
+            const usize col = p % stride;
+            usize neighbor = p;
+            if (col > 0 && bmp.bgra[p - 1] != 0) neighbor = p - 4;
+            else if (col + 4 < stride && bmp.bgra[p + 7] != 0) neighbor = p + 4;
+            else if (p >= stride && bmp.bgra[p - stride + 3] != 0) neighbor = p - stride;
+            else if (p + stride < bmp.bgra.size() && bmp.bgra[p + stride + 3] != 0) neighbor = p + stride;
+            if (neighbor != p) std::copy_n(bmp.bgra.data() + neighbor, 3, bmp.bgra.data() + p);
+        }
+        frames.push_back(std::move(bmp));
+    }
+    auto shape = r.read_i32();
+    auto tolerance = r.read_i32();
+    auto separate = r.read_bool32();
+    auto mode = r.read_i32();
+    auto left = r.read_i32();
+    auto right = r.read_i32();
+    auto bottom = r.read_i32();
+    auto top = r.read_i32();
+    if (!shape || !tolerance || !separate || !mode || !left || !right || !bottom || !top)
+        return Error{"Missing GMSPR mask settings"};
+
+    sprite.origin_x = ox.value();
+    sprite.origin_y = oy.value();
+    sprite.images = std::move(frames);
+    if (!sprite.images.empty()) {
+        sprite.width = sprite.images.front().width;
+        sprite.height = sprite.images.front().height;
+    }
+    sprite.bbox_shape = shape.value();
+    sprite.separate_masks = separate.value();
+    sprite.bbox_left = left.value();
+    sprite.bbox_right = right.value();
+    sprite.bbox_top = top.value();
+    sprite.bbox_bottom = bottom.value();
+    return SpriteMaskSettings{tolerance.value(), mode.value()};
+}
 
 Result<GameData> ExeLoader::load_from_bytes(std::vector<u8> exe_bytes, const LoadOptions& options) {
     GameData game{};

@@ -16,13 +16,7 @@ inline bool is_zero_scale(const Instance& inst) noexcept {
 }
 
 inline bool is_untransformed(const Instance& inst) noexcept {
-    return std::fabs(inst.image_xscale - 1.0) < 1e-9 &&
-           std::fabs(inst.image_yscale - 1.0) < 1e-9 &&
-           std::fabs(inst.image_angle) < 1e-9;
-}
-
-inline bool is_axis_aligned(const Instance& inst) noexcept {
-    return std::fabs(inst.image_angle) < 1e-9;
+    return inst.image_xscale == 1.0 && inst.image_yscale == 1.0 && inst.image_angle == 0.0;
 }
 
 inline bool mask_pixel(const CollisionMask& mask, i32 lx, i32 ly) noexcept {
@@ -56,8 +50,7 @@ void compute_bbox_at(
     const GameData& game,
     i32& out_l, i32& out_t, i32& out_r, i32& out_b) noexcept {
     const SpriteData* sp = instance_mask_sprite(inst, game);
-    const CollisionMask* mk = instance_mask(inst, game);
-    if (!sp || !mk) {
+    if (!sp) {
         const i32 px = static_cast<i32>(delphi_round(ix));
         const i32 py = static_cast<i32>(delphi_round(iy));
         out_l = out_r = px;
@@ -65,13 +58,14 @@ void compute_bbox_at(
         return;
     }
 
-    const f64 l0 = (static_cast<f64>(mk->bbox_left) - static_cast<f64>(sp->origin_x)) * inst.image_xscale;
-    const f64 r0 = (static_cast<f64>(mk->bbox_right + 1) - static_cast<f64>(sp->origin_x)) * inst.image_xscale;
-    const f64 t0 = (static_cast<f64>(mk->bbox_top) - static_cast<f64>(sp->origin_y)) * inst.image_yscale;
-    const f64 b0 = (static_cast<f64>(mk->bbox_bottom + 1) - static_cast<f64>(sp->origin_y)) * inst.image_yscale;
+    // GM makes the far edges inclusive after scaling, before mirroring or rotating the box.
+    const f64 l0 = (static_cast<f64>(sp->bbox_left) - sp->origin_x) * inst.image_xscale;
+    const f64 r0 = (static_cast<f64>(sp->bbox_right) + 1.0 - sp->origin_x) * inst.image_xscale - 1.0;
+    const f64 t0 = (static_cast<f64>(sp->bbox_top) - sp->origin_y) * inst.image_yscale;
+    const f64 b0 = (static_cast<f64>(sp->bbox_bottom) + 1.0 - sp->origin_y) * inst.image_yscale - 1.0;
 
     f64 min_x, max_x, min_y, max_y;
-    if (is_axis_aligned(inst)) {
+    if (inst.image_angle == 0.0) {
         min_x = ix + std::min(l0, r0);
         max_x = ix + std::max(l0, r0);
         min_y = iy + std::min(t0, b0);
@@ -100,8 +94,8 @@ void compute_bbox_at(
 
     out_l = static_cast<i32>(delphi_round(min_x));
     out_t = static_cast<i32>(delphi_round(min_y));
-    out_r = static_cast<i32>(delphi_round(max_x)) - 1;
-    out_b = static_cast<i32>(delphi_round(max_y)) - 1;
+    out_r = static_cast<i32>(delphi_round(max_x));
+    out_b = static_cast<i32>(delphi_round(max_y));
 }
 
 bool bbox_overlaps(const Instance& inst, f64 left, f64 top, f64 right, f64 bottom) noexcept {
@@ -186,11 +180,6 @@ bool check_instance_collision(
         return false;
     }
 
-    // Fast path: both sprites are pure unrotated rectangles (bbox_shape == 1).
-    if (spa->bbox_shape == 1 && spb->bbox_shape == 1 && is_axis_aligned(a) && is_axis_aligned(b)) {
-        return true;
-    }
-
     const i32 ol = std::max(al, bl);
     const i32 ot = std::max(at, bt);
     const i32 or_ = std::min(ar, br);
@@ -238,12 +227,13 @@ bool check_instance_collision(
     const f64 inv_sxb = 1.0 / b.image_xscale;
     const f64 inv_syb = 1.0 / b.image_yscale;
 
+    // TMask.CollisionMask samples integer world pixels relative to rounded instance positions.
+    const f64 a_x = delphi_round_f64(ax), a_y = delphi_round_f64(ay);
+    const f64 b_x = delphi_round_f64(b.x), b_y = delphi_round_f64(b.y);
     for (i32 wy = ot; wy <= ob; ++wy) {
-        const f64 fwy = static_cast<f64>(wy) + 0.5;
         for (i32 wx = ol; wx <= or_; ++wx) {
-            const f64 fwx = static_cast<f64>(wx) + 0.5;
-            if (sample_instance_mask_at(a, ax, ay, *spa, *ma, fwx, fwy, cos_a, sin_a, inv_sxa, inv_sya) &&
-                sample_instance_mask_at(b, b.x, b.y, *spb, *mb, fwx, fwy, cos_b, sin_b, inv_sxb, inv_syb)) {
+            if (sample_instance_mask_at(a, a_x, a_y, *spa, *ma, wx, wy, cos_a, sin_a, inv_sxa, inv_sya) &&
+                sample_instance_mask_at(b, b_x, b_y, *spb, *mb, wx, wy, cos_b, sin_b, inv_sxb, inv_syb)) {
                 return true;
             }
         }

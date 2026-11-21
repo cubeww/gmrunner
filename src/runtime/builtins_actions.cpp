@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -566,10 +567,10 @@ void Runner::register_builtins_actions() {
         const f64 bx = (r.action_relative_ && self) ? self->x : 0.0;
         const f64 by = (r.action_relative_ && self) ? self->y : 0.0;
         const u32 c = r.renderer().color();
-        r.renderer().draw_text_ext_transformed_color(
+        r.renderer().draw_text_ext_color(
             r.game(), static_cast<f32>(bx + arg_real(a, 1)), static_cast<f32>(by + arg_real(a, 2)),
             a.empty() ? std::string{} : dnd_val_to_str(a[0]),
-            -1.0f, -1.0f, 1.0f, 1.0f, 0.0f, c, c, c, c, r.renderer().alpha());
+            -1, -1, c, c, c, c, r.renderer().alpha());
         return RValue(0.0);
     });
     register_builtin("action_draw_variable", [](Runner& r, i32 self_id, i32, std::span<const RValue> a) {
@@ -577,10 +578,10 @@ void Runner::register_builtins_actions() {
         const f64 bx = (r.action_relative_ && self) ? self->x : 0.0;
         const f64 by = (r.action_relative_ && self) ? self->y : 0.0;
         const u32 c = r.renderer().color();
-        r.renderer().draw_text_ext_transformed_color(
+        r.renderer().draw_text_ext_color(
             r.game(), static_cast<f32>(bx + arg_real(a, 1)), static_cast<f32>(by + arg_real(a, 2)),
             a.empty() ? std::string{} : dnd_val_to_str(a[0]),
-            -1.0f, -1.0f, 1.0f, 1.0f, 0.0f, c, c, c, c, r.renderer().alpha());
+            -1, -1, c, c, c, c, r.renderer().alpha());
         return RValue(0.0);
     });
     register_builtin("action_draw_score", [](Runner& r, i32 self_id, i32, std::span<const RValue> a) {
@@ -589,9 +590,9 @@ void Runner::register_builtins_actions() {
         const f64 by = (r.action_relative_ && self) ? self->y : 0.0;
         const u32 c = r.renderer().color();
         const std::string text = std::string(arg_str(a, 2)) + dnd_val_to_str(RValue(r.score_));
-        r.renderer().draw_text_ext_transformed_color(
+        r.renderer().draw_text_ext_color(
             r.game(), static_cast<f32>(bx + arg_real(a, 0)), static_cast<f32>(by + arg_real(a, 1)),
-            text, -1.0f, -1.0f, 1.0f, 1.0f, 0.0f, c, c, c, c, r.renderer().alpha());
+            text, -1, -1, c, c, c, c, r.renderer().alpha());
         return RValue(0.0);
     });
     register_builtin("action_draw_life", [](Runner& r, i32 self_id, i32, std::span<const RValue> a) {
@@ -600,9 +601,9 @@ void Runner::register_builtins_actions() {
         const f64 by = (r.action_relative_ && self) ? self->y : 0.0;
         const u32 c = r.renderer().color();
         const std::string text = std::string(arg_str(a, 2)) + dnd_val_to_str(RValue(r.lives_));
-        r.renderer().draw_text_ext_transformed_color(
+        r.renderer().draw_text_ext_color(
             r.game(), static_cast<f32>(bx + arg_real(a, 0)), static_cast<f32>(by + arg_real(a, 1)),
-            text, -1.0f, -1.0f, 1.0f, 1.0f, 0.0f, c, c, c, c, r.renderer().alpha());
+            text, -1, -1, c, c, c, c, r.renderer().alpha());
         return RValue(0.0);
     });
     register_builtin("action_draw_rectangle", [](Runner& r, i32 self_id, i32, std::span<const RValue> a) {
@@ -671,9 +672,341 @@ void Runner::register_builtins_actions() {
         return RValue(0.0);
     });
     register_builtin("action_highscore_show", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
+    register_builtin("action_highscore", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
     register_builtin("action_show_info", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
     register_builtin("action_save_game", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
     register_builtin("action_load_game", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
+
+    // Remaining D&D actions (movement, drawing, particles, resources, splash, CD)
+    register_builtin("action_path_old", [](Runner& r, i32 self_id, i32, std::span<const RValue> a) {
+        if (auto* self = r.find_instance(self_id)) {
+            r.start_path(*self, arg_i32(a, 0, -1), arg_real(a, 1), arg_i32(a, 2), arg_bool(a, 3));
+        }
+        return RValue(0.0);
+    });
+    register_builtin("action_linear_step", [](Runner& r, i32 self_id, i32, std::span<const RValue> a) {
+        if (auto* self = r.find_instance(self_id)) {
+            const f64 bx = r.action_relative_ ? self->x : 0.0;
+            const f64 by = r.action_relative_ ? self->y : 0.0;
+            (void)r.mp_linear_step(*self, bx + arg_real(a, 0), by + arg_real(a, 1), arg_real(a, 2), arg_bool(a, 3, false), -3);
+        }
+        return RValue(0.0);
+    });
+    register_builtin("action_potential_step", [](Runner& r, i32 self_id, i32, std::span<const RValue> a) {
+        if (auto* self = r.find_instance(self_id)) {
+            const f64 bx = r.action_relative_ ? self->x : 0.0;
+            const f64 by = r.action_relative_ ? self->y : 0.0;
+            (void)r.mp_potential_step(*self, bx + arg_real(a, 0), by + arg_real(a, 1), arg_real(a, 2), arg_bool(a, 3, false), -3);
+        }
+        return RValue(0.0);
+    });
+    register_builtin("action_draw_font", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        r.renderer().set_font(arg_i32(a, 0, -1));
+        r.renderer().set_halign(arg_i32(a, 1, 0));
+        return RValue(0.0);
+    });
+    register_builtin("action_draw_font_old", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        r.renderer().set_halign(arg_i32(a, 4, 0));
+        return RValue(0.0);
+    });
+    register_builtin("action_fill_color", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        r.action_fill_color_ = static_cast<u32>(arg_i32(a, 0)) & 0xFFFFFFu;
+        return RValue(0.0);
+    });
+    register_builtin("action_line_color", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        r.action_line_color_ = static_cast<u32>(arg_i32(a, 0)) & 0xFFFFFFu;
+        return RValue(0.0);
+    });
+    register_builtin("action_draw_text_transformed", [](Runner& r, i32 self_id, i32, std::span<const RValue> a) {
+        const auto* self = r.find_instance(self_id);
+        const f64 bx = (r.action_relative_ && self) ? self->x : 0.0;
+        const f64 by = (r.action_relative_ && self) ? self->y : 0.0;
+        const u32 c = r.renderer().color();
+        const std::string text = a.empty() ? std::string{} : dnd_val_to_str(a[0]);
+        r.renderer().draw_text_ext_color(
+            r.game(), static_cast<f32>(bx + arg_real(a, 1)), static_cast<f32>(by + arg_real(a, 2)),
+            text, -1, -1, c, c, c, c, r.renderer().alpha(),
+            TextTransform{static_cast<f32>(arg_real(a, 3, 1.0)), static_cast<f32>(arg_real(a, 4, 1.0)),
+                          static_cast<f32>(arg_real(a, 5, 0.0))});
+        return RValue(0.0);
+    });
+    register_builtin("action_draw_gradient_hor", [](Runner& r, i32 self_id, i32, std::span<const RValue> a) {
+        const auto* self = r.find_instance(self_id);
+        const f64 bx = (r.action_relative_ && self) ? self->x : 0.0;
+        const f64 by = (r.action_relative_ && self) ? self->y : 0.0;
+        const u32 c1 = static_cast<u32>(arg_i32(a, 4)), c2 = static_cast<u32>(arg_i32(a, 5));
+        r.renderer().draw_rectangle_color(
+            static_cast<f32>(bx + arg_real(a, 0)), static_cast<f32>(by + arg_real(a, 1)),
+            static_cast<f32>(bx + arg_real(a, 2)), static_cast<f32>(by + arg_real(a, 3)),
+            c1, c2, c2, c1, false, r.renderer().alpha());
+        return RValue(0.0);
+    });
+    register_builtin("action_draw_gradient_vert", [](Runner& r, i32 self_id, i32, std::span<const RValue> a) {
+        const auto* self = r.find_instance(self_id);
+        const f64 bx = (r.action_relative_ && self) ? self->x : 0.0;
+        const f64 by = (r.action_relative_ && self) ? self->y : 0.0;
+        const u32 c1 = static_cast<u32>(arg_i32(a, 4)), c2 = static_cast<u32>(arg_i32(a, 5));
+        r.renderer().draw_rectangle_color(
+            static_cast<f32>(bx + arg_real(a, 0)), static_cast<f32>(by + arg_real(a, 1)),
+            static_cast<f32>(bx + arg_real(a, 2)), static_cast<f32>(by + arg_real(a, 3)),
+            c1, c1, c2, c2, false, r.renderer().alpha());
+        return RValue(0.0);
+    });
+    register_builtin("action_draw_ellipse_gradient", [](Runner& r, i32 self_id, i32, std::span<const RValue> a) {
+        const auto* self = r.find_instance(self_id);
+        const f64 bx = (r.action_relative_ && self) ? self->x : 0.0;
+        const f64 by = (r.action_relative_ && self) ? self->y : 0.0;
+        r.renderer().draw_ellipse_color(
+            static_cast<f32>(bx + arg_real(a, 0)), static_cast<f32>(by + arg_real(a, 1)),
+            static_cast<f32>(bx + arg_real(a, 2)), static_cast<f32>(by + arg_real(a, 3)),
+            static_cast<u32>(arg_i32(a, 4)), static_cast<u32>(arg_i32(a, 5)), false, r.renderer().alpha());
+        return RValue(0.0);
+    });
+    register_builtin("action_draw_arrow", [](Runner& r, i32 self_id, i32, std::span<const RValue> a) {
+        const auto* self = r.find_instance(self_id);
+        const f64 bx = (r.action_relative_ && self) ? self->x : 0.0;
+        const f64 by = (r.action_relative_ && self) ? self->y : 0.0;
+        r.renderer().draw_arrow(
+            static_cast<f32>(bx + arg_real(a, 0)), static_cast<f32>(by + arg_real(a, 1)),
+            static_cast<f32>(bx + arg_real(a, 2)), static_cast<f32>(by + arg_real(a, 3)),
+            static_cast<f32>(arg_real(a, 4, 10.0)), r.renderer().color(), r.renderer().alpha());
+        return RValue(0.0);
+    });
+    register_builtin("action_draw_life_images", [](Runner& r, i32 self_id, i32, std::span<const RValue> a) {
+        const auto* self = r.find_instance(self_id);
+        const f64 bx = (r.action_relative_ && self) ? self->x : 0.0;
+        const f64 by = (r.action_relative_ && self) ? self->y : 0.0;
+        const f32 x = static_cast<f32>(bx + arg_real(a, 0));
+        const f32 y = static_cast<f32>(by + arg_real(a, 1));
+        const i32 spr = arg_i32(a, 2, -1);
+        i32 sw = 16;
+        if (spr >= 0 && static_cast<usize>(spr) < r.game().sprites.size() && r.game().sprites[static_cast<usize>(spr)].exists) {
+            sw = std::max(1, r.game().sprites[static_cast<usize>(spr)].width);
+        }
+        const i32 n = std::clamp(static_cast<i32>(delphi_round(r.lives_)), 0, 100);
+        for (i32 i = 0; i < n; ++i) {
+            r.renderer().draw_sprite_ext(r.game(), spr, 0, x + static_cast<f32>(i * sw), y, 1.0f, 1.0f, 0.0f, 0xFFFFFFu, 1.0f);
+        }
+        return RValue(0.0);
+    });
+    register_builtin("action_draw_health", [](Runner& r, i32 self_id, i32, std::span<const RValue> a) {
+        const auto* self = r.find_instance(self_id);
+        const f64 bx = (r.action_relative_ && self) ? self->x : 0.0;
+        const f64 by = (r.action_relative_ && self) ? self->y : 0.0;
+        const f32 x1 = static_cast<f32>(bx + arg_real(a, 0)), y1 = static_cast<f32>(by + arg_real(a, 1));
+        const f32 x2 = static_cast<f32>(bx + arg_real(a, 2)), y2 = static_cast<f32>(by + arg_real(a, 3));
+        const i32 back_idx = arg_i32(a, 4, 0);
+        const i32 bar_idx = arg_i32(a, 5, 0);
+        const f64 amt = std::clamp(r.health_, 0.0, 100.0) / 100.0;
+        static constexpr u32 kBackColors[16] = {
+            0, 0x000000u, 0x808080u, 0xC0C0C0u, 0xFFFFFFu, 0x000080u, 0x008000u, 0x008080u,
+            0x800000u, 0x800080u, 0x808000u, 0x0000FFu, 0x00FF00u, 0x00FFFFu, 0xFF0000u, 0xFFFF00u
+        };
+        const u32 back_col = (back_idx > 0 && back_idx < 16) ? kBackColors[back_idx] : 0x000000u;
+        const u32 bar_col = (bar_idx == 0) ? 0x00FF00u : ((bar_idx > 0 && bar_idx < 16) ? kBackColors[bar_idx] : 0x00FF00u);
+        if (back_idx != 0) r.renderer().draw_rectangle_color(x1, y1, x2, y2, back_col, back_col, back_col, back_col, false, 1.0f);
+        if (amt > 0.0) {
+            r.renderer().draw_rectangle_color(x1, y1, x1 + (x2 - x1) * static_cast<f32>(amt), y2, bar_col, bar_col, bar_col, bar_col, false, 1.0f);
+        }
+        r.renderer().draw_rectangle_color(x1, y1, x2, y2, 0u, 0u, 0u, 0u, true, 1.0f);
+        return RValue(0.0);
+    });
+
+    // Particle D&D actions
+    auto ensure_action_ps = [](Runner& r) -> i32 {
+        if (r.action_part_system_ < 0 || !r.particles().system_exists(r.action_part_system_)) {
+            r.action_part_system_ = r.particles().system_create();
+        }
+        return r.action_part_system_;
+    };
+    register_builtin("action_partsyst_create", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        if (r.action_part_system_ >= 0) r.particles().system_destroy(r.action_part_system_);
+        r.action_part_system_ = r.particles().system_create();
+        r.particles().system_depth(r.action_part_system_, arg_real(a, 0, 0.0));
+        return RValue(0.0);
+    });
+    register_builtin("action_partsyst_destroy", [](Runner& r, i32, i32, std::span<const RValue>) {
+        if (r.action_part_system_ >= 0) {
+            r.particles().system_destroy(r.action_part_system_);
+            r.action_part_system_ = -1;
+        }
+        return RValue(0.0);
+    });
+    register_builtin("action_partsyst_clear", [](Runner& r, i32, i32, std::span<const RValue>) {
+        if (r.action_part_system_ >= 0) r.particles().system_clear(r.action_part_system_);
+        return RValue(0.0);
+    });
+    auto get_action_pt = [](Runner& r, i32 slot) -> ParticleType* {
+        if (slot < 0 || slot >= 16) return nullptr;
+        if (r.action_part_types_[static_cast<usize>(slot)] < 0 ||
+            !r.particles().type_exists(r.action_part_types_[static_cast<usize>(slot)])) {
+            r.action_part_types_[static_cast<usize>(slot)] = r.particles().type_create();
+        }
+        return r.particles().get_type(r.action_part_types_[static_cast<usize>(slot)]);
+    };
+    register_builtin("action_parttype_create", [get_action_pt](Runner& r, i32, i32, std::span<const RValue> a) {
+        if (auto* t = get_action_pt(r, arg_i32(a, 0))) {
+            t->shape = arg_i32(a, 1);
+            t->sprite_index = arg_i32(a, 2, -1);
+            t->size_min = arg_real(a, 3, 1.0);
+            t->size_max = arg_real(a, 4, 1.0);
+            t->size_incr = arg_real(a, 5, 0.0);
+        }
+        return RValue(0.0);
+    });
+    register_builtin("action_parttype_create_old", [get_action_pt](Runner& r, i32, i32, std::span<const RValue> a) {
+        if (auto* t = get_action_pt(r, arg_i32(a, 0))) {
+            t->shape = arg_i32(a, 1);
+            t->sprite_index = arg_i32(a, 2, -1);
+            t->size_min = arg_real(a, 3, 1.0);
+            t->size_max = arg_real(a, 4, 1.0);
+            t->size_incr = arg_real(a, 5, 0.0);
+        }
+        return RValue(0.0);
+    });
+    register_builtin("action_parttype_color", [get_action_pt](Runner& r, i32, i32, std::span<const RValue> a) {
+        if (auto* t = get_action_pt(r, arg_i32(a, 0))) {
+            const i32 kind = arg_i32(a, 1, 0);
+            t->col_mode = (kind == 0) ? 3 : 1;
+            t->col1 = static_cast<u32>(arg_i32(a, 2)) & 0xFFFFFFu;
+            t->col2 = static_cast<u32>(arg_i32(a, 3)) & 0xFFFFFFu;
+            t->alpha1 = arg_real(a, 4, 1.0);
+            t->alpha2 = t->alpha3 = arg_real(a, 5, 1.0);
+        }
+        return RValue(0.0);
+    });
+    register_builtin("action_parttype_life", [get_action_pt](Runner& r, i32, i32, std::span<const RValue> a) {
+        if (auto* t = get_action_pt(r, arg_i32(a, 0))) {
+            t->life_min = arg_i32(a, 1, 30);
+            t->life_max = arg_i32(a, 2, 60);
+        }
+        return RValue(0.0);
+    });
+    register_builtin("action_parttype_speed", [get_action_pt](Runner& r, i32, i32, std::span<const RValue> a) {
+        if (auto* t = get_action_pt(r, arg_i32(a, 0))) {
+            t->speed_min = arg_real(a, 1); t->speed_max = arg_real(a, 2);
+            t->dir_min = arg_real(a, 3); t->dir_max = arg_real(a, 4);
+            t->speed_incr = -arg_real(a, 5, 0.0);
+        }
+        return RValue(0.0);
+    });
+    register_builtin("action_parttype_gravity", [get_action_pt](Runner& r, i32, i32, std::span<const RValue> a) {
+        if (auto* t = get_action_pt(r, arg_i32(a, 0))) {
+            t->grav_amount = arg_real(a, 1);
+            t->grav_dir = arg_real(a, 2, 270.0);
+        }
+        return RValue(0.0);
+    });
+    register_builtin("action_parttype_secondary", [get_action_pt](Runner& r, i32, i32, std::span<const RValue> a) {
+        if (auto* t = get_action_pt(r, arg_i32(a, 0))) {
+            const i32 st = arg_i32(a, 1, -1);
+            const i32 dt = arg_i32(a, 3, -1);
+            t->step_type = (st >= 0 && st < 16) ? r.action_part_types_[static_cast<usize>(st)] : -1;
+            t->step_number = arg_i32(a, 2, 0);
+            t->death_type = (dt >= 0 && dt < 16) ? r.action_part_types_[static_cast<usize>(dt)] : -1;
+            t->death_number = arg_i32(a, 4, 0);
+        }
+        return RValue(0.0);
+    });
+    register_builtin("action_partemit_create", [ensure_action_ps](Runner& r, i32, i32, std::span<const RValue> a) {
+        const i32 ps = ensure_action_ps(r);
+        const i32 slot = std::clamp(arg_i32(a, 0), 0, 15);
+        if (r.action_part_emitters_[static_cast<usize>(slot)] < 0 ||
+            !r.particles().emitter_exists(ps, r.action_part_emitters_[static_cast<usize>(slot)])) {
+            r.action_part_emitters_[static_cast<usize>(slot)] = r.particles().emitter_create(ps);
+        }
+        r.particles().emitter_region(ps, r.action_part_emitters_[static_cast<usize>(slot)],
+                                     arg_real(a, 2), arg_real(a, 3), arg_real(a, 4), arg_real(a, 5), arg_i32(a, 1), 0);
+        return RValue(0.0);
+    });
+    register_builtin("action_partemit_destroy", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        const i32 slot = std::clamp(arg_i32(a, 0), 0, 15);
+        if (r.action_part_system_ >= 0 && r.action_part_emitters_[static_cast<usize>(slot)] >= 0) {
+            r.particles().emitter_destroy(r.action_part_system_, r.action_part_emitters_[static_cast<usize>(slot)]);
+            r.action_part_emitters_[static_cast<usize>(slot)] = -1;
+        }
+        return RValue(0.0);
+    });
+    register_builtin("action_partemit_burst", [ensure_action_ps](Runner& r, i32, i32, std::span<const RValue> a) {
+        const i32 ps = ensure_action_ps(r);
+        const i32 em_slot = std::clamp(arg_i32(a, 0), 0, 15);
+        const i32 pt_slot = std::clamp(arg_i32(a, 1), 0, 15);
+        r.particles().emitter_burst(ps, r.action_part_emitters_[static_cast<usize>(em_slot)],
+                                    r.action_part_types_[static_cast<usize>(pt_slot)], arg_i32(a, 2));
+        return RValue(0.0);
+    });
+    register_builtin("action_partemit_stream", [ensure_action_ps](Runner& r, i32, i32, std::span<const RValue> a) {
+        const i32 ps = ensure_action_ps(r);
+        const i32 em_slot = std::clamp(arg_i32(a, 0), 0, 15);
+        const i32 pt_slot = std::clamp(arg_i32(a, 1), 0, 15);
+        r.particles().emitter_stream(ps, r.action_part_emitters_[static_cast<usize>(em_slot)],
+                                     r.action_part_types_[static_cast<usize>(pt_slot)], arg_i32(a, 2));
+        return RValue(0.0);
+    });
+
+    // Resource replacement, splash & CD D&D actions
+    register_builtin("action_replace_sprite", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        const i32 id = arg_i32(a, 0, -1);
+        if (id < 0 || static_cast<usize>(id) >= r.game().sprites.size()) return RValue(0.0);
+        auto bytes = r.vfs().read_all_bytes(arg_str(a, 1));
+        if (!bytes) return RValue(0.0);
+        auto bmp = Renderer2D::decode_image_to_bgra(bytes.value());
+        if (!bmp) return RValue(0.0);
+        auto& sp = r.game().sprites[static_cast<usize>(id)];
+        const i32 n = std::max(1, arg_i32(a, 2, 1));
+        const i32 fw = std::max(1, bmp.value().width / n);
+        const i32 fh = bmp.value().height;
+        sp.exists = true; sp.width = fw; sp.height = fh; sp.images.clear();
+        for (i32 f = 0; f < n; ++f) {
+            Bitmap32 frame{fw, fh, std::vector<u8>(static_cast<usize>(fw) * static_cast<usize>(fh) * 4u, 0)};
+            for (i32 y = 0; y < fh; ++y) {
+                std::memcpy(&frame.bgra[static_cast<usize>(y) * static_cast<usize>(fw) * 4u],
+                            &bmp.value().bgra[(static_cast<usize>(y) * static_cast<usize>(bmp.value().width) + static_cast<usize>(f * fw)) * 4u],
+                            static_cast<usize>(fw) * 4u);
+            }
+            sp.images.push_back(std::move(frame));
+        }
+        Runner::rebuild_sprite_masks(sp);
+        r.renderer().upload_sprite(static_cast<usize>(id), sp);
+        return RValue(0.0);
+    });
+    register_builtin("action_replace_sound", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        auto bytes = r.vfs().read_all_bytes(arg_str(a, 1));
+        if (bytes) (void)r.audio().replace_sound_from_memory(arg_i32(a, 0, -1), bytes.value(), 0, arg_str(a, 1));
+        return RValue(0.0);
+    });
+    register_builtin("action_replace_background", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        const i32 id = arg_i32(a, 0, -1);
+        if (id < 0 || static_cast<usize>(id) >= r.game().backgrounds.size()) return RValue(0.0);
+        auto bytes = r.vfs().read_all_bytes(arg_str(a, 1));
+        if (!bytes) return RValue(0.0);
+        auto bmp = Renderer2D::decode_image_to_bgra(bytes.value());
+        if (!bmp) return RValue(0.0);
+        auto& bg = r.game().backgrounds[static_cast<usize>(id)];
+        bg.exists = true; bg.width = bmp.value().width; bg.height = bmp.value().height; bg.bitmap = std::move(bmp.value());
+        r.renderer().upload_background(static_cast<usize>(id), bg);
+        return RValue(0.0);
+    });
+    register_builtin("action_show_video", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
+    register_builtin("action_splash_video", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
+    register_builtin("action_splash_text", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
+    register_builtin("action_splash_image", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
+    register_builtin("action_splash_web", [](Runner&, i32, i32, std::span<const RValue> a) {
+        (void)PlatformWindow::open_url(arg_str(a, 0));
+        return RValue(0.0);
+    });
+    register_builtin("action_splash_settings", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        r.splash_caption_ = std::string(arg_str(a, 0));
+        r.splash_fullscreen_ = arg_bool(a, 1, false);
+        r.splash_border_ = arg_bool(a, 2, true);
+        return RValue(0.0);
+    });
+    register_builtin("action_cd_play", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
+    register_builtin("action_cd_stop", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
+    register_builtin("action_cd_pause", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
+    register_builtin("action_cd_resume", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
+    register_builtin("action_cd_present", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(false); });
+    register_builtin("action_cd_playing", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(false); });
 }
 
 } // namespace gm

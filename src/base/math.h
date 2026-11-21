@@ -78,6 +78,16 @@ struct GmlRandom {
     return rad * kRadToDeg;
 }
 
+[[nodiscard]] inline f64 wrap_angle_deg(f64 deg) noexcept {
+    deg = std::fmod(deg, 360.0);
+    if (deg < 0.0) deg += 360.0;
+    return deg == 360.0 ? 0.0 : deg;
+}
+
+[[nodiscard]] inline f64 gm_point_direction(f64 x1, f64 y1, f64 x2, f64 y2) noexcept {
+    return wrap_angle_deg(rad_to_deg(std::atan2(-(y2 - y1), x2 - x1)));
+}
+
 [[nodiscard]] inline constexpr u32 next_power_of_two(u32 v) noexcept {
     if (v <= 1u) return 1u;
     --v;

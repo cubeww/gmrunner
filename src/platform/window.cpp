@@ -82,6 +82,10 @@ Result<void> PlatformWindow::create(const WindowConfig& config) {
     }
 
     fullscreen_ = config.fullscreen;
+    borderless_ = config.borderless;
+    resizable_ = config.resizable;
+    stay_on_top_ = false;
+    visible_ = true;
     set_vsync(config.vsync);
     set_cursor_visible(config.show_cursor);
 
@@ -176,8 +180,18 @@ u8 PlatformWindow::sdl_mouse_button_to_gm(u8 button) noexcept {
 }
 
 WindowEvents PlatformWindow::poll_events() {
+    return poll_events_impl(true);
+}
+
+WindowEvents PlatformWindow::poll_events_accumulate() {
+    return poll_events_impl(false);
+}
+
+WindowEvents PlatformWindow::poll_events_impl(bool clear_edges) {
     WindowEvents out{};
-    input_.begin_frame();
+    if (clear_edges) {
+        input_.begin_frame();
+    }
 
     auto update_aggregate_modifiers = [this]() {
         input_.key_down[16] = input_.key_down[160] || input_.key_down[161]; // vk_shift
@@ -378,6 +392,169 @@ void PlatformWindow::set_cursor_visible(bool visible) {
     } else {
         SDL_HideCursor();
     }
+}
+
+void PlatformWindow::set_borderless(bool borderless) {
+    borderless_ = borderless;
+    if (window_) {
+        SDL_SetWindowBordered(window_, !borderless);
+    }
+}
+
+void PlatformWindow::set_stay_on_top(bool on_top) {
+    stay_on_top_ = on_top;
+    if (window_) {
+        SDL_SetWindowAlwaysOnTop(window_, on_top);
+    }
+}
+
+void PlatformWindow::set_resizable(bool resizable) {
+    resizable_ = resizable;
+    if (window_) {
+        SDL_SetWindowResizable(window_, resizable);
+    }
+}
+
+void PlatformWindow::set_visible(bool visible) {
+    visible_ = visible;
+    if (window_) {
+        if (visible) SDL_ShowWindow(window_);
+        else SDL_HideWindow(window_);
+    }
+}
+
+void PlatformWindow::set_mouse_position(i32 x, i32 y) {
+    if (window_) {
+        SDL_WarpMouseInWindow(window_, static_cast<float>(x), static_cast<float>(y));
+        input_.mouse_x = static_cast<f32>(x);
+        input_.mouse_y = static_cast<f32>(y);
+    }
+}
+
+i32 PlatformWindow::display_mouse_x() noexcept {
+    float mx = 0.0f, my = 0.0f;
+    SDL_GetGlobalMouseState(&mx, &my);
+    return static_cast<i32>(mx);
+}
+
+i32 PlatformWindow::display_mouse_y() noexcept {
+    float mx = 0.0f, my = 0.0f;
+    SDL_GetGlobalMouseState(&mx, &my);
+    return static_cast<i32>(my);
+}
+
+void PlatformWindow::set_display_mouse_position(i32 x, i32 y) noexcept {
+    SDL_WarpMouseGlobal(static_cast<float>(x), static_cast<float>(y));
+}
+
+u64 PlatformWindow::native_window_handle() const noexcept {
+    if (!window_) return 0;
+#if defined(_WIN32)
+    if (void* hwnd = SDL_GetPointerProperty(SDL_GetWindowProperties(window_), SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr)) {
+        return reinterpret_cast<u64>(hwnd);
+    }
+#endif
+    return reinterpret_cast<u64>(window_);
+}
+
+namespace {
+
+SDL_Joystick* open_gm_joystick(i32 id) noexcept {
+    if (id < 1) return nullptr;
+    int count = 0;
+    SDL_JoystickID* ids = SDL_GetJoysticks(&count);
+    if (!ids) return nullptr;
+    SDL_Joystick* joy = nullptr;
+    if (id - 1 < count) {
+        joy = SDL_GetJoystickFromID(ids[id - 1]);
+        if (!joy) {
+            joy = SDL_OpenJoystick(ids[id - 1]);
+        }
+    }
+    SDL_free(ids);
+    return joy;
+}
+
+} // namespace
+
+bool PlatformWindow::joystick_exists(i32 id) noexcept {
+    return open_gm_joystick(id) != nullptr;
+}
+
+std::string PlatformWindow::joystick_name(i32 id) {
+    if (SDL_Joystick* joy = open_gm_joystick(id)) {
+        const char* n = SDL_GetJoystickName(joy);
+        return n ? std::string(n) : std::string{};
+    }
+    return {};
+}
+
+i32 PlatformWindow::joystick_axes(i32 id) noexcept {
+    if (SDL_Joystick* joy = open_gm_joystick(id)) {
+        return SDL_GetNumJoystickAxes(joy);
+    }
+    return 0;
+}
+
+i32 PlatformWindow::joystick_buttons(i32 id) noexcept {
+    if (SDL_Joystick* joy = open_gm_joystick(id)) {
+        return SDL_GetNumJoystickButtons(joy);
+    }
+    return 0;
+}
+
+bool PlatformWindow::joystick_has_pov(i32 id) noexcept {
+    if (SDL_Joystick* joy = open_gm_joystick(id)) {
+        return SDL_GetNumJoystickHats(joy) > 0;
+    }
+    return false;
+}
+
+bool PlatformWindow::joystick_check_button(i32 id, i32 button) noexcept {
+    if (button < 1) return false;
+    if (SDL_Joystick* joy = open_gm_joystick(id)) {
+        return SDL_GetJoystickButton(joy, button - 1);
+    }
+    return false;
+}
+
+f64 PlatformWindow::joystick_axis(i32 id, i32 axis_index) noexcept {
+    if (axis_index < 0) return 0.0;
+    if (SDL_Joystick* joy = open_gm_joystick(id)) {
+        if (axis_index < SDL_GetNumJoystickAxes(joy)) {
+            const Sint16 v = SDL_GetJoystickAxis(joy, axis_index);
+            return static_cast<f64>(v) / 32767.0;
+        }
+    }
+    return 0.0;
+}
+
+f64 PlatformWindow::joystick_pov(i32 id) noexcept {
+    if (SDL_Joystick* joy = open_gm_joystick(id)) {
+        if (SDL_GetNumJoystickHats(joy) > 0) {
+            switch (SDL_GetJoystickHat(joy, 0)) {
+                case SDL_HAT_UP:        return 0.0;
+                case SDL_HAT_RIGHTUP:   return 45.0;
+                case SDL_HAT_RIGHT:     return 90.0;
+                case SDL_HAT_RIGHTDOWN: return 135.0;
+                case SDL_HAT_DOWN:      return 180.0;
+                case SDL_HAT_LEFTDOWN:  return 225.0;
+                case SDL_HAT_LEFT:      return 270.0;
+                case SDL_HAT_LEFTUP:    return 315.0;
+                default:                return -1.0;
+            }
+        }
+    }
+    return -1.0;
+}
+
+i32 PlatformWindow::joystick_direction(i32 id) noexcept {
+    // GM8 returns numpad key code: 97=SW..105=NE, 101=center.
+    const f64 x = joystick_axis(id, 0);
+    const f64 y = joystick_axis(id, 1);
+    const i32 dx = (x < -0.5) ? -1 : (x > 0.5 ? 1 : 0);
+    const i32 dy = (y < -0.5) ? -1 : (y > 0.5 ? 1 : 0);
+    return 101 + dx - dy * 3;
 }
 
 i32 PlatformWindow::x() const noexcept {

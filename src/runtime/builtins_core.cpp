@@ -18,18 +18,6 @@ namespace gm {
 
 namespace {
 
-std::string format_gm_real(f64 v) {
-    if (!std::isfinite(v)) return "0";
-    const i64 r = delphi_round(v);
-    if (std::fabs(v - static_cast<f64>(r)) < kGmlEpsilon &&
-        std::fabs(v) < 1e15) {
-        return std::to_string(r);
-    }
-    char buf[64];
-    std::snprintf(buf, sizeof(buf), "%.2f", v);
-    return std::string(buf);
-}
-
 Result<i32> delphi_floor_i32(f64 value) {
     // Delphi's Floor uses a signed 64-bit conversion and returns the low 32 bits.
     if (!(value >= -0x1p63 && value < 0x1p63)) return Error{"Invalid floating point operation."};
@@ -44,6 +32,23 @@ f64 parse_gm_real(std::string_view s) {
     char* end = nullptr;
     const f64 v = std::strtod(tmp.c_str(), &end);
     return (end != tmp.c_str() && std::isfinite(v)) ? v : 0.0;
+}
+
+Result<RValue> append_text_real(std::string& out, f64 value, bool separate_sign) {
+    const bool negative = separate_sign && value < 0.0;
+    if (negative) value = -value;
+    const auto whole = delphi_floor_i32(value);
+    if (!whole) return whole.error();
+    const auto fraction = delphi_floor_i32((value - whole.value()) * 1'000'000.0);
+    if (!fraction) return fraction.error();
+    out.append(negative ? " -" : " ");
+    out.append(std::to_string(whole.value()));
+    if (fraction.value() != 0) {
+        char digits[8];
+        std::snprintf(digits, sizeof(digits), ".%06u", static_cast<u32>(fraction.value()) % 1'000'000u);
+        out.append(digits);
+    }
+    return RValue(0.0);
 }
 
 usize gm81_character_width(u8 lead) noexcept {
@@ -74,7 +79,99 @@ std::tm tm_from_delphi_datetime(f64 dt) {
     return out;
 }
 
+bool is_leap_year_gregorian(i32 y) noexcept {
+    return (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0);
+}
+
+i32 days_in_month_gregorian(i32 y, i32 m) noexcept {
+    static constexpr i32 kDays[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    if (m < 1 || m > 12) return 0;
+    if (m == 2 && is_leap_year_gregorian(y)) return 29;
+    return kDays[m - 1];
+}
+
+bool is_valid_date_ymd(i32 y, i32 m, i32 d) noexcept {
+    if (y < 1 || y > 9999 || m < 1 || m > 12) return false;
+    return d >= 1 && d <= days_in_month_gregorian(y, m);
+}
+
+bool is_valid_time_hms(i32 h, i32 mi, i32 s) noexcept {
+    return h >= 0 && h < 24 && mi >= 0 && mi < 60 && s >= 0 && s < 60;
+}
+
 } // namespace
+
+std::string LegacyTextFile::read_string() {
+    std::string line;
+    while (!eof()) {
+        const char c = contents[pos];
+        if (c == '\n' || c == '\x1a' || (c == '\r' && pos + 1 < contents.size() && contents[pos + 1] == '\n')) break;
+        ++pos;
+        if (c != '\r') line.push_back(c);
+    }
+    return line;
+}
+
+void LegacyTextFile::skip_line() {
+    const usize lf = contents.find('\n', pos);
+    pos = lf == std::string::npos ? contents.size() : lf + 1;
+}
+
+f64 LegacyTextFile::read_real() {
+    f64 value = 0.0;
+    bool negative = false;
+    u32 divisor = 1;
+    while (!eoln()) {
+        const char c = contents[pos++];
+        if (c == ' ' || c == '\t') continue;
+        if (c == '-') {
+            negative = true;
+        } else if ((c == '.' || c == ',') && divisor == 1) {
+            divisor = 10;
+        } else if (c >= '0' && c <= '9') {
+            if (divisor == 1) {
+                value = value * 10.0 + (c - '0');
+            } else {
+                value += static_cast<f64>(c - '0') / static_cast<i32>(divisor);
+                divisor *= 10;
+            }
+        } else {
+            break;
+        }
+    }
+    return negative ? -value : value;
+}
+
+Result<RValue> Runner::close_legacy_text_file() {
+    if (!legacy_text_file_) return RValue(0.0);
+    LegacyTextFile file = std::move(*legacy_text_file_);
+    legacy_text_file_.reset();
+    if (file.writable) {
+        auto written = vfs_.write_all_bytes(file.path, {
+            reinterpret_cast<const u8*>(file.contents.data()), file.contents.size()});
+        if (!written) return written.error();
+    }
+    return RValue(0.0);
+}
+
+Result<RValue> Runner::open_legacy_text_file(std::string_view path, i32 mode) {
+    auto closed = close_legacy_text_file();
+    if (!closed) return closed.error();
+    LegacyTextFile file;
+    file.path = path;
+    file.writable = mode != 0;
+    if (mode == 0 || (mode == 2 && vfs_.exists(path))) {
+        auto contents = vfs_.read_all_bytes(path);
+        if (!contents) return contents.error();
+        const auto& bytes = contents.value();
+        if (!bytes.empty()) file.contents.assign(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    } else {
+        auto created = vfs_.write_all_bytes(path, {});
+        if (!created) return created.error();
+    }
+    legacy_text_file_ = std::move(file);
+    return RValue(0.0);
+}
 
 void Runner::register_builtins_core() {
     // -----------------------------------------------------------------------
@@ -181,6 +278,18 @@ void Runner::register_builtins_core() {
         }
         return *best;
     });
+    register_builtin("min3", [](Runner&, i32, i32, std::span<const RValue> a) {
+        const f64 x0 = arg_real(a, 0);
+        const f64 x1 = arg_real(a, 1);
+        const f64 x2 = arg_real(a, 2);
+        return RValue(std::min({x0, x1, x2}));
+    });
+    register_builtin("max3", [](Runner&, i32, i32, std::span<const RValue> a) {
+        const f64 x0 = arg_real(a, 0);
+        const f64 x1 = arg_real(a, 1);
+        const f64 x2 = arg_real(a, 2);
+        return RValue(std::max({x0, x1, x2}));
+    });
     register_builtin("mean", [](Runner&, i32, i32, std::span<const RValue> a) {
         if (a.empty()) return RValue(0.0);
         f64 s = 0.0;
@@ -214,9 +323,7 @@ void Runner::register_builtins_core() {
         return RValue(std::sqrt(dx * dx + dy * dy + dz * dz));
     });
     register_builtin("point_direction", [](Runner&, i32, i32, std::span<const RValue> a) {
-        f64 deg = rad_to_deg(std::atan2(-(arg_real(a, 3) - arg_real(a, 1)), arg_real(a, 2) - arg_real(a, 0)));
-        if (deg < 0.0) deg += 360.0;
-        return RValue(std::fmod(deg, 360.0));
+        return RValue(gm_point_direction(arg_real(a, 0), arg_real(a, 1), arg_real(a, 2), arg_real(a, 3)));
     });
     register_builtin("lengthdir_x", [](Runner&, i32, i32, std::span<const RValue> a) {
         return RValue(arg_real(a, 0) * std::cos(deg_to_rad(arg_real(a, 1))));
@@ -487,6 +594,156 @@ void Runner::register_builtins_core() {
     register_builtin("date_second_span", [](Runner&, i32, i32, std::span<const RValue> a) {
         return RValue(std::fabs(arg_real(a, 1) - arg_real(a, 0)) * 86400.0);
     });
+    register_builtin("date_create_date", [](Runner&, i32, i32, std::span<const RValue> a) {
+        std::tm t{};
+        t.tm_year = arg_i32(a, 0) - 1900;
+        t.tm_mon = arg_i32(a, 1) - 1;
+        t.tm_mday = arg_i32(a, 2);
+        return RValue(std::floor(delphi_datetime_from_tm(t)));
+    });
+    register_builtin("date_create_time", [](Runner&, i32, i32, std::span<const RValue> a) {
+        const f64 sec = arg_real(a, 0) * 3600.0 + arg_real(a, 1) * 60.0 + arg_real(a, 2);
+        return RValue(sec / 86400.0);
+    });
+    register_builtin("date_valid_datetime", [](Runner&, i32, i32, std::span<const RValue> a) {
+        return RValue(is_valid_date_ymd(arg_i32(a, 0), arg_i32(a, 1), arg_i32(a, 2)) &&
+                      is_valid_time_hms(arg_i32(a, 3), arg_i32(a, 4), arg_i32(a, 5)));
+    });
+    register_builtin("date_valid_date", [](Runner&, i32, i32, std::span<const RValue> a) {
+        return RValue(is_valid_date_ymd(arg_i32(a, 0), arg_i32(a, 1), arg_i32(a, 2)));
+    });
+    register_builtin("date_valid_time", [](Runner&, i32, i32, std::span<const RValue> a) {
+        return RValue(is_valid_time_hms(arg_i32(a, 0), arg_i32(a, 1), arg_i32(a, 2)));
+    });
+    register_builtin("date_inc_year", [](Runner&, i32, i32, std::span<const RValue> a) {
+        std::tm t = tm_from_delphi_datetime(arg_real(a, 0));
+        t.tm_year += arg_i32(a, 1);
+        const i32 dim = days_in_month_gregorian(t.tm_year + 1900, t.tm_mon + 1);
+        if (t.tm_mday > dim) t.tm_mday = dim;
+        return RValue(delphi_datetime_from_tm(t));
+    });
+    register_builtin("date_inc_month", [](Runner&, i32, i32, std::span<const RValue> a) {
+        std::tm t = tm_from_delphi_datetime(arg_real(a, 0));
+        const i32 total_m = t.tm_year * 12 + t.tm_mon + arg_i32(a, 1);
+        i32 ny = total_m / 12;
+        i32 nm = total_m % 12;
+        if (nm < 0) { nm += 12; --ny; }
+        t.tm_year = ny;
+        t.tm_mon = nm;
+        const i32 dim = days_in_month_gregorian(t.tm_year + 1900, t.tm_mon + 1);
+        if (t.tm_mday > dim) t.tm_mday = dim;
+        return RValue(delphi_datetime_from_tm(t));
+    });
+    register_builtin("date_inc_week", [](Runner&, i32, i32, std::span<const RValue> a) {
+        return RValue(arg_real(a, 0) + arg_real(a, 1) * 7.0);
+    });
+    register_builtin("date_inc_day", [](Runner&, i32, i32, std::span<const RValue> a) {
+        return RValue(arg_real(a, 0) + arg_real(a, 1));
+    });
+    register_builtin("date_inc_hour", [](Runner&, i32, i32, std::span<const RValue> a) {
+        return RValue(arg_real(a, 0) + arg_real(a, 1) / 24.0);
+    });
+    register_builtin("date_inc_minute", [](Runner&, i32, i32, std::span<const RValue> a) {
+        return RValue(arg_real(a, 0) + arg_real(a, 1) / 1440.0);
+    });
+    register_builtin("date_inc_second", [](Runner&, i32, i32, std::span<const RValue> a) {
+        return RValue(arg_real(a, 0) + arg_real(a, 1) / 86400.0);
+    });
+    register_builtin("date_get_week", [](Runner&, i32, i32, std::span<const RValue> a) {
+        const std::tm t = tm_from_delphi_datetime(arg_real(a, 0));
+        return RValue(t.tm_yday / 7 + 1);
+    });
+    register_builtin("date_get_day_of_year", [](Runner&, i32, i32, std::span<const RValue> a) {
+        const std::tm t = tm_from_delphi_datetime(arg_real(a, 0));
+        return RValue(t.tm_yday + 1);
+    });
+    register_builtin("date_get_hour_of_year", [](Runner&, i32, i32, std::span<const RValue> a) {
+        const std::tm t = tm_from_delphi_datetime(arg_real(a, 0));
+        return RValue(t.tm_yday * 24 + t.tm_hour);
+    });
+    register_builtin("date_get_minute_of_year", [](Runner&, i32, i32, std::span<const RValue> a) {
+        const std::tm t = tm_from_delphi_datetime(arg_real(a, 0));
+        return RValue((t.tm_yday * 24 + t.tm_hour) * 60 + t.tm_min);
+    });
+    register_builtin("date_get_second_of_year", [](Runner&, i32, i32, std::span<const RValue> a) {
+        const std::tm t = tm_from_delphi_datetime(arg_real(a, 0));
+        return RValue(((t.tm_yday * 24 + t.tm_hour) * 60 + t.tm_min) * 60 + t.tm_sec);
+    });
+    register_builtin("date_year_span", [](Runner&, i32, i32, std::span<const RValue> a) {
+        return RValue(std::fabs(arg_real(a, 1) - arg_real(a, 0)) / 365.25);
+    });
+    register_builtin("date_month_span", [](Runner&, i32, i32, std::span<const RValue> a) {
+        return RValue(std::fabs(arg_real(a, 1) - arg_real(a, 0)) / 30.4375);
+    });
+    register_builtin("date_week_span", [](Runner&, i32, i32, std::span<const RValue> a) {
+        return RValue(std::fabs(arg_real(a, 1) - arg_real(a, 0)) / 7.0);
+    });
+    register_builtin("date_day_span", [](Runner&, i32, i32, std::span<const RValue> a) {
+        return RValue(std::fabs(arg_real(a, 1) - arg_real(a, 0)));
+    });
+    register_builtin("date_hour_span", [](Runner&, i32, i32, std::span<const RValue> a) {
+        return RValue(std::fabs(arg_real(a, 1) - arg_real(a, 0)) * 24.0);
+    });
+    register_builtin("date_minute_span", [](Runner&, i32, i32, std::span<const RValue> a) {
+        return RValue(std::fabs(arg_real(a, 1) - arg_real(a, 0)) * 1440.0);
+    });
+    register_builtin("date_compare_datetime", [](Runner&, i32, i32, std::span<const RValue> a) {
+        const f64 d = arg_real(a, 0) - arg_real(a, 1);
+        return RValue(std::fabs(d) < 1e-9 ? 0 : (d < 0.0 ? -1 : 1));
+    });
+    register_builtin("date_compare_date", [](Runner&, i32, i32, std::span<const RValue> a) {
+        const f64 d = std::floor(arg_real(a, 0)) - std::floor(arg_real(a, 1));
+        return RValue(d == 0.0 ? 0 : (d < 0.0 ? -1 : 1));
+    });
+    register_builtin("date_compare_time", [](Runner&, i32, i32, std::span<const RValue> a) {
+        const f64 t1 = arg_real(a, 0) - std::floor(arg_real(a, 0));
+        const f64 t2 = arg_real(a, 1) - std::floor(arg_real(a, 1));
+        const f64 d = t1 - t2;
+        return RValue(std::fabs(d) < 1e-9 ? 0 : (d < 0.0 ? -1 : 1));
+    });
+    register_builtin("date_date_of", [](Runner&, i32, i32, std::span<const RValue> a) {
+        return RValue(std::floor(arg_real(a, 0)));
+    });
+    register_builtin("date_time_of", [](Runner&, i32, i32, std::span<const RValue> a) {
+        const f64 v = arg_real(a, 0);
+        return RValue(v - std::floor(v));
+    });
+    register_builtin("date_datetime_string", [](Runner&, i32, i32, std::span<const RValue> a) {
+        const std::tm t = tm_from_delphi_datetime(arg_real(a, 0));
+        char buf[64];
+        std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d",
+                      t.tm_year + 1900, t.tm_mon + 1, t.tm_mday, t.tm_hour, t.tm_min, t.tm_sec);
+        return RValue(std::string(buf));
+    });
+    register_builtin("date_date_string", [](Runner&, i32, i32, std::span<const RValue> a) {
+        const std::tm t = tm_from_delphi_datetime(arg_real(a, 0));
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d", t.tm_year + 1900, t.tm_mon + 1, t.tm_mday);
+        return RValue(std::string(buf));
+    });
+    register_builtin("date_time_string", [](Runner&, i32, i32, std::span<const RValue> a) {
+        const std::tm t = tm_from_delphi_datetime(arg_real(a, 0));
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%02d:%02d:%02d", t.tm_hour, t.tm_min, t.tm_sec);
+        return RValue(std::string(buf));
+    });
+    register_builtin("date_days_in_month", [](Runner&, i32, i32, std::span<const RValue> a) {
+        const std::tm t = tm_from_delphi_datetime(arg_real(a, 0));
+        return RValue(days_in_month_gregorian(t.tm_year + 1900, t.tm_mon + 1));
+    });
+    register_builtin("date_days_in_year", [](Runner&, i32, i32, std::span<const RValue> a) {
+        const std::tm t = tm_from_delphi_datetime(arg_real(a, 0));
+        return RValue(is_leap_year_gregorian(t.tm_year + 1900) ? 366 : 365);
+    });
+    register_builtin("date_leap_year", [](Runner&, i32, i32, std::span<const RValue> a) {
+        const std::tm t = tm_from_delphi_datetime(arg_real(a, 0));
+        return RValue(is_leap_year_gregorian(t.tm_year + 1900));
+    });
+    register_builtin("date_is_today", [](Runner&, i32, i32, std::span<const RValue> a) {
+        const std::time_t now = std::time(nullptr);
+        const f64 today = std::floor(static_cast<f64>(now) / 86400.0 + 25569.0);
+        return RValue(std::floor(arg_real(a, 0)) == today);
+    });
 
     // -----------------------------------------------------------------------
     // Hashing (GM 8.1+ built-ins)
@@ -613,23 +870,7 @@ void Runner::register_builtins_core() {
         auto* tf = r.get_text_file(arg_i32(a, 0));
         if (!tf || tf->mode == 0) return RValue(0.0);
 
-        f64 value = arg_real(a, 1);
-        // GM8.0 floors the signed value. GM8.1 and 8.2 write the sign separately.
-        const bool negative = r.version_mode() != VersionMode::GM80 && value < 0.0;
-        if (negative) value = -value;
-        const auto whole = delphi_floor_i32(value);
-        if (!whole) return whole.error();
-        const auto fraction = delphi_floor_i32((value - whole.value()) * 1'000'000.0);
-        if (!fraction) return fraction.error();
-
-        tf->write_buf.append(negative ? " -" : " ");
-        tf->write_buf.append(std::to_string(whole.value()));
-        if (fraction.value() != 0) {
-            char digits[8];
-            std::snprintf(digits, sizeof(digits), ".%06u", static_cast<u32>(fraction.value()) % 1'000'000u);
-            tf->write_buf.append(digits);
-        }
-        return RValue(0.0);
+        return append_text_real(tf->write_buf, arg_real(a, 1), r.version_mode() != VersionMode::GM80);
     });
     register_builtin("file_text_writeln", [](Runner& r, i32, i32, std::span<const RValue> a) {
         if (auto* tf = r.get_text_file(arg_i32(a, 0))) tf->write_buf.append("\r\n");
@@ -774,28 +1015,28 @@ void Runner::register_builtins_core() {
         return RValue(0.0);
     });
     register_builtin("registry_write_string", [](Runner& r, i32, i32, std::span<const RValue> a) {
-        r.vfs().registry_write_string("", arg_str(a, 0), arg_str(a, 1));
+        r.vfs().registry_write_string(std::nullopt, arg_str(a, 0), arg_str(a, 1));
         return RValue(0.0);
     });
     register_builtin("registry_write_real", [](Runner& r, i32, i32, std::span<const RValue> a) {
-        r.vfs().registry_write_real("", arg_str(a, 0), static_cast<u32>(arg_i32(a, 1)));
+        r.vfs().registry_write_real(std::nullopt, arg_str(a, 0), arg_real(a, 1));
         return RValue(0.0);
     });
     register_builtin("registry_read_string", [](Runner& r, i32, i32, std::span<const RValue> a) {
-        return RValue(r.vfs().registry_read_string("", arg_str(a, 0)));
+        return RValue(r.vfs().registry_read_string(std::nullopt, arg_str(a, 0)));
     });
     register_builtin("registry_read_real", [](Runner& r, i32, i32, std::span<const RValue> a) {
-        return RValue(r.vfs().registry_read_real("", arg_str(a, 0)));
+        return RValue(r.vfs().registry_read_real(std::nullopt, arg_str(a, 0)));
     });
     register_builtin("registry_exists", [](Runner& r, i32, i32, std::span<const RValue> a) {
-        return RValue(r.vfs().registry_exists("", arg_str(a, 0)));
+        return RValue(r.vfs().registry_exists(std::nullopt, arg_str(a, 0)));
     });
     register_builtin("registry_write_string_ext", [](Runner& r, i32, i32, std::span<const RValue> a) {
         r.vfs().registry_write_string(arg_str(a, 0), arg_str(a, 1), arg_str(a, 2));
         return RValue(0.0);
     });
     register_builtin("registry_write_real_ext", [](Runner& r, i32, i32, std::span<const RValue> a) {
-        r.vfs().registry_write_real(arg_str(a, 0), arg_str(a, 1), static_cast<u32>(arg_i32(a, 2)));
+        r.vfs().registry_write_real(arg_str(a, 0), arg_str(a, 1), arg_real(a, 2));
         return RValue(0.0);
     });
     register_builtin("registry_read_string_ext", [](Runner& r, i32, i32, std::span<const RValue> a) {
@@ -1028,6 +1269,69 @@ void Runner::register_builtins_core() {
     register_builtin("ds_grid_value_exists", [](Runner& r, i32, i32, std::span<const RValue> a) {
         return a.size() >= 6 ? RValue(r.ds().grid_value_exists(arg_i32(a, 0), arg_i32(a, 1), arg_i32(a, 2), arg_i32(a, 3), arg_i32(a, 4), a[5])) : RValue(false);
     });
+    register_builtin("ds_grid_add_region", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        if (a.size() >= 6) r.ds().grid_add_region(arg_i32(a, 0), arg_i32(a, 1), arg_i32(a, 2), arg_i32(a, 3), arg_i32(a, 4), a[5]);
+        return RValue(0.0);
+    });
+    register_builtin("ds_grid_multiply_region", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        r.ds().grid_multiply_region(arg_i32(a, 0), arg_i32(a, 1), arg_i32(a, 2), arg_i32(a, 3), arg_i32(a, 4), arg_real(a, 5));
+        return RValue(0.0);
+    });
+    register_builtin("ds_grid_set_disk", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        if (a.size() >= 5) r.ds().grid_set_disk(arg_i32(a, 0), arg_real(a, 1), arg_real(a, 2), arg_real(a, 3), a[4]);
+        return RValue(0.0);
+    });
+    register_builtin("ds_grid_add_disk", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        if (a.size() >= 5) r.ds().grid_add_disk(arg_i32(a, 0), arg_real(a, 1), arg_real(a, 2), arg_real(a, 3), a[4]);
+        return RValue(0.0);
+    });
+    register_builtin("ds_grid_multiply_disk", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        r.ds().grid_multiply_disk(arg_i32(a, 0), arg_real(a, 1), arg_real(a, 2), arg_real(a, 3), arg_real(a, 4));
+        return RValue(0.0);
+    });
+    register_builtin("ds_grid_set_grid_region", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        r.ds().grid_set_grid_region(arg_i32(a, 0), arg_i32(a, 1), arg_i32(a, 2), arg_i32(a, 3), arg_i32(a, 4), arg_i32(a, 5), arg_i32(a, 6), arg_i32(a, 7));
+        return RValue(0.0);
+    });
+    register_builtin("ds_grid_add_grid_region", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        r.ds().grid_add_grid_region(arg_i32(a, 0), arg_i32(a, 1), arg_i32(a, 2), arg_i32(a, 3), arg_i32(a, 4), arg_i32(a, 5), arg_i32(a, 6), arg_i32(a, 7));
+        return RValue(0.0);
+    });
+    register_builtin("ds_grid_multiply_grid_region", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        r.ds().grid_multiply_grid_region(arg_i32(a, 0), arg_i32(a, 1), arg_i32(a, 2), arg_i32(a, 3), arg_i32(a, 4), arg_i32(a, 5), arg_i32(a, 6), arg_i32(a, 7));
+        return RValue(0.0);
+    });
+    register_builtin("ds_grid_get_disk_sum", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        return RValue(r.ds().grid_get_disk_sum(arg_i32(a, 0), arg_real(a, 1), arg_real(a, 2), arg_real(a, 3)));
+    });
+    register_builtin("ds_grid_get_disk_min", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        return RValue(r.ds().grid_get_disk_min(arg_i32(a, 0), arg_real(a, 1), arg_real(a, 2), arg_real(a, 3)));
+    });
+    register_builtin("ds_grid_get_disk_max", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        return RValue(r.ds().grid_get_disk_max(arg_i32(a, 0), arg_real(a, 1), arg_real(a, 2), arg_real(a, 3)));
+    });
+    register_builtin("ds_grid_get_disk_mean", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        return RValue(r.ds().grid_get_disk_mean(arg_i32(a, 0), arg_real(a, 1), arg_real(a, 2), arg_real(a, 3)));
+    });
+    register_builtin("ds_grid_value_x", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        return a.size() >= 6 ? RValue(r.ds().grid_value_x(arg_i32(a, 0), arg_i32(a, 1), arg_i32(a, 2), arg_i32(a, 3), arg_i32(a, 4), a[5])) : RValue(-1);
+    });
+    register_builtin("ds_grid_value_y", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        return a.size() >= 6 ? RValue(r.ds().grid_value_y(arg_i32(a, 0), arg_i32(a, 1), arg_i32(a, 2), arg_i32(a, 3), arg_i32(a, 4), a[5])) : RValue(-1);
+    });
+    register_builtin("ds_grid_value_disk_exists", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        return a.size() >= 5 ? RValue(r.ds().grid_value_disk_exists(arg_i32(a, 0), arg_real(a, 1), arg_real(a, 2), arg_real(a, 3), a[4])) : RValue(false);
+    });
+    register_builtin("ds_grid_value_disk_x", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        return a.size() >= 5 ? RValue(r.ds().grid_value_disk_x(arg_i32(a, 0), arg_real(a, 1), arg_real(a, 2), arg_real(a, 3), a[4])) : RValue(-1);
+    });
+    register_builtin("ds_grid_value_disk_y", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        return a.size() >= 5 ? RValue(r.ds().grid_value_disk_y(arg_i32(a, 0), arg_real(a, 1), arg_real(a, 2), arg_real(a, 3), a[4])) : RValue(-1);
+    });
+    register_builtin("ds_grid_shuffle", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        r.ds().grid_shuffle(arg_i32(a, 0), r.rng_);
+        return RValue(0.0);
+    });
     register_builtin("ds_grid_write", [](Runner& r, i32, i32, std::span<const RValue> a) { return RValue(r.ds().grid_write(arg_i32(a, 0))); });
     register_builtin("ds_grid_read", [](Runner& r, i32, i32, std::span<const RValue> a) { r.ds().grid_read(arg_i32(a, 0), arg_str(a, 1)); return RValue(0.0); });
 
@@ -1039,13 +1343,15 @@ void Runner::register_builtins_core() {
         return RValue(id >= 0 && static_cast<usize>(id) < r.game().scripts.size() &&
                       r.game().scripts[static_cast<usize>(id)].exists);
     });
-    register_builtin("script_get_name", [](Runner& r, i32, i32, std::span<const RValue> a) {
+    auto fn_script_name = [](Runner& r, i32, i32, std::span<const RValue> a) {
         const i32 id = arg_i32(a, 0);
         if (id >= 0 && static_cast<usize>(id) < r.game().scripts.size() && r.game().scripts[static_cast<usize>(id)].exists) {
             return RValue(r.game().scripts[static_cast<usize>(id)].name);
         }
         return RValue(std::string("<undefined>"));
-    });
+    };
+    register_builtin("script_get_name", fn_script_name);
+    register_builtin("script_name", fn_script_name);
     register_builtin("script_get_text", [](Runner& r, i32, i32, std::span<const RValue> a) {
         const i32 id = arg_i32(a, 0);
         if (id >= 0 && static_cast<usize>(id) < r.game().scripts.size() && r.game().scripts[static_cast<usize>(id)].exists) {
@@ -1226,13 +1532,219 @@ void Runner::register_builtins_core() {
     register_builtin("get_integer", [](Runner&, i32, i32, std::span<const RValue> a) {
         return RValue(arg_real(a, 1));
     });
-    register_builtin("sleep", [](Runner&, i32, i32, std::span<const RValue> a) {
+    register_builtin("sleep", [](Runner& r, i32, i32, std::span<const RValue> a) -> Result<RValue> {
         const f64 ms = std::max(0.0, arg_real(a, 0));
-        if (ms > 0.0) {
-            Clock::sleep_until_us(Clock::now_us() + static_cast<u64>(ms * 1000.0));
+        if (!r.sleep_ms(ms)) {
+            return Error{"Window close requested during sleep"};
         }
         return RValue(0.0);
     });
+    register_builtin("set_program_priority", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
+    register_builtin("window_handle", [](Runner& r, i32, i32, std::span<const RValue>) {
+        return RValue(static_cast<f64>(r.window().native_window_handle()));
+    });
+
+    // -----------------------------------------------------------------------
+    // External DLL Interception (external_define*, external_call*, external_free, get_function_address)
+    // -----------------------------------------------------------------------
+    auto fn_ext_define = [](Runner& r, i32, i32, std::span<const RValue> a) {
+        const std::string_view dll = arg_str(a, 0);
+        const std::string_view fn = arg_str(a, 1);
+        const i32 call_type = arg_i32(a, 2, 0);
+        const ExternalValueType ret_type = (arg_i32(a, 3, 0) == 1) ? ExternalValueType::String : ExternalValueType::Real;
+        const i32 nargs = std::clamp(arg_i32(a, 4, 0), 0, 16);
+        std::vector<ExternalValueType> arg_types;
+        arg_types.reserve(static_cast<usize>(nargs));
+        for (i32 i = 0; i < nargs; ++i) {
+            arg_types.push_back((arg_i32(a, static_cast<usize>(5 + i), 0) == 1) ? ExternalValueType::String : ExternalValueType::Real);
+        }
+        return RValue(r.dll_registry().define_external(dll, fn, call_type, ret_type, std::move(arg_types)));
+    };
+    auto fn_ext_define_fixed = [](i32 fixed_nargs) {
+        return [fixed_nargs](Runner& r, i32, i32, std::span<const RValue> a) {
+            const std::string_view dll = arg_str(a, 0);
+            const std::string_view fn = arg_str(a, 1);
+            // The fixed cdecl forms place the return type last. Variants 5..8
+            // accept only real parameters and omit their types from the declaration.
+            const usize typed = fixed_nargs <= 4 ? static_cast<usize>(fixed_nargs) : 0;
+            std::vector<ExternalValueType> arg_types(static_cast<usize>(fixed_nargs), ExternalValueType::Real);
+            for (usize i = 0; i < typed; ++i) {
+                if (arg_i32(a, 2 + i) == 1) arg_types[i] = ExternalValueType::String;
+            }
+            const auto ret_type = arg_i32(a, 2 + typed) == 1 ? ExternalValueType::String : ExternalValueType::Real;
+            return RValue(r.dll_registry().define_external(dll, fn, 0, ret_type, std::move(arg_types)));
+        };
+    };
+    register_builtin("external_define", fn_ext_define);
+    register_builtin("external_define0", fn_ext_define_fixed(0));
+    register_builtin("external_define1", fn_ext_define_fixed(1));
+    register_builtin("external_define2", fn_ext_define_fixed(2));
+    register_builtin("external_define3", fn_ext_define_fixed(3));
+    register_builtin("external_define4", fn_ext_define_fixed(4));
+    register_builtin("external_define5", fn_ext_define_fixed(5));
+    register_builtin("external_define6", fn_ext_define_fixed(6));
+    register_builtin("external_define7", fn_ext_define_fixed(7));
+    register_builtin("external_define8", fn_ext_define_fixed(8));
+
+    auto fn_ext_call = [](Runner& r, i32, i32, std::span<const RValue> a) {
+        if (a.empty()) return RValue(0.0);
+        const i32 id = arg_i32(a, 0, 0);
+        return r.dll_registry().call_external(r, id, a.subspan(1));
+    };
+    register_builtin("external_call", fn_ext_call);
+    register_builtin("external_call0", fn_ext_call);
+    register_builtin("external_call1", fn_ext_call);
+    register_builtin("external_call2", fn_ext_call);
+    register_builtin("external_call3", fn_ext_call);
+    register_builtin("external_call4", fn_ext_call);
+    register_builtin("external_call5", fn_ext_call);
+    register_builtin("external_call6", fn_ext_call);
+    register_builtin("external_call7", fn_ext_call);
+    register_builtin("external_call8", fn_ext_call);
+
+    register_builtin("external_free", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        r.dll_registry().free_external(r, arg_str(a, 0));
+        return RValue(0.0);
+    });
+    register_builtin("get_function_address", [](Runner&, i32, i32, std::span<const RValue> a) {
+        return RValue(DllRegistry::get_function_address(arg_str(a, 0)));
+    });
+
+    // -----------------------------------------------------------------------
+    // Legacy File, Included Files, Disk & Program Execution Built-ins
+    // -----------------------------------------------------------------------
+    register_builtin("file_open_read", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        return r.open_legacy_text_file(arg_str(a, 0), 0);
+    });
+    register_builtin("file_open_write", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        return r.open_legacy_text_file(arg_str(a, 0), 1);
+    });
+    register_builtin("file_open_append", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        return r.open_legacy_text_file(arg_str(a, 0), 2);
+    });
+    register_builtin("file_close", [](Runner& r, i32, i32, std::span<const RValue>) {
+        return r.close_legacy_text_file();
+    });
+    const auto legacy_op = [this](std::string_view name, bool write, auto op) {
+        register_builtin(name, [write, op](Runner& r, i32, i32, std::span<const RValue> a) -> Result<RValue> {
+            auto& file = r.legacy_text_file_;
+            if (!file || file->writable != write) {
+                return Error{write ? "File is not opened for writing." : "File is not opened for reading."};
+            }
+            return op(*file, a);
+        });
+    };
+    legacy_op("file_write_string", true, [](LegacyTextFile& file, std::span<const RValue> a) {
+        file.contents.append(arg_str(a, 0));
+        return RValue(0.0);
+    });
+    legacy_op("file_write_real", true, [](LegacyTextFile& file, std::span<const RValue> a) {
+        // The implicit file API keeps GM8.0's signed-floor formatting even in GM8.1.
+        return append_text_real(file.contents, arg_real(a, 0), false);
+    });
+    legacy_op("file_writeln", true, [](LegacyTextFile& file, auto) {
+        file.contents.append("\r\n");
+        return RValue(0.0);
+    });
+    legacy_op("file_read_string", false, [](LegacyTextFile& file, auto) { return RValue(file.read_string()); });
+    legacy_op("file_read_real", false, [](LegacyTextFile& file, auto) { return RValue(file.read_real()); });
+    legacy_op("file_readln", false, [](LegacyTextFile& file, auto) {
+        file.skip_line();
+        return RValue(0.0);
+    });
+    legacy_op("file_eof", false, [](LegacyTextFile& file, auto) { return RValue(file.eof()); });
+    legacy_op("file_eoln", false, [](LegacyTextFile& file, auto) { return RValue(file.eoln()); });
+    register_builtin("file_attributes", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        const std::string_view path = arg_str(a, 0);
+        const i32 attr = arg_i32(a, 1);
+        if (!r.vfs().exists(path)) return RValue(false);
+        const bool is_dir = r.vfs().directory_exists(path);
+        if ((attr & 16) != 0) return RValue(is_dir);
+        return RValue(!is_dir);
+    });
+    register_builtin("filename_drive", [](Runner&, i32, i32, std::span<const RValue> a) {
+        const std::string_view p = arg_str(a, 0);
+        if (p.size() >= 2 && p[1] == ':') return RValue(std::string(p.substr(0, 2)));
+        return RValue(std::string{});
+    });
+    register_builtin("export_include_file", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        const std::string_view name = arg_str(a, 0);
+        const std::string lower = ascii_to_lower(name);
+        for (const auto& inc : r.game().included_files) {
+            if (!inc.exists || !inc.store) continue;
+            if (ascii_to_lower(inc.filename) == lower) {
+                return RValue(static_cast<bool>(r.vfs().write_all_bytes(inc.filename, inc.data)));
+            }
+        }
+        return RValue(false);
+    });
+    register_builtin("export_include_file_location", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        const std::string_view name = arg_str(a, 0);
+        const std::string_view loc = arg_str(a, 1);
+        const std::string lower = ascii_to_lower(name);
+        for (const auto& inc : r.game().included_files) {
+            if (!inc.exists || !inc.store) continue;
+            if (ascii_to_lower(inc.filename) == lower) {
+                return RValue(static_cast<bool>(r.vfs().write_all_bytes(loc, inc.data)));
+            }
+        }
+        return RValue(false);
+    });
+    register_builtin("discard_include_file", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        const std::string_view name = arg_str(a, 0);
+        (void)r.vfs().delete_file(name);
+        return RValue(true);
+    });
+    register_builtin("execute_program", [](Runner&, i32, i32, std::span<const RValue> a) {
+        const std::string_view prog = arg_str(a, 0);
+        if (prog.starts_with("http://") || prog.starts_with("https://")) {
+            (void)PlatformWindow::open_url(prog);
+        }
+        return RValue(0.0);
+    });
+    register_builtin("disk_free", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        std::error_code ec;
+        const auto p = a.empty() || arg_str(a, 0).empty()
+                           ? r.vfs().resolve_for_read(".")
+                           : r.vfs().resolve_for_read(arg_str(a, 0));
+        const auto si = std::filesystem::space(p, ec);
+        return RValue(ec ? 0.0 : static_cast<f64>(si.available));
+    });
+    register_builtin("disk_size", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        std::error_code ec;
+        const auto p = a.empty() || arg_str(a, 0).empty()
+                           ? r.vfs().resolve_for_read(".")
+                           : r.vfs().resolve_for_read(arg_str(a, 0));
+        const auto si = std::filesystem::space(p, ec);
+        return RValue(ec ? 0.0 : static_cast<f64>(si.capacity));
+    });
+
+    // -----------------------------------------------------------------------
+    // YoYo_* (GM 8.1 Platform / Web / Virtual Key Built-ins)
+    // -----------------------------------------------------------------------
+    register_builtin("YoYo_GetPlatform", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0); }); // os_win32
+    register_builtin("YoYo_GetDevice", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0); });
+    register_builtin("YoYo_GetDomain", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(std::string{}); });
+    register_builtin("YoYo_GetTimer", [](Runner&, i32, i32, std::span<const RValue>) {
+        return RValue(static_cast<f64>(Clock::now_us()));
+    });
+    register_builtin("YoYo_OpenURL", [](Runner&, i32, i32, std::span<const RValue> a) {
+        (void)PlatformWindow::open_url(arg_str(a, 0));
+        return RValue(0.0);
+    });
+    register_builtin("YoYo_OpenURL_ext", [](Runner&, i32, i32, std::span<const RValue> a) {
+        (void)PlatformWindow::open_url(arg_str(a, 0));
+        return RValue(0.0);
+    });
+    register_builtin("YoYo_OpenURL_full", [](Runner&, i32, i32, std::span<const RValue> a) {
+        (void)PlatformWindow::open_url(arg_str(a, 0));
+        return RValue(0.0);
+    });
+    register_builtin("YoYo_EnableAlphaBlend", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
+    register_builtin("YoYo_AddVirtualKey", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(-1); });
+    register_builtin("YoYo_DeleteVirtualKey", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
+    register_builtin("YoYo_ShowVirtualKey", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
+    register_builtin("YoYo_HideVirtualKey", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
     register_builtin("game_end", [](Runner& r, i32, i32, std::span<const RValue>) {
         r.request_game_end();
         return RValue(0.0);

@@ -12,6 +12,7 @@ add_library(gm_runtime STATIC
     builtins_gameplay.cpp
     builtins_graphics.cpp
     builtins_actions.cpp
+    builtins_misc.cpp
 )
 
 target_include_directories(gm_runtime PUBLIC ${CMAKE_SOURCE_DIR}/src)
@@ -23,6 +24,7 @@ target_link_libraries(gm_runtime
         gm_gml
         gm_graphics
         gm_audio
+        gm_extensions
 )
 
 gmrunner_apply_warnings(gm_runtime)

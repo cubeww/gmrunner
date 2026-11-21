@@ -133,13 +133,13 @@ std::string BytecodeChunk::disassemble() const {
         }
         out.push_back('\n');
     }
-    for (const auto& action : code_actions) out += action.disassemble();
+    for (const auto& action : code_actions) out += action->disassemble();
     return out;
 }
 
 usize BytecodeChunk::instruction_count() const noexcept {
     usize count = code.size();
-    for (const auto& action : code_actions) count += action.code.size();
+    for (const auto& action : code_actions) count += action->code.size();
     return count;
 }
 

@@ -3,6 +3,7 @@
 #include "base/types.h"
 #include "gml/symbol_table.h"
 
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -65,7 +66,8 @@ enum class OpCode : u8 {
     LoadBuiltinInstArr,   // operand = builtin_var_id, aux = dims (1 or 2)
     StoreBuiltinInstArr,  // operand = builtin_var_id, aux = dims (1 or 2)
 
-    // Operators (exact GM8 semantics; non-short-circuiting LogAnd/LogOr)
+    // Binary operators with aux = 1 are compound assignments: a failed
+    // operation writes back the original left operand.
     Add,
     Sub,
     Mul,
@@ -124,7 +126,7 @@ struct BytecodeChunk {
     std::vector<Instruction> code;
     std::vector<f64> reals;
     std::vector<std::string> strings;
-    std::vector<BytecodeChunk> code_actions;
+    std::vector<std::shared_ptr<const BytecodeChunk>> code_actions;
     u32 local_count = 0;
     u32 temp_count = 0;
 

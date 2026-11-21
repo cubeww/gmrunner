@@ -158,6 +158,39 @@ ColorRGBA make_vertex_color(u32 gm_bgr, f32 alpha) noexcept {
     return gm_bgr_to_rgba(gm_bgr, static_cast<u8>(clamped * 255.0f + 0.5f));
 }
 
+void mat4_identity(f32 m[16]) noexcept {
+    std::memset(m, 0, sizeof(f32) * 16u);
+    m[0] = m[5] = m[10] = m[15] = 1.0f;
+}
+
+// Column-major 4x4 matrix multiply: out = a * b
+void mat4_mul(f32 out[16], const f32 a[16], const f32 b[16]) noexcept {
+    f32 r[16]{};
+    for (int col = 0; col < 4; ++col) {
+        for (int row = 0; row < 4; ++row) {
+            r[col * 4 + row] =
+                a[0 * 4 + row] * b[col * 4 + 0] +
+                a[1 * 4 + row] * b[col * 4 + 1] +
+                a[2 * 4 + row] * b[col * 4 + 2] +
+                a[3 * 4 + row] * b[col * 4 + 3];
+        }
+    }
+    std::memcpy(out, r, sizeof(r));
+}
+
+bool write_rgba_to_file(const u8* rgba, i32 w, i32 h, std::string_view host_path) {
+    if (!rgba || w <= 0 || h <= 0) return false;
+    const std::string path(host_path);
+    const std::string lower = ascii_to_lower(host_path);
+    if (lower.ends_with(".bmp")) {
+        return stbi_write_bmp(path.c_str(), w, h, 4, rgba) != 0;
+    }
+    if (lower.ends_with(".jpg") || lower.ends_with(".jpeg")) {
+        return stbi_write_jpg(path.c_str(), w, h, 4, rgba, 90) != 0;
+    }
+    return stbi_write_png(path.c_str(), w, h, 4, rgba, w * 4) != 0;
+}
+
 } // namespace
 
 Renderer2D::~Renderer2D() {
@@ -174,7 +207,7 @@ Result<void> Renderer2D::init(GlGraphicsDevice& device) {
     const std::string header = is_es ? "#version 300 es\nprecision highp float;\n" : "#version 330 core\n";
 
     const std::string vs_src = header + R"(
-layout(location = 0) in vec2 a_pos;
+layout(location = 0) in vec3 a_pos;
 layout(location = 1) in vec2 a_uv;
 layout(location = 2) in vec4 a_col;
 uniform mat4 u_proj;
@@ -183,7 +216,7 @@ out vec4 v_col;
 void main() {
     v_uv = a_uv;
     v_col = a_col;
-    gl_Position = u_proj * vec4(a_pos, 0.0, 1.0);
+    gl_Position = u_proj * vec4(a_pos, 1.0);
 }
 )";
 
@@ -220,7 +253,7 @@ void main() {
     glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(kMaxBatchVertices * sizeof(Vertex2D)), nullptr, GL_STREAM_DRAW);
 
     glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex2D), reinterpret_cast<const void*>(offsetof(Vertex2D, x)));
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex2D), reinterpret_cast<const void*>(offsetof(Vertex2D, x)));
     glEnableVertexAttribArray(1);
     glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex2D), reinterpret_cast<const void*>(offsetof(Vertex2D, u)));
     glEnableVertexAttribArray(2);
@@ -232,9 +265,9 @@ void main() {
     vertices_.reserve(kMaxBatchVertices);
     create_builtin_font_texture();
 
-    // Identity default projection
-    std::memset(proj_matrix_, 0, sizeof(proj_matrix_));
-    proj_matrix_[0] = proj_matrix_[5] = proj_matrix_[10] = proj_matrix_[15] = 1.0f;
+    // Identity default projection & model transform
+    mat4_identity(proj_matrix_);
+    mat4_identity(model_matrix_);
 
     initialized_ = true;
     return Result<void>::success();
@@ -242,6 +275,18 @@ void main() {
 
 void Renderer2D::shutdown() noexcept {
     if (!initialized_) return;
+
+    if (screen_fbo_.valid()) {
+        device_->destroy_framebuffer(screen_fbo_);
+        screen_fbo_ = {};
+    }
+    if (screen_fbo_tex_.valid()) {
+        device_->destroy_texture(screen_fbo_tex_);
+        screen_fbo_tex_ = {};
+    }
+    screen_fbo_w_ = 0;
+    screen_fbo_h_ = 0;
+    using_screen_fbo_ = false;
 
     for (auto& sp : sprites_) {
         for (auto t : sp.subimages) device_->destroy_texture(t);
@@ -260,6 +305,18 @@ void Renderer2D::shutdown() noexcept {
         device_->destroy_texture(s.texture);
     }
     surfaces_.clear();
+
+    if (screen_fbo_.valid()) {
+        device_->destroy_framebuffer(screen_fbo_);
+        screen_fbo_ = {};
+    }
+    if (screen_fbo_tex_.valid()) {
+        device_->destroy_texture(screen_fbo_tex_);
+        screen_fbo_tex_ = {};
+    }
+    screen_fbo_w_ = 0;
+    screen_fbo_h_ = 0;
+    using_screen_fbo_ = false;
 
     if (builtin_font_tex_.valid()) {
         device_->destroy_texture(builtin_font_tex_);
@@ -327,7 +384,7 @@ void Renderer2D::upload_game_assets(const GameData& game) {
     fonts_.resize(game.fonts.size());
     for (usize i = 0; i < game.fonts.size(); ++i) {
         if (game.fonts[i].exists) {
-            upload_font(i, game.fonts[i]);
+            upload_font(i, game.fonts[i], game.meta.detected_version);
         }
     }
 }
@@ -394,7 +451,7 @@ void Renderer2D::free_background_texture(usize bg_idx) {
     backgrounds_[bg_idx] = {};
 }
 
-void Renderer2D::upload_font(usize font_idx, const FontData& font) {
+void Renderer2D::upload_font(usize font_idx, const FontData& font, VersionMode version) {
     if (font_idx >= fonts_.size()) {
         fonts_.resize(font_idx + 1);
     }
@@ -406,9 +463,12 @@ void Renderer2D::upload_font(usize font_idx, const FontData& font) {
     auto& fg = fonts_[font_idx];
     fg.tex_width = font.tex_width;
     fg.tex_height = font.tex_height;
-    fg.line_height = 1;
-    for (const auto& g : font.glyphs) {
-        if (g.h > fg.line_height) fg.line_height = g.h;
+    // GM8.0 takes the height of the first character in the font's range.
+    if (version == VersionMode::GM80) {
+        const usize first = static_cast<usize>(font.first);
+        fg.line_height = first < font.glyphs.size() ? font.glyphs[first].h : 0;
+    } else {
+        fg.line_height = std::ranges::max_element(font.glyphs, {}, &GlyphData::h)->h;
     }
 
     if (font.tex_width <= 0 || font.tex_height <= 0 || font.alpha_map.empty()) {
@@ -453,14 +513,132 @@ void Renderer2D::register_sprite_font(usize font_idx, i32 sprite_idx, i32 first_
     }
 }
 
+void Renderer2D::ensure_screen_fbo(i32 width, i32 height) {
+    const i32 w = std::max(1, width);
+    const i32 h = std::max(1, height);
+    if (screen_fbo_.valid() && screen_fbo_w_ == w && screen_fbo_h_ == h) {
+        return;
+    }
+    if (screen_fbo_.valid()) {
+        device_->destroy_framebuffer(screen_fbo_);
+        screen_fbo_ = {};
+    }
+    if (screen_fbo_tex_.valid()) {
+        device_->destroy_texture(screen_fbo_tex_);
+        screen_fbo_tex_ = {};
+    }
+    TextureDesc desc{};
+    desc.width = w;
+    desc.height = h;
+    desc.format = TextureFormat::RGBA8;
+    desc.min_filter = linear_filter_ ? TextureFilter::Linear : TextureFilter::Nearest;
+    desc.mag_filter = desc.min_filter;
+    auto tex_res = device_->create_texture(desc);
+    if (!tex_res) return;
+    TextureHandle tex = tex_res.value();
+    auto fbo_res = device_->create_framebuffer(std::span<const TextureHandle>(&tex, 1), true);
+    if (!fbo_res) {
+        device_->destroy_texture(tex);
+        return;
+    }
+    screen_fbo_tex_ = tex;
+    screen_fbo_ = fbo_res.value();
+    screen_fbo_w_ = w;
+    screen_fbo_h_ = h;
+}
+
+void Renderer2D::bind_active_target_fbo() {
+    if (active_surface_id_ >= 0 && surfaces_.contains(active_surface_id_)) {
+        device_->bind_framebuffer(surfaces_[active_surface_id_].fbo);
+    } else if (using_screen_fbo_ && screen_fbo_.valid()) {
+        device_->bind_framebuffer(screen_fbo_);
+    } else {
+        device_->bind_framebuffer(FramebufferHandle{});
+    }
+}
+
+void Renderer2D::apply_d3d_depth_cull() {
+    if (d3d_active_ && d3d_hidden_) {
+        device_->set_depth_state(DepthState{true, d3d_zwrite_, CompareFunc::LessEqual});
+    } else {
+        device_->set_depth_state(DepthState{false, false, CompareFunc::Always});
+    }
+    if (d3d_active_ && d3d_culling_) {
+        device_->set_cull_mode(rendering_to_fbo() ? CullMode::Front : CullMode::Back);
+    } else {
+        device_->set_cull_mode(CullMode::None);
+    }
+}
+
 void Renderer2D::begin_frame(i32 backbuffer_w, i32 backbuffer_h) {
     vertices_.clear();
-    device_->bind_framebuffer(FramebufferHandle{});
+    using_screen_fbo_ = false;
     active_surface_id_ = -1;
+    device_->bind_framebuffer(FramebufferHandle{});
     set_screen_region(backbuffer_w, backbuffer_h, backbuffer_w, backbuffer_h, {0, 0, backbuffer_w, backbuffer_h});
+    apply_d3d_depth_cull();
+    device_->set_blend_state(blend_state_);
+}
+
+void Renderer2D::begin_screen_pass(i32 canvas_w, i32 canvas_h, i32 backbuffer_w, i32 backbuffer_h, const ViewportRect& present_viewport) {
+    flush();
+    backbuffer_w_ = std::max(1, backbuffer_w);
+    backbuffer_h_ = std::max(1, backbuffer_h);
+    screen_w_ = std::max(1, canvas_w);
+    screen_h_ = std::max(1, canvas_h);
+    screen_viewport_ = present_viewport;
+
+    if (active_surface_id_ < 0) {
+        ensure_screen_fbo(screen_w_, screen_h_);
+        using_screen_fbo_ = screen_fbo_.valid();
+        bind_active_target_fbo();
+        device_->set_scissor(false);
+        device_->set_viewport(ViewportRect{0, 0, screen_w_, screen_h_});
+        device_->clear(false, true, true, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0);
+    }
+    apply_d3d_depth_cull();
+    device_->set_blend_state(blend_state_);
+}
+
+void Renderer2D::present_screen(u32 border_color_bgr) {
+    if (!using_screen_fbo_ || !screen_fbo_tex_.valid() || active_surface_id_ >= 0) {
+        flush();
+        return;
+    }
+    flush();
+
+    const bool saved_alpha_test = alpha_test_enabled_;
+    const BlendState saved_blend = blend_state_;
+    f32 saved_model[16];
+    std::memcpy(saved_model, model_matrix_, sizeof(saved_model));
+
+    using_screen_fbo_ = false;
+    device_->bind_framebuffer(FramebufferHandle{});
+    device_->set_scissor(false);
     device_->set_depth_state(DepthState{false, false, CompareFunc::Always});
     device_->set_cull_mode(CullMode::None);
+    device_->set_color_mask(true, true, true, true);
+    device_->set_viewport(ViewportRect{0, 0, backbuffer_w_, backbuffer_h_});
+    clear_color(border_color_bgr, 1.0f);
+
+    alpha_test_enabled_ = false;
+    blend_state_.enabled = false;
+    mat4_identity(model_matrix_);
+    set_projection_ortho(0.0f, 0.0f, static_cast<f32>(screen_w_), static_cast<f32>(screen_h_), 0.0f,
+                         screen_viewport_.x, screen_viewport_.y, screen_viewport_.width, screen_viewport_.height);
+    const ColorRGBA white{255, 255, 255, 255};
+    push_quad(screen_fbo_tex_,
+              0.0f, 0.0f, 0.0f, 0.0f, white,
+              static_cast<f32>(screen_w_), 0.0f, 1.0f, 0.0f, white,
+              static_cast<f32>(screen_w_), static_cast<f32>(screen_h_), 1.0f, 1.0f, white,
+              0.0f, static_cast<f32>(screen_h_), 0.0f, 1.0f, white);
+    flush();
+
+    std::memcpy(model_matrix_, saved_model, sizeof(saved_model));
+    blend_state_ = saved_blend;
+    alpha_test_enabled_ = saved_alpha_test;
     device_->set_blend_state(blend_state_);
+    apply_d3d_depth_cull();
 }
 
 void Renderer2D::set_screen_region(i32 backbuffer_w, i32 backbuffer_h, i32 width, i32 height, const ViewportRect& viewport) {
@@ -483,8 +661,11 @@ void Renderer2D::flush() {
         return;
     }
 
+    f32 mvp[16];
+    mat4_mul(mvp, proj_matrix_, model_matrix_);
+
     device_->bind_shader(shader_);
-    glUniformMatrix4fv(loc_proj_, 1, GL_FALSE, proj_matrix_);
+    glUniformMatrix4fv(loc_proj_, 1, GL_FALSE, mvp);
     glUniform1i(loc_tex_, 0);
     glUniform1i(loc_alpha_test_, alpha_test_enabled_ ? 1 : 0);
     glUniform1f(loc_alpha_ref_, alpha_test_ref_);
@@ -499,8 +680,14 @@ void Renderer2D::flush() {
 
     glBindVertexArray(vao_);
     glBindBuffer(GL_ARRAY_BUFFER, vbo_);
-    glBufferSubData(GL_ARRAY_BUFFER, 0, static_cast<GLsizeiptr>(vertices_.size() * sizeof(Vertex2D)), vertices_.data());
-    glDrawArrays(to_gl_topo(batch_topo_), 0, static_cast<GLsizei>(vertices_.size()));
+    const GLenum gl_topo = to_gl_topo(batch_topo_);
+    usize offset = 0;
+    while (offset < vertices_.size()) {
+        const usize count = std::min(vertices_.size() - offset, kMaxBatchVertices);
+        glBufferSubData(GL_ARRAY_BUFFER, 0, static_cast<GLsizeiptr>(count * sizeof(Vertex2D)), vertices_.data() + offset);
+        glDrawArrays(gl_topo, 0, static_cast<GLsizei>(count));
+        offset += count;
+    }
     glBindVertexArray(0);
 
     vertices_.clear();
@@ -511,13 +698,15 @@ void Renderer2D::set_projection_ortho(
     i32 port_x, i32 port_y, i32 port_w, i32 port_h) {
     flush();
 
-    const bool to_fbo = (active_surface_id_ >= 0);
-    const i32 target_h = to_fbo ? surface_height(active_surface_id_) : backbuffer_h_;
+    const bool to_fbo = rendering_to_fbo();
+    const i32 target_h = (active_surface_id_ >= 0) ? surface_height(active_surface_id_)
+                         : (using_screen_fbo_ ? screen_fbo_h_ : backbuffer_h_);
 
     // OpenGL glViewport origin is bottom-left.
     // On backbuffer: top-down port_y -> gl_y = backbuffer_h - (port_y + port_h).
     // On FBO: world y=0 maps to FBO row 0 (gl_y = port_y) so surfaces sample right-side up!
     const i32 gl_y = to_fbo ? port_y : (target_h - (port_y + port_h));
+    active_viewport_ = ViewportRect{port_x, port_y, std::max(1, port_w), std::max(1, port_h)};
     device_->set_viewport(ViewportRect{port_x, gl_y, std::max(1, port_w), std::max(1, port_h)});
 
     const f32 w = (std::fabs(view_w) > 1e-4f) ? view_w : 1.0f;
@@ -532,13 +721,13 @@ void Renderer2D::set_projection_ortho(
     const f32 c = std::cos(rad);
     const f32 s = std::sin(rad);
 
-    // Column-major 4x4: Scale(sx, sy) * RotZ(angle) * Translate(-cx, -cy)
+    // Column-major 4x4: Scale(sx, sy, -1/16000) * RotZ(angle) * Translate(-cx, -cy, 0)
     std::memset(proj_matrix_, 0, sizeof(proj_matrix_));
     proj_matrix_[0] = c * sx;
     proj_matrix_[1] = -s * sy;
     proj_matrix_[4] = s * sx;
     proj_matrix_[5] = c * sy;
-    proj_matrix_[10] = 1.0f;
+    proj_matrix_[10] = -1.0f / 16000.0f;
     proj_matrix_[12] = (-cx * c - cy * s) * sx;
     proj_matrix_[13] = (cx * s - cy * c) * sy;
     proj_matrix_[15] = 1.0f;
@@ -547,11 +736,16 @@ void Renderer2D::set_projection_ortho(
 void Renderer2D::clear_color(u32 gm_bgr, f32 alpha) {
     flush();
     const ColorRGBA c = gm_bgr_to_rgba(gm_bgr);
-    device_->clear(true, false, false,
+    device_->clear(true, d3d_active_ && d3d_hidden_, false,
                    static_cast<f32>(c.r) / 255.0f,
                    static_cast<f32>(c.g) / 255.0f,
                    static_cast<f32>(c.b) / 255.0f,
-                   alpha);
+                   alpha, 1.0f, 0);
+}
+
+void Renderer2D::clear_depth(f32 depth_val) {
+    flush();
+    device_->clear(false, true, false, 0.0f, 0.0f, 0.0f, 1.0f, depth_val, 0);
 }
 
 void Renderer2D::set_blend_mode(i32 bm_mode) {
@@ -638,12 +832,12 @@ void Renderer2D::push_quad(
     f32 x2, f32 y2, f32 u2, f32 v2, ColorRGBA c2,
     f32 x3, f32 y3, f32 u3, f32 v3, ColorRGBA c3) {
     ensure_batch(PrimitiveTopology::Triangles, tex);
-    vertices_.push_back(Vertex2D{x0, y0, u0, v0, c0.r, c0.g, c0.b, c0.a});
-    vertices_.push_back(Vertex2D{x1, y1, u1, v1, c1.r, c1.g, c1.b, c1.a});
-    vertices_.push_back(Vertex2D{x2, y2, u2, v2, c2.r, c2.g, c2.b, c2.a});
-    vertices_.push_back(Vertex2D{x0, y0, u0, v0, c0.r, c0.g, c0.b, c0.a});
-    vertices_.push_back(Vertex2D{x2, y2, u2, v2, c2.r, c2.g, c2.b, c2.a});
-    vertices_.push_back(Vertex2D{x3, y3, u3, v3, c3.r, c3.g, c3.b, c3.a});
+    vertices_.push_back(Vertex2D{x0, y0, current_draw_z_, u0, v0, c0.r, c0.g, c0.b, c0.a});
+    vertices_.push_back(Vertex2D{x1, y1, current_draw_z_, u1, v1, c1.r, c1.g, c1.b, c1.a});
+    vertices_.push_back(Vertex2D{x2, y2, current_draw_z_, u2, v2, c2.r, c2.g, c2.b, c2.a});
+    vertices_.push_back(Vertex2D{x0, y0, current_draw_z_, u0, v0, c0.r, c0.g, c0.b, c0.a});
+    vertices_.push_back(Vertex2D{x2, y2, current_draw_z_, u2, v2, c2.r, c2.g, c2.b, c2.a});
+    vertices_.push_back(Vertex2D{x3, y3, current_draw_z_, u3, v3, c3.r, c3.g, c3.b, c3.a});
 }
 
 // ---- Surfaces ----
@@ -716,17 +910,24 @@ bool Renderer2D::surface_reset_target() {
     if (active_surface_id_ < 0) return false;
     flush();
     active_surface_id_ = -1;
-    device_->bind_framebuffer(FramebufferHandle{});
+    bind_active_target_fbo();
     apply_screen_projection();
+    apply_d3d_depth_cull();
     return true;
 }
 
 void Renderer2D::apply_screen_projection() {
     // GM8 restores the whole logical screen even if a view was active before the surface.
-    const auto& port = screen_viewport_;
-    set_projection_ortho(0, 0, static_cast<f32>(screen_w_), static_cast<f32>(screen_h_),
-                         0, port.x, port.y, port.width, port.height);
-    device_->set_scissor(true, {port.x, backbuffer_h_ - port.y - port.height, port.width, port.height});
+    if (using_screen_fbo_) {
+        set_projection_ortho(0.0f, 0.0f, static_cast<f32>(screen_w_), static_cast<f32>(screen_h_),
+                             0.0f, 0, 0, screen_w_, screen_h_);
+        device_->set_scissor(false);
+    } else {
+        const auto& port = screen_viewport_;
+        set_projection_ortho(0.0f, 0.0f, static_cast<f32>(screen_w_), static_cast<f32>(screen_h_),
+                             0.0f, port.x, port.y, port.width, port.height);
+        device_->set_scissor(true, {port.x, backbuffer_h_ - port.y - port.height, port.width, port.height});
+    }
 }
 
 void Renderer2D::draw_surface_ext(i32 id, f32 x, f32 y, f32 xscale, f32 yscale, f32 rot_deg, u32 color_bgr, f32 alpha) {
@@ -788,22 +989,74 @@ void Renderer2D::draw_surface_stretched_ext(i32 id, f32 x, f32 y, f32 w, f32 h, 
               x, y + h, 0.0f, 1.0f, col);
 }
 
+void Renderer2D::draw_surface_tiled_ext(
+    i32 id, f32 x, f32 y, f32 xscale, f32 yscale, u32 color_bgr, f32 alpha,
+    f32 view_x, f32 view_y, f32 view_w, f32 view_h) {
+    const auto it = surfaces_.find(id);
+    if (it == surfaces_.end()) return;
+    const f32 tw = std::fabs(static_cast<f32>(it->second.width) * xscale);
+    const f32 th = std::fabs(static_cast<f32>(it->second.height) * yscale);
+    if (tw < 1.0f || th < 1.0f) return;
+
+    f32 sx = x - std::floor((x - view_x) / tw) * tw;
+    if (sx > view_x) sx -= tw;
+    f32 sy = y - std::floor((y - view_y) / th) * th;
+    if (sy > view_y) sy -= th;
+
+    const ColorRGBA col = make_vertex_color(color_bgr, alpha);
+    for (f32 py = sy; py < view_y + view_h; py += th) {
+        for (f32 px = sx; px < view_x + view_w; px += tw) {
+            push_quad(it->second.texture,
+                      px, py, 0.0f, 0.0f, col,
+                      px + tw, py, 1.0f, 0.0f, col,
+                      px + tw, py + th, 1.0f, 1.0f, col,
+                      px, py + th, 0.0f, 1.0f, col);
+        }
+    }
+}
+
+void Renderer2D::draw_surface_general(
+    i32 id, f32 left, f32 top, f32 w, f32 h, f32 x, f32 y,
+    f32 xscale, f32 yscale, f32 rot_deg,
+    u32 c1, u32 c2, u32 c3, u32 c4, f32 alpha) {
+    const auto it = surfaces_.find(id);
+    if (it == surfaces_.end() || it->second.width <= 0 || it->second.height <= 0) return;
+    const f32 inv_w = 1.0f / static_cast<f32>(it->second.width);
+    const f32 inv_h = 1.0f / static_cast<f32>(it->second.height);
+    const f32 u0 = left * inv_w;
+    const f32 v0 = top * inv_h;
+    const f32 u1 = (left + w) * inv_w;
+    const f32 v1 = (top + h) * inv_h;
+    const f32 dw = w * xscale;
+    const f32 dh = h * yscale;
+    const f32 rad = static_cast<f32>(deg_to_rad(rot_deg));
+    const f32 c = std::cos(rad);
+    const f32 s = std::sin(rad);
+    auto xf = [&](f32 lx, f32 ly, f32& ox, f32& oy) {
+        ox = x + lx * c + ly * s;
+        oy = y - lx * s + ly * c;
+    };
+    f32 x0, y0, x1, y1, x2, y2, x3, y3;
+    xf(0.0f, 0.0f, x0, y0);
+    xf(dw,   0.0f, x1, y1);
+    xf(dw,   dh,   x2, y2);
+    xf(0.0f, dh,   x3, y3);
+    push_quad(it->second.texture,
+              x0, y0, u0, v0, make_vertex_color(c1, alpha),
+              x1, y1, u1, v0, make_vertex_color(c2, alpha),
+              x2, y2, u1, v1, make_vertex_color(c3, alpha),
+              x3, y3, u0, v1, make_vertex_color(c4, alpha));
+}
+
 bool Renderer2D::surface_read_pixels_bgra(i32 id, i32 x, i32 y, i32 w, i32 h, std::vector<u8>& out_bgra) {
     const auto it = surfaces_.find(id);
     if (it == surfaces_.end() || w <= 0 || h <= 0) return false;
     flush();
 
-    const i32 prev = active_surface_id_;
     device_->bind_framebuffer(it->second.fbo);
-
     std::vector<u8> rgba(static_cast<usize>(w) * static_cast<usize>(h) * 4u);
     device_->read_pixels_rgba8(x, y, w, h, rgba);
-
-    if (prev >= 0 && surfaces_.contains(prev)) {
-        device_->bind_framebuffer(surfaces_[prev].fbo);
-    } else {
-        device_->bind_framebuffer(FramebufferHandle{});
-    }
+    bind_active_target_fbo();
 
     out_bgra.resize(rgba.size());
     for (usize i = 0; i + 3 < rgba.size(); i += 4) {
@@ -815,58 +1068,126 @@ bool Renderer2D::surface_read_pixels_bgra(i32 id, i32 x, i32 y, i32 w, i32 h, st
     return true;
 }
 
+bool Renderer2D::screen_read_pixels_bgra(i32 x, i32 y, i32 w, i32 h, std::vector<u8>& out_bgra) {
+    if (w <= 0 || h <= 0) return false;
+    flush();
+
+    std::vector<u8> rgba(static_cast<usize>(w) * static_cast<usize>(h) * 4u, 0);
+    if (screen_fbo_.valid() && screen_fbo_w_ > 0 && screen_fbo_h_ > 0) {
+        device_->bind_framebuffer(screen_fbo_);
+        const i32 rx = std::clamp(x, 0, screen_fbo_w_);
+        const i32 ry = std::clamp(y, 0, screen_fbo_h_);
+        const i32 rw = std::clamp(w, 0, screen_fbo_w_ - rx);
+        const i32 rh = std::clamp(h, 0, screen_fbo_h_ - ry);
+        if (rw > 0 && rh > 0) {
+            std::vector<u8> sub(static_cast<usize>(rw) * static_cast<usize>(rh) * 4u);
+            device_->read_pixels_rgba8(rx, ry, rw, rh, sub);
+            for (i32 row = 0; row < rh; ++row) {
+                std::memcpy(rgba.data() + static_cast<usize>(row) * static_cast<usize>(w) * 4u,
+                            sub.data() + static_cast<usize>(row) * static_cast<usize>(rw) * 4u,
+                            static_cast<usize>(rw) * 4u);
+            }
+        }
+        bind_active_target_fbo();
+    } else {
+        device_->bind_framebuffer(FramebufferHandle{});
+        const i32 gl_y = std::max(0, backbuffer_h_ - (y + h));
+        device_->read_pixels_rgba8(x, gl_y, w, h, rgba);
+        bind_active_target_fbo();
+        const usize row_bytes = static_cast<usize>(w) * 4u;
+        std::vector<u8> tmp(row_bytes);
+        for (i32 row = 0; row < h / 2; ++row) {
+            u8* top = rgba.data() + static_cast<usize>(row) * row_bytes;
+            u8* bot = rgba.data() + static_cast<usize>(h - 1 - row) * row_bytes;
+            std::memcpy(tmp.data(), top, row_bytes);
+            std::memcpy(top, bot, row_bytes);
+            std::memcpy(bot, tmp.data(), row_bytes);
+        }
+    }
+
+    out_bgra.resize(rgba.size());
+    for (usize i = 0; i + 3 < rgba.size(); i += 4) {
+        out_bgra[i + 0] = rgba[i + 2];
+        out_bgra[i + 1] = rgba[i + 1];
+        out_bgra[i + 2] = rgba[i + 0];
+        out_bgra[i + 3] = 255;
+    }
+    return true;
+}
+
+u32 Renderer2D::surface_getpixel(i32 id, i32 x, i32 y) {
+    const auto it = surfaces_.find(id);
+    if (it == surfaces_.end() || x < 0 || y < 0 || x >= it->second.width || y >= it->second.height) return 0u;
+    std::vector<u8> bgra;
+    if (!surface_read_pixels_bgra(id, x, y, 1, 1, bgra) || bgra.size() < 4) return 0u;
+    return static_cast<u32>(bgra[2]) | (static_cast<u32>(bgra[1]) << 8u) | (static_cast<u32>(bgra[0]) << 16u);
+}
+
+u32 Renderer2D::screen_getpixel(i32 x, i32 y) {
+    if (active_surface_id_ >= 0) {
+        return surface_getpixel(active_surface_id_, x, y);
+    }
+    std::vector<u8> bgra;
+    if (!screen_read_pixels_bgra(x, y, 1, 1, bgra) || bgra.size() < 4) return 0u;
+    return static_cast<u32>(bgra[2]) | (static_cast<u32>(bgra[1]) << 8u) | (static_cast<u32>(bgra[0]) << 16u);
+}
+
+void Renderer2D::surface_copy_part(i32 dst_id, f32 x, f32 y, i32 src_id, f32 xs, f32 ys, f32 ws, f32 hs) {
+    if (!surfaces_.contains(dst_id) || !surfaces_.contains(src_id)) return;
+    const i32 prev = active_surface_id_;
+    const BlendState prev_blend = blend_state_;
+    surface_set_target(dst_id);
+    flush();
+    blend_state_.enabled = false;
+    draw_surface_part_ext(src_id, xs, ys, ws, hs, x, y, 1.0f, 1.0f, 0xFFFFFFu, 1.0f);
+    flush();
+    blend_state_ = prev_blend;
+    if (prev >= 0) surface_set_target(prev);
+    else surface_reset_target();
+}
+
+bool Renderer2D::save_bitmap_bgra(const Bitmap32& bmp, std::string_view host_path) {
+    if (bmp.width <= 0 || bmp.height <= 0 || bmp.bgra.size() < static_cast<usize>(bmp.width) * static_cast<usize>(bmp.height) * 4u) {
+        return false;
+    }
+    std::vector<u8> rgba(bmp.bgra.size());
+    for (usize i = 0; i + 3 < bmp.bgra.size(); i += 4) {
+        rgba[i + 0] = bmp.bgra[i + 2];
+        rgba[i + 1] = bmp.bgra[i + 1];
+        rgba[i + 2] = bmp.bgra[i + 0];
+        rgba[i + 3] = bmp.bgra[i + 3];
+    }
+    return write_rgba_to_file(rgba.data(), bmp.width, bmp.height, host_path);
+}
+
 bool Renderer2D::surface_save(i32 id, std::string_view host_path) {
     const auto it = surfaces_.find(id);
     if (it == surfaces_.end()) return false;
+    return surface_save_part(id, host_path, 0, 0, it->second.width, it->second.height);
+}
+
+bool Renderer2D::surface_save_part(i32 id, std::string_view host_path, i32 x, i32 y, i32 w, i32 h) {
+    const auto it = surfaces_.find(id);
+    if (it == surfaces_.end() || w <= 0 || h <= 0) return false;
     flush();
-
-    const i32 prev = active_surface_id_;
     device_->bind_framebuffer(it->second.fbo);
-    std::vector<u8> rgba(static_cast<usize>(it->second.width) * static_cast<usize>(it->second.height) * 4u);
-    device_->read_pixels_rgba8(0, 0, it->second.width, it->second.height, rgba);
-    if (prev >= 0 && surfaces_.contains(prev)) {
-        device_->bind_framebuffer(surfaces_[prev].fbo);
-    } else {
-        device_->bind_framebuffer(FramebufferHandle{});
-    }
-
-    const std::string path(host_path);
-    const std::string lower = ascii_to_lower(host_path);
-    if (lower.ends_with(".bmp")) {
-        return stbi_write_bmp(path.c_str(), it->second.width, it->second.height, 4, rgba.data()) != 0;
-    }
-    return stbi_write_png(path.c_str(), it->second.width, it->second.height, 4, rgba.data(), it->second.width * 4) != 0;
+    std::vector<u8> rgba(static_cast<usize>(w) * static_cast<usize>(h) * 4u);
+    device_->read_pixels_rgba8(x, y, w, h, rgba);
+    bind_active_target_fbo();
+    return write_rgba_to_file(rgba.data(), w, h, host_path);
 }
 
 bool Renderer2D::screen_save(std::string_view host_path) {
-    flush();
-    const i32 prev = active_surface_id_;
-    device_->bind_framebuffer(FramebufferHandle{});
+    const i32 w = (screen_fbo_.valid() && screen_fbo_w_ > 0) ? screen_fbo_w_ : backbuffer_w_;
+    const i32 h = (screen_fbo_.valid() && screen_fbo_h_ > 0) ? screen_fbo_h_ : backbuffer_h_;
+    return screen_save_part(host_path, 0, 0, w, h);
+}
 
-    std::vector<u8> rgba(static_cast<usize>(backbuffer_w_) * static_cast<usize>(backbuffer_h_) * 4u);
-    device_->read_pixels_rgba8(0, 0, backbuffer_w_, backbuffer_h_, rgba);
-
-    if (prev >= 0 && surfaces_.contains(prev)) {
-        device_->bind_framebuffer(surfaces_[prev].fbo);
-    }
-
-    // Default backbuffer glReadPixels is bottom-up; flip rows vertically to top-down.
-    const usize row_bytes = static_cast<usize>(backbuffer_w_) * 4u;
-    std::vector<u8> tmp(row_bytes);
-    for (i32 y = 0; y < backbuffer_h_ / 2; ++y) {
-        u8* top = rgba.data() + static_cast<usize>(y) * row_bytes;
-        u8* bot = rgba.data() + static_cast<usize>(backbuffer_h_ - 1 - y) * row_bytes;
-        std::memcpy(tmp.data(), top, row_bytes);
-        std::memcpy(top, bot, row_bytes);
-        std::memcpy(bot, tmp.data(), row_bytes);
-    }
-
-    const std::string path(host_path);
-    const std::string lower = ascii_to_lower(host_path);
-    if (lower.ends_with(".bmp")) {
-        return stbi_write_bmp(path.c_str(), backbuffer_w_, backbuffer_h_, 4, rgba.data()) != 0;
-    }
-    return stbi_write_png(path.c_str(), backbuffer_w_, backbuffer_h_, 4, rgba.data(), backbuffer_w_ * 4) != 0;
+bool Renderer2D::screen_save_part(std::string_view host_path, i32 x, i32 y, i32 w, i32 h) {
+    std::vector<u8> bgra;
+    if (!screen_read_pixels_bgra(x, y, w, h, bgra)) return false;
+    Bitmap32 bmp{w, h, std::move(bgra)};
+    return save_bitmap_bgra(bmp, host_path);
 }
 
 // ---- Sprites / Backgrounds / Tiles ----
@@ -1211,38 +1532,40 @@ f32 Renderer2D::measure_string_width(const GameData& game, std::string_view text
     return max_w;
 }
 
-f32 Renderer2D::measure_string_height(const GameData& game, std::string_view text, f32 sep, f32 max_w) const {
+f32 Renderer2D::measure_string_height(const GameData& game, std::string_view text, i32 sep, i32 max_w) const {
     const auto lines = split_gm_lines(game, text, max_w);
     if (lines.empty()) return 0.0f;
     const f32 lh = current_font_line_height(game);
-    const f32 step = (sep < 0.0f) ? lh : sep;
+    const f32 step = (sep < 0) ? lh : static_cast<f32>(sep);
     return lh + static_cast<f32>(lines.size() - 1) * step;
 }
 
-void Renderer2D::draw_text_ext_transformed_color(
+void Renderer2D::draw_text_ext_color(
     const GameData& game, f32 x, f32 y, std::string_view text,
-    f32 sep, f32 max_w, f32 xscale, f32 yscale, f32 angle_deg,
-    u32 c1, u32 c2, u32 c3, u32 c4, f32 alpha) {
+    i32 sep, i32 max_w, u32 c1, u32 c2, u32 c3, u32 c4, f32 alpha,
+    std::optional<TextTransform> transform) {
     if (text.empty()) return;
 
     const auto lines = split_gm_lines(game, text, max_w);
     const f32 lh = current_font_line_height(game);
-    const f32 line_step = (sep < 0.0f) ? lh : sep;
-    const f32 total_h = lh + static_cast<f32>(lines.size() - 1) * line_step;
-
-    f32 base_y = 0.0f;
-    if (draw_valign_ == 1) base_y = -total_h * 0.5f;
-    else if (draw_valign_ == 2) base_y = -total_h;
-
-    const f32 rad = static_cast<f32>(deg_to_rad(angle_deg));
-    const f32 cs = std::cos(rad);
-    const f32 sn = std::sin(rad);
-    auto xf = [&](f32 lx, f32 ly, f32& ox, f32& oy) {
-        const f32 sx = lx * xscale;
-        const f32 sy = ly * yscale;
-        ox = x + sx * cs + sy * sn;
-        oy = y - sx * sn + sy * cs;
+    const f32 line_step = (sep < 0) ? lh : static_cast<f32>(sep);
+    const auto [xscale, yscale, angle_deg] = transform.value_or(TextTransform{});
+    const f64 rad = deg_to_rad(angle_deg);
+    const f64 cs = std::cos(rad);
+    const f64 sn = std::sin(rad);
+    auto aligned_extent = [](i32 alignment, f64 extent) {
+        if (alignment == 1) return extent * 0.5;
+        if (alignment == 2) return extent;
+        return 0.0;
     };
+    // Plain text uses integer division for centering. Transformed text rounds
+    // the scaled offsets, even for an explicitly supplied identity transform.
+    auto align_pixels = [&](f64 offset) {
+        return transform ? delphi_round_f64(offset) : std::trunc(offset);
+    };
+    const f64 height_offset = aligned_extent(draw_valign_, static_cast<f64>(lines.size()) * line_step * yscale);
+    const f64 base_x = x - align_pixels(height_offset * sn);
+    const f64 base_y = y - align_pixels(height_offset * cs);
 
     const ColorRGBA col_tl = make_vertex_color(c1, alpha);
     const ColorRGBA col_tr = make_vertex_color(c2, alpha);
@@ -1258,10 +1581,17 @@ void Renderer2D::draw_text_ext_transformed_color(
     for (usize li = 0; li < lines.size(); ++li) {
         const std::string& line = lines[li];
         const f32 lw = measure_single_line_width(game, line);
+        const f64 width_offset = align_pixels(aligned_extent(draw_halign_, static_cast<f64>(lw) * xscale));
+        const f64 line_x = base_x - width_offset * cs;
+        const f64 line_y = base_y + width_offset * sn;
+        auto xf = [&](f32 lx, f32 ly, f32& ox, f32& oy) {
+            const f64 sx = static_cast<f64>(lx) * xscale;
+            const f64 sy = static_cast<f64>(ly) * yscale;
+            ox = static_cast<f32>(line_x + sx * cs + sy * sn);
+            oy = static_cast<f32>(line_y - sx * sn + sy * cs);
+        };
         f32 pen_x = 0.0f;
-        if (draw_halign_ == 1) pen_x = -lw * 0.5f;
-        else if (draw_halign_ == 2) pen_x = -lw;
-        const f32 pen_y = base_y + static_cast<f32>(li) * line_step;
+        const f32 pen_y = static_cast<f32>(li) * line_step;
 
         if (has_spr_font) {
             const auto& fg = fonts_[static_cast<usize>(draw_font_)];
@@ -1352,8 +1682,8 @@ void Renderer2D::draw_line_color(f32 x1, f32 y1, f32 x2, f32 y2, u32 c1, u32 c2,
     ensure_batch(PrimitiveTopology::Lines, TextureHandle{});
     const ColorRGBA col1 = make_vertex_color(c1, alpha);
     const ColorRGBA col2 = make_vertex_color(c2, alpha);
-    vertices_.push_back(Vertex2D{x1 + 0.5f, y1 + 0.5f, 0.0f, 0.0f, col1.r, col1.g, col1.b, col1.a});
-    vertices_.push_back(Vertex2D{x2 + 0.5f, y2 + 0.5f, 0.0f, 0.0f, col2.r, col2.g, col2.b, col2.a});
+    vertices_.push_back(Vertex2D{x1 + 0.5f, y1 + 0.5f, current_draw_z_, 0.0f, 0.0f, col1.r, col1.g, col1.b, col1.a});
+    vertices_.push_back(Vertex2D{x2 + 0.5f, y2 + 0.5f, current_draw_z_, 0.0f, 0.0f, col2.r, col2.g, col2.b, col2.a});
 }
 
 void Renderer2D::draw_line_width_color(f32 x1, f32 y1, f32 x2, f32 y2, f32 width, u32 c1, u32 c2, f32 alpha) {
@@ -1401,9 +1731,9 @@ void Renderer2D::draw_triangle_color(f32 x1, f32 y1, f32 x2, f32 y2, f32 x3, f32
     const ColorRGBA col1 = make_vertex_color(c1, alpha);
     const ColorRGBA col2 = make_vertex_color(c2, alpha);
     const ColorRGBA col3 = make_vertex_color(c3, alpha);
-    vertices_.push_back(Vertex2D{x1, y1, 0.0f, 0.0f, col1.r, col1.g, col1.b, col1.a});
-    vertices_.push_back(Vertex2D{x2, y2, 0.0f, 0.0f, col2.r, col2.g, col2.b, col2.a});
-    vertices_.push_back(Vertex2D{x3, y3, 0.0f, 0.0f, col3.r, col3.g, col3.b, col3.a});
+    vertices_.push_back(Vertex2D{x1, y1, current_draw_z_, 0.0f, 0.0f, col1.r, col1.g, col1.b, col1.a});
+    vertices_.push_back(Vertex2D{x2, y2, current_draw_z_, 0.0f, 0.0f, col2.r, col2.g, col2.b, col2.a});
+    vertices_.push_back(Vertex2D{x3, y3, current_draw_z_, 0.0f, 0.0f, col3.r, col3.g, col3.b, col3.a});
 }
 
 void Renderer2D::draw_ellipse_color(f32 x1, f32 y1, f32 x2, f32 y2, u32 c1, u32 c2, bool outline, f32 alpha) {
@@ -1430,14 +1760,94 @@ void Renderer2D::draw_ellipse_color(f32 x1, f32 y1, f32 x2, f32 y2, u32 c1, u32 
         ensure_batch(PrimitiveTopology::Triangles, TextureHandle{});
         const f32 a0 = static_cast<f32>(i) * step;
         const f32 a1 = static_cast<f32>(i + 1) * step;
-        vertices_.push_back(Vertex2D{cx, cy, 0.0f, 0.0f, col_center.r, col_center.g, col_center.b, col_center.a});
-        vertices_.push_back(Vertex2D{cx + std::cos(a0) * rx, cy + std::sin(a0) * ry, 0.0f, 0.0f, col_outer.r, col_outer.g, col_outer.b, col_outer.a});
-        vertices_.push_back(Vertex2D{cx + std::cos(a1) * rx, cy + std::sin(a1) * ry, 0.0f, 0.0f, col_outer.r, col_outer.g, col_outer.b, col_outer.a});
+        vertices_.push_back(Vertex2D{cx, cy, current_draw_z_, 0.0f, 0.0f, col_center.r, col_center.g, col_center.b, col_center.a});
+        vertices_.push_back(Vertex2D{cx + std::cos(a0) * rx, cy + std::sin(a0) * ry, current_draw_z_, 0.0f, 0.0f, col_outer.r, col_outer.g, col_outer.b, col_outer.a});
+        vertices_.push_back(Vertex2D{cx + std::cos(a1) * rx, cy + std::sin(a1) * ry, current_draw_z_, 0.0f, 0.0f, col_outer.r, col_outer.g, col_outer.b, col_outer.a});
     }
 }
 
 void Renderer2D::draw_circle_color(f32 x, f32 y, f32 r, u32 c1, u32 c2, bool outline, f32 alpha) {
     draw_ellipse_color(x - r, y - r, x + r, y + r, c1, c2, outline, alpha);
+}
+
+void Renderer2D::draw_sprite_pos(
+    const GameData& game, i32 sprite_id, i32 subimg,
+    f32 x1, f32 y1, f32 x2, f32 y2, f32 x3, f32 y3, f32 x4, f32 y4, f32 alpha) {
+    if (sprite_id < 0 || static_cast<usize>(sprite_id) >= game.sprites.size()) return;
+    if (!game.sprites[static_cast<usize>(sprite_id)].exists) return;
+    const TextureHandle tex = sprite_texture(sprite_id, subimg);
+    if (!tex.valid()) return;
+    const ColorRGBA col = make_vertex_color(0xFFFFFFu, alpha);
+    push_quad(tex,
+              x1, y1, 0.0f, 0.0f, col,
+              x2, y2, 1.0f, 0.0f, col,
+              x3, y3, 1.0f, 1.0f, col,
+              x4, y4, 0.0f, 1.0f, col);
+}
+
+void Renderer2D::draw_background_general(
+    const GameData& game, i32 bg_id,
+    f32 left, f32 top, f32 w, f32 h, f32 x, f32 y, f32 xscale, f32 yscale,
+    f32 rot_deg, u32 c1, u32 c2, u32 c3, u32 c4, f32 alpha) {
+    if (bg_id < 0 || static_cast<usize>(bg_id) >= game.backgrounds.size()) return;
+    const auto& bg = game.backgrounds[static_cast<usize>(bg_id)];
+    if (!bg.exists || bg.width <= 0 || bg.height <= 0) return;
+    const TextureHandle tex = background_texture(bg_id);
+    if (!tex.valid()) return;
+
+    const f32 inv_w = 1.0f / static_cast<f32>(bg.width);
+    const f32 inv_h = 1.0f / static_cast<f32>(bg.height);
+    const f32 u0 = left * inv_w;
+    const f32 v0 = top * inv_h;
+    const f32 u1 = (left + w) * inv_w;
+    const f32 v1 = (top + h) * inv_h;
+    const f32 dw = w * xscale;
+    const f32 dh = h * yscale;
+
+    const f32 rad = static_cast<f32>(deg_to_rad(rot_deg));
+    const f32 c = std::cos(rad);
+    const f32 s = std::sin(rad);
+    auto xf = [&](f32 lx, f32 ly, f32& ox, f32& oy) {
+        ox = x + lx * c + ly * s;
+        oy = y - lx * s + ly * c;
+    };
+    f32 x0, y0, x1, y1, x2, y2, x3, y3;
+    xf(0.0f, 0.0f, x0, y0);
+    xf(dw,   0.0f, x1, y1);
+    xf(dw,   dh,   x2, y2);
+    xf(0.0f, dh,   x3, y3);
+    push_quad(tex,
+              x0, y0, u0, v0, make_vertex_color(c1, alpha),
+              x1, y1, u1, v0, make_vertex_color(c2, alpha),
+              x2, y2, u1, v1, make_vertex_color(c3, alpha),
+              x3, y3, u0, v1, make_vertex_color(c4, alpha));
+}
+
+void Renderer2D::draw_arrow(f32 x1, f32 y1, f32 x2, f32 y2, f32 tip_size, u32 color_bgr, f32 alpha) {
+    draw_line_color(x1, y1, x2, y2, color_bgr, color_bgr, alpha);
+    const f32 dx = x2 - x1;
+    const f32 dy = y2 - y1;
+    const f32 len = std::hypot(dx, dy);
+    if (len < 1e-4f || tip_size <= 0.0f) return;
+    const f32 ux = dx / len;
+    const f32 uy = dy / len;
+    const f32 px = -uy;
+    const f32 py = ux;
+    const f32 bx = x2 - ux * tip_size;
+    const f32 by = y2 - uy * tip_size;
+    const f32 hw = tip_size * 0.35f;
+    draw_triangle_color(x2, y2, bx + px * hw, by + py * hw, bx - px * hw, by - py * hw,
+                        color_bgr, color_bgr, color_bgr, false, alpha);
+}
+
+void Renderer2D::draw_button(f32 x1, f32 y1, f32 x2, f32 y2, bool up, u32 color_bgr, f32 alpha) {
+    draw_rectangle_color(x1, y1, x2, y2, color_bgr, color_bgr, color_bgr, color_bgr, false, alpha);
+    const u32 hi = up ? 0xFFFFFFu : 0x404040u;
+    const u32 lo = up ? 0x404040u : 0xFFFFFFu;
+    draw_line_color(x1, y1, x2, y1, hi, hi, alpha);
+    draw_line_color(x1, y1, x1, y2, hi, hi, alpha);
+    draw_line_color(x1, y2, x2, y2, lo, lo, alpha);
+    draw_line_color(x2, y1, x2, y2, lo, lo, alpha);
 }
 
 // ---- Immediate Primitive Builder ----
@@ -1450,9 +1860,418 @@ void Renderer2D::primitive_begin(i32 kind, TextureHandle tex) {
 }
 
 void Renderer2D::primitive_vertex(f32 x, f32 y, f32 u, f32 v, u32 color_bgr, f32 alpha) {
+    primitive_vertex_3d(x, y, current_draw_z_, u, v, color_bgr, alpha);
+}
+
+void Renderer2D::primitive_vertex_3d(f32 x, f32 y, f32 z, f32 u, f32 v, u32 color_bgr, f32 alpha) {
     if (!in_primitive_) return;
     const ColorRGBA c = make_vertex_color(color_bgr, alpha);
-    prim_verts_.push_back(Vertex2D{x, y, u, v, c.r, c.g, c.b, c.a});
+    prim_verts_.push_back(Vertex2D{x, y, z, u, v, c.r, c.g, c.b, c.a});
+}
+
+// ---- Fixed-Function D3D Projection, Transforms & 3D Primitives ----
+
+void Renderer2D::d3d_start() {
+    flush();
+    d3d_active_ = true;
+    d3d_hidden_ = true;
+    d3d_perspective_ = true;
+    d3d_zwrite_ = true;
+    apply_d3d_depth_cull();
+}
+
+void Renderer2D::d3d_end() {
+    flush();
+    d3d_active_ = false;
+    d3d_hidden_ = false;
+    d3d_perspective_ = false;
+    d3d_culling_ = false;
+    d3d_zwrite_ = true;
+    current_draw_z_ = 0.0f;
+    mat4_identity(model_matrix_);
+    transform_stack_.clear();
+    apply_d3d_depth_cull();
+}
+
+void Renderer2D::d3d_set_perspective(bool enable) {
+    flush();
+    d3d_perspective_ = enable;
+}
+
+void Renderer2D::d3d_set_hidden(bool enable) {
+    flush();
+    d3d_hidden_ = enable;
+    apply_d3d_depth_cull();
+}
+
+void Renderer2D::d3d_set_zwriteenable(bool enable) {
+    flush();
+    d3d_zwrite_ = enable;
+    apply_d3d_depth_cull();
+}
+
+void Renderer2D::d3d_set_culling(bool enable) {
+    flush();
+    d3d_culling_ = enable;
+    apply_d3d_depth_cull();
+}
+
+void Renderer2D::d3d_set_projection(f32 xfrom, f32 yfrom, f32 zfrom, f32 xto, f32 yto, f32 zto, f32 xup, f32 yup, f32 zup) {
+    const f32 aspect = (active_viewport_.height > 0)
+                           ? (static_cast<f32>(active_viewport_.width) / static_cast<f32>(active_viewport_.height))
+                           : (4.0f / 3.0f);
+    d3d_set_projection_ext(xfrom, yfrom, zfrom, xto, yto, zto, xup, yup, zup, 45.0f, aspect, 1.0f, 32000.0f);
+}
+
+void Renderer2D::d3d_set_projection_ext(
+    f32 xfrom, f32 yfrom, f32 zfrom,
+    f32 xto, f32 yto, f32 zto,
+    f32 xup, f32 yup, f32 zup,
+    f32 angle_deg, f32 aspect, f32 znear, f32 zfar) {
+    flush();
+
+    // Left-handed LookAt matrix matching Direct3D8 D3DXMatrixLookAtLH
+    f32 zx = xto - xfrom, zy = yto - yfrom, zz = zto - zfrom;
+    const f32 zlen = std::sqrt(zx * zx + zy * zy + zz * zz);
+    if (zlen > 1e-6f) { zx /= zlen; zy /= zlen; zz /= zlen; }
+    else { zx = 0.0f; zy = 0.0f; zz = 1.0f; }
+
+    f32 xx = yup * zz - zup * zy;
+    f32 xy = zup * zx - xup * zz;
+    f32 xz = xup * zy - yup * zx;
+    const f32 xlen = std::sqrt(xx * xx + xy * xy + xz * xz);
+    if (xlen > 1e-6f) { xx /= xlen; xy /= xlen; xz /= xlen; }
+    else { xx = 1.0f; xy = 0.0f; xz = 0.0f; }
+
+    const f32 yx = zy * xz - zz * xy;
+    const f32 yy = zz * xx - zx * xz;
+    const f32 yz = zx * xy - zy * xx;
+
+    f32 view[16]{};
+    view[0]  = xx; view[4]  = xy; view[8]  = xz; view[12] = -(xx * xfrom + xy * yfrom + xz * zfrom);
+    view[1]  = yx; view[5]  = yy; view[9]  = yz; view[13] = -(yx * xfrom + yy * yfrom + yz * zfrom);
+    view[2]  = zx; view[6]  = zy; view[10] = zz; view[14] = -(zx * xfrom + zy * yfrom + zz * zfrom);
+    view[3]  = 0.0f; view[7] = 0.0f; view[11] = 0.0f; view[15] = 1.0f;
+
+    const f32 fov = static_cast<f32>(deg_to_rad(std::clamp(angle_deg, 1.0f, 179.0f)));
+    const f32 f = 1.0f / std::tan(fov * 0.5f);
+    const f32 asp = (std::fabs(aspect) > 1e-4f) ? aspect : 1.0f;
+    const f32 zn = std::max(0.01f, znear);
+    const f32 zf = std::max(zn + 0.1f, zfar);
+
+    // D3DXMatrixPerspectiveFovLH mapped to OpenGL NDC Z [-1, +1]
+    // Flip Y when rendering to an FBO where row 0 is screen top.
+    const f32 y_flip = rendering_to_fbo() ? -1.0f : 1.0f;
+    f32 proj[16]{};
+    proj[0]  = f / asp;
+    proj[5]  = f * y_flip;
+    proj[10] = (zf + zn) / (zf - zn);
+    proj[11] = 1.0f;
+    proj[14] = (-2.0f * zf * zn) / (zf - zn);
+
+    mat4_mul(proj_matrix_, proj, view);
+}
+
+void Renderer2D::d3d_set_projection_ortho(f32 x, f32 y, f32 w, f32 h, f32 angle_deg) {
+    set_projection_ortho(x, y, w, h, angle_deg,
+                         active_viewport_.x, active_viewport_.y,
+                         active_viewport_.width, active_viewport_.height);
+}
+
+void Renderer2D::d3d_set_projection_perspective(f32 x, f32 y, f32 w, f32 h, f32 angle_deg) {
+    const f32 cx = x + w * 0.5f;
+    const f32 cy = y + h * 0.5f;
+    const f32 dist = h * 0.5f / std::tan(static_cast<f32>(deg_to_rad(22.5f)));
+    const f32 rad = static_cast<f32>(deg_to_rad(angle_deg));
+    const f32 aspect = (std::fabs(h) > 1e-4f) ? (w / h) : 1.0f;
+    d3d_set_projection_ext(cx, cy, -dist, cx, cy, 0.0f, std::sin(rad), -std::cos(rad), 0.0f, 45.0f, aspect, 1.0f, 32000.0f);
+}
+
+void Renderer2D::d3d_transform_set_identity() {
+    flush();
+    mat4_identity(model_matrix_);
+}
+
+void Renderer2D::d3d_transform_set_translation(f32 xt, f32 yt, f32 zt) {
+    flush();
+    mat4_identity(model_matrix_);
+    model_matrix_[12] = xt;
+    model_matrix_[13] = yt;
+    model_matrix_[14] = zt;
+}
+
+void Renderer2D::d3d_transform_set_scaling(f32 xs, f32 ys, f32 zs) {
+    flush();
+    mat4_identity(model_matrix_);
+    model_matrix_[0] = xs;
+    model_matrix_[5] = ys;
+    model_matrix_[10] = zs;
+}
+
+void Renderer2D::d3d_transform_set_rotation_x(f32 angle_deg) {
+    flush();
+    mat4_identity(model_matrix_);
+    const f32 r = static_cast<f32>(deg_to_rad(angle_deg));
+    const f32 c = std::cos(r), s = std::sin(r);
+    model_matrix_[5] = c;  model_matrix_[6] = -s;
+    model_matrix_[9] = s;  model_matrix_[10] = c;
+}
+
+void Renderer2D::d3d_transform_set_rotation_y(f32 angle_deg) {
+    flush();
+    mat4_identity(model_matrix_);
+    const f32 r = static_cast<f32>(deg_to_rad(angle_deg));
+    const f32 c = std::cos(r), s = std::sin(r);
+    model_matrix_[0] = c;   model_matrix_[2] = s;
+    model_matrix_[8] = -s;  model_matrix_[10] = c;
+}
+
+void Renderer2D::d3d_transform_set_rotation_z(f32 angle_deg) {
+    flush();
+    mat4_identity(model_matrix_);
+    const f32 r = static_cast<f32>(deg_to_rad(angle_deg));
+    const f32 c = std::cos(r), s = std::sin(r);
+    model_matrix_[0] = c;  model_matrix_[1] = -s;
+    model_matrix_[4] = s;  model_matrix_[5] = c;
+}
+
+void Renderer2D::d3d_transform_set_rotation_axis(f32 xa, f32 ya, f32 za, f32 angle_deg) {
+    flush();
+    mat4_identity(model_matrix_);
+    const f32 len = std::sqrt(xa * xa + ya * ya + za * za);
+    if (len < 1e-6f) return;
+    const f32 x = xa / len, y = ya / len, z = za / len;
+    // Matches D3DXMatrixRotationAxis with negated angle (-deg_to_rad)
+    const f32 r = static_cast<f32>(deg_to_rad(angle_deg));
+    const f32 c = std::cos(r), s = -std::sin(r), t = 1.0f - c;
+    model_matrix_[0] = t * x * x + c;      model_matrix_[4] = t * x * y - s * z;  model_matrix_[8]  = t * x * z + s * y;
+    model_matrix_[1] = t * x * y + s * z;  model_matrix_[5] = t * y * y + c;      model_matrix_[9]  = t * y * z - s * x;
+    model_matrix_[2] = t * x * z - s * y;  model_matrix_[6] = t * y * z + s * x;  model_matrix_[10] = t * z * z + c;
+}
+
+void Renderer2D::d3d_transform_add_translation(f32 xt, f32 yt, f32 zt) {
+    flush();
+    f32 t[16];
+    mat4_identity(t);
+    t[12] = xt; t[13] = yt; t[14] = zt;
+    mat4_mul(model_matrix_, t, model_matrix_);
+}
+
+void Renderer2D::d3d_transform_add_scaling(f32 xs, f32 ys, f32 zs) {
+    flush();
+    f32 t[16];
+    mat4_identity(t);
+    t[0] = xs; t[5] = ys; t[10] = zs;
+    mat4_mul(model_matrix_, t, model_matrix_);
+}
+
+void Renderer2D::d3d_transform_add_rotation_x(f32 angle_deg) {
+    flush();
+    f32 t[16];
+    mat4_identity(t);
+    const f32 r = static_cast<f32>(deg_to_rad(angle_deg));
+    const f32 c = std::cos(r), s = std::sin(r);
+    t[5] = c; t[6] = -s; t[9] = s; t[10] = c;
+    mat4_mul(model_matrix_, t, model_matrix_);
+}
+
+void Renderer2D::d3d_transform_add_rotation_y(f32 angle_deg) {
+    flush();
+    f32 t[16];
+    mat4_identity(t);
+    const f32 r = static_cast<f32>(deg_to_rad(angle_deg));
+    const f32 c = std::cos(r), s = std::sin(r);
+    t[0] = c; t[2] = s; t[8] = -s; t[10] = c;
+    mat4_mul(model_matrix_, t, model_matrix_);
+}
+
+void Renderer2D::d3d_transform_add_rotation_z(f32 angle_deg) {
+    flush();
+    f32 t[16];
+    mat4_identity(t);
+    const f32 r = static_cast<f32>(deg_to_rad(angle_deg));
+    const f32 c = std::cos(r), s = std::sin(r);
+    t[0] = c; t[1] = -s; t[4] = s; t[5] = c;
+    mat4_mul(model_matrix_, t, model_matrix_);
+}
+
+void Renderer2D::d3d_transform_add_rotation_axis(f32 xa, f32 ya, f32 za, f32 angle_deg) {
+    flush();
+    const f32 len = std::sqrt(xa * xa + ya * ya + za * za);
+    if (len < 1e-6f) return;
+    const f32 x = xa / len, y = ya / len, z = za / len;
+    const f32 r = static_cast<f32>(deg_to_rad(angle_deg));
+    const f32 c = std::cos(r), s = -std::sin(r), o = 1.0f - c;
+    f32 t[16];
+    mat4_identity(t);
+    t[0] = o * x * x + c;      t[4] = o * x * y - s * z;  t[8]  = o * x * z + s * y;
+    t[1] = o * x * y + s * z;  t[5] = o * y * y + c;      t[9]  = o * y * z - s * x;
+    t[2] = o * x * z - s * y;  t[6] = o * y * z + s * x;  t[10] = o * z * z + c;
+    mat4_mul(model_matrix_, t, model_matrix_);
+}
+
+void Renderer2D::d3d_transform_stack_clear() {
+    transform_stack_.clear();
+}
+
+bool Renderer2D::d3d_transform_stack_push() {
+    std::array<f32, 16> copy{};
+    std::memcpy(copy.data(), model_matrix_, sizeof(model_matrix_));
+    transform_stack_.push_back(copy);
+    return true;
+}
+
+bool Renderer2D::d3d_transform_stack_pop() {
+    if (transform_stack_.empty()) return false;
+    flush();
+    std::memcpy(model_matrix_, transform_stack_.back().data(), sizeof(model_matrix_));
+    transform_stack_.pop_back();
+    return true;
+}
+
+bool Renderer2D::d3d_transform_stack_top() {
+    if (transform_stack_.empty()) return false;
+    flush();
+    std::memcpy(model_matrix_, transform_stack_.back().data(), sizeof(model_matrix_));
+    return true;
+}
+
+bool Renderer2D::d3d_transform_stack_discard() {
+    if (transform_stack_.empty()) return false;
+    transform_stack_.pop_back();
+    return true;
+}
+
+void Renderer2D::d3d_draw_block(f32 x1, f32 y1, f32 z1, f32 x2, f32 y2, f32 z2, TextureHandle tex, f32 hr, f32 vr) {
+    const ColorRGBA col = make_vertex_color(draw_color_, draw_alpha_);
+    auto quad = [&](f32 ax, f32 ay, f32 az, f32 bx, f32 by, f32 bz,
+                    f32 cx, f32 cy, f32 cz, f32 dx, f32 dy, f32 dz) {
+        ensure_batch(PrimitiveTopology::Triangles, tex);
+        vertices_.push_back(Vertex2D{ax, ay, az, 0.0f, 0.0f, col.r, col.g, col.b, col.a});
+        vertices_.push_back(Vertex2D{bx, by, bz, hr,   0.0f, col.r, col.g, col.b, col.a});
+        vertices_.push_back(Vertex2D{cx, cy, cz, hr,   vr,   col.r, col.g, col.b, col.a});
+        vertices_.push_back(Vertex2D{ax, ay, az, 0.0f, 0.0f, col.r, col.g, col.b, col.a});
+        vertices_.push_back(Vertex2D{cx, cy, cz, hr,   vr,   col.r, col.g, col.b, col.a});
+        vertices_.push_back(Vertex2D{dx, dy, dz, 0.0f, vr,   col.r, col.g, col.b, col.a});
+    };
+    quad(x1, y1, z1, x2, y1, z1, x2, y2, z1, x1, y2, z1); // -Z
+    quad(x2, y1, z2, x1, y1, z2, x1, y2, z2, x2, y2, z2); // +Z
+    quad(x1, y1, z2, x2, y1, z2, x2, y1, z1, x1, y1, z1); // -Y
+    quad(x1, y2, z1, x2, y2, z1, x2, y2, z2, x1, y2, z2); // +Y
+    quad(x1, y1, z2, x1, y1, z1, x1, y2, z1, x1, y2, z2); // -X
+    quad(x2, y1, z1, x2, y1, z2, x2, y2, z2, x2, y2, z1); // +X
+}
+
+void Renderer2D::d3d_draw_floor(f32 x1, f32 y1, f32 z1, f32 x2, f32 y2, f32 z2, TextureHandle tex, f32 hr, f32 vr) {
+    const ColorRGBA col = make_vertex_color(draw_color_, draw_alpha_);
+    ensure_batch(PrimitiveTopology::Triangles, tex);
+    vertices_.push_back(Vertex2D{x1, y1, z1, 0.0f, 0.0f, col.r, col.g, col.b, col.a});
+    vertices_.push_back(Vertex2D{x1, y2, z1, 0.0f, vr,   col.r, col.g, col.b, col.a});
+    vertices_.push_back(Vertex2D{x2, y2, z2, hr,   vr,   col.r, col.g, col.b, col.a});
+    vertices_.push_back(Vertex2D{x1, y1, z1, 0.0f, 0.0f, col.r, col.g, col.b, col.a});
+    vertices_.push_back(Vertex2D{x2, y2, z2, hr,   vr,   col.r, col.g, col.b, col.a});
+    vertices_.push_back(Vertex2D{x2, y1, z2, hr,   0.0f, col.r, col.g, col.b, col.a});
+}
+
+void Renderer2D::d3d_draw_wall(f32 x1, f32 y1, f32 z1, f32 x2, f32 y2, f32 z2, TextureHandle tex, f32 hr, f32 vr) {
+    const ColorRGBA col = make_vertex_color(draw_color_, draw_alpha_);
+    ensure_batch(PrimitiveTopology::Triangles, tex);
+    vertices_.push_back(Vertex2D{x1, y1, z1, 0.0f, 0.0f, col.r, col.g, col.b, col.a});
+    vertices_.push_back(Vertex2D{x2, y2, z1, hr,   0.0f, col.r, col.g, col.b, col.a});
+    vertices_.push_back(Vertex2D{x2, y2, z2, hr,   vr,   col.r, col.g, col.b, col.a});
+    vertices_.push_back(Vertex2D{x1, y1, z1, 0.0f, 0.0f, col.r, col.g, col.b, col.a});
+    vertices_.push_back(Vertex2D{x2, y2, z2, hr,   vr,   col.r, col.g, col.b, col.a});
+    vertices_.push_back(Vertex2D{x1, y1, z2, 0.0f, vr,   col.r, col.g, col.b, col.a});
+}
+
+void Renderer2D::d3d_draw_cylinder(f32 x1, f32 y1, f32 z1, f32 x2, f32 y2, f32 z2, TextureHandle tex, f32 hr, f32 vr, bool closed, i32 steps) {
+    const i32 n = std::clamp(steps, 3, 128);
+    const f32 cx = (x1 + x2) * 0.5f, cy = (y1 + y2) * 0.5f;
+    const f32 rx = (x2 - x1) * 0.5f, ry = (y2 - y1) * 0.5f;
+    const ColorRGBA col = make_vertex_color(draw_color_, draw_alpha_);
+    for (i32 i = 0; i < n; ++i) {
+        const f32 t0 = static_cast<f32>(i) / static_cast<f32>(n);
+        const f32 t1 = static_cast<f32>(i + 1) / static_cast<f32>(n);
+        const f32 a0 = t0 * static_cast<f32>(2.0 * kPi), a1 = t1 * static_cast<f32>(2.0 * kPi);
+        const f32 px0 = cx + std::cos(a0) * rx, py0 = cy + std::sin(a0) * ry;
+        const f32 px1 = cx + std::cos(a1) * rx, py1 = cy + std::sin(a1) * ry;
+        ensure_batch(PrimitiveTopology::Triangles, tex);
+        vertices_.push_back(Vertex2D{px0, py0, z1, t0 * hr, 0.0f, col.r, col.g, col.b, col.a});
+        vertices_.push_back(Vertex2D{px1, py1, z1, t1 * hr, 0.0f, col.r, col.g, col.b, col.a});
+        vertices_.push_back(Vertex2D{px1, py1, z2, t1 * hr, vr,   col.r, col.g, col.b, col.a});
+        vertices_.push_back(Vertex2D{px0, py0, z1, t0 * hr, 0.0f, col.r, col.g, col.b, col.a});
+        vertices_.push_back(Vertex2D{px1, py1, z2, t1 * hr, vr,   col.r, col.g, col.b, col.a});
+        vertices_.push_back(Vertex2D{px0, py0, z2, t0 * hr, vr,   col.r, col.g, col.b, col.a});
+        if (closed) {
+            ensure_batch(PrimitiveTopology::Triangles, tex);
+            vertices_.push_back(Vertex2D{cx, cy, z1, 0.5f * hr, 0.5f * vr, col.r, col.g, col.b, col.a});
+            vertices_.push_back(Vertex2D{px1, py1, z1, (0.5f + 0.5f * std::cos(a1)) * hr, (0.5f + 0.5f * std::sin(a1)) * vr, col.r, col.g, col.b, col.a});
+            vertices_.push_back(Vertex2D{px0, py0, z1, (0.5f + 0.5f * std::cos(a0)) * hr, (0.5f + 0.5f * std::sin(a0)) * vr, col.r, col.g, col.b, col.a});
+            ensure_batch(PrimitiveTopology::Triangles, tex);
+            vertices_.push_back(Vertex2D{cx, cy, z2, 0.5f * hr, 0.5f * vr, col.r, col.g, col.b, col.a});
+            vertices_.push_back(Vertex2D{px0, py0, z2, (0.5f + 0.5f * std::cos(a0)) * hr, (0.5f + 0.5f * std::sin(a0)) * vr, col.r, col.g, col.b, col.a});
+            vertices_.push_back(Vertex2D{px1, py1, z2, (0.5f + 0.5f * std::cos(a1)) * hr, (0.5f + 0.5f * std::sin(a1)) * vr, col.r, col.g, col.b, col.a});
+        }
+    }
+}
+
+void Renderer2D::d3d_draw_cone(f32 x1, f32 y1, f32 z1, f32 x2, f32 y2, f32 z2, TextureHandle tex, f32 hr, f32 vr, bool closed, i32 steps) {
+    const i32 n = std::clamp(steps, 3, 128);
+    const f32 cx = (x1 + x2) * 0.5f, cy = (y1 + y2) * 0.5f;
+    const f32 rx = (x2 - x1) * 0.5f, ry = (y2 - y1) * 0.5f;
+    const ColorRGBA col = make_vertex_color(draw_color_, draw_alpha_);
+    for (i32 i = 0; i < n; ++i) {
+        const f32 t0 = static_cast<f32>(i) / static_cast<f32>(n);
+        const f32 t1 = static_cast<f32>(i + 1) / static_cast<f32>(n);
+        const f32 a0 = t0 * static_cast<f32>(2.0 * kPi), a1 = t1 * static_cast<f32>(2.0 * kPi);
+        const f32 px0 = cx + std::cos(a0) * rx, py0 = cy + std::sin(a0) * ry;
+        const f32 px1 = cx + std::cos(a1) * rx, py1 = cy + std::sin(a1) * ry;
+        ensure_batch(PrimitiveTopology::Triangles, tex);
+        vertices_.push_back(Vertex2D{cx, cy, z2, 0.5f * (t0 + t1) * hr, vr, col.r, col.g, col.b, col.a});
+        vertices_.push_back(Vertex2D{px0, py0, z1, t0 * hr, 0.0f, col.r, col.g, col.b, col.a});
+        vertices_.push_back(Vertex2D{px1, py1, z1, t1 * hr, 0.0f, col.r, col.g, col.b, col.a});
+        if (closed) {
+            ensure_batch(PrimitiveTopology::Triangles, tex);
+            vertices_.push_back(Vertex2D{cx, cy, z1, 0.5f * hr, 0.5f * vr, col.r, col.g, col.b, col.a});
+            vertices_.push_back(Vertex2D{px1, py1, z1, (0.5f + 0.5f * std::cos(a1)) * hr, (0.5f + 0.5f * std::sin(a1)) * vr, col.r, col.g, col.b, col.a});
+            vertices_.push_back(Vertex2D{px0, py0, z1, (0.5f + 0.5f * std::cos(a0)) * hr, (0.5f + 0.5f * std::sin(a0)) * vr, col.r, col.g, col.b, col.a});
+        }
+    }
+}
+
+void Renderer2D::d3d_draw_ellipsoid(f32 x1, f32 y1, f32 z1, f32 x2, f32 y2, f32 z2, TextureHandle tex, f32 hr, f32 vr, i32 steps) {
+    const i32 stacks = std::clamp(steps / 2, 3, 64);
+    const i32 slices = std::clamp(steps, 4, 128);
+    const f32 cx = (x1 + x2) * 0.5f, cy = (y1 + y2) * 0.5f, cz = (z1 + z2) * 0.5f;
+    const f32 rx = (x2 - x1) * 0.5f, ry = (y2 - y1) * 0.5f, rz = (z2 - z1) * 0.5f;
+    const ColorRGBA col = make_vertex_color(draw_color_, draw_alpha_);
+    for (i32 st = 0; st < stacks; ++st) {
+        const f32 v0 = static_cast<f32>(st) / static_cast<f32>(stacks);
+        const f32 v1 = static_cast<f32>(st + 1) / static_cast<f32>(stacks);
+        const f32 p0 = (v0 - 0.5f) * static_cast<f32>(kPi);
+        const f32 p1 = (v1 - 0.5f) * static_cast<f32>(kPi);
+        for (i32 sl = 0; sl < slices; ++sl) {
+            const f32 u0 = static_cast<f32>(sl) / static_cast<f32>(slices);
+            const f32 u1 = static_cast<f32>(sl + 1) / static_cast<f32>(slices);
+            const f32 t0 = u0 * static_cast<f32>(2.0 * kPi);
+            const f32 t1 = u1 * static_cast<f32>(2.0 * kPi);
+            auto pt = [&](f32 p, f32 t, f32 u, f32 v) {
+                return Vertex2D{
+                    cx + std::cos(p) * std::cos(t) * rx,
+                    cy + std::cos(p) * std::sin(t) * ry,
+                    cz + std::sin(p) * rz,
+                    u * hr, v * vr, col.r, col.g, col.b, col.a
+                };
+            };
+            ensure_batch(PrimitiveTopology::Triangles, tex);
+            const Vertex2D a = pt(p0, t0, u0, v0);
+            const Vertex2D b = pt(p0, t1, u1, v0);
+            const Vertex2D c = pt(p1, t1, u1, v1);
+            const Vertex2D d = pt(p1, t0, u0, v1);
+            vertices_.push_back(a); vertices_.push_back(b); vertices_.push_back(c);
+            vertices_.push_back(a); vertices_.push_back(c); vertices_.push_back(d);
+        }
+    }
 }
 
 void Renderer2D::primitive_end() {

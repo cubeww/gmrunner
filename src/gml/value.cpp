@@ -5,6 +5,18 @@
 
 namespace gm {
 
+std::string format_gm_real(f64 v) {
+    if (!std::isfinite(v)) return "0";
+    const i64 r = delphi_round(v);
+    if (std::fabs(v - static_cast<f64>(r)) < kGmlEpsilon &&
+        std::fabs(v) < 1e15) {
+        return std::to_string(r);
+    }
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "%.2f", v);
+    return std::string(buf);
+}
+
 Result<RValue> RValue::add(const RValue& a, const RValue& b) {
     if (a.is_real() && b.is_real()) {
         return RValue(a.real_ + b.real_);

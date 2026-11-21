@@ -420,35 +420,4 @@ std::vector<std::string> Vfs::find_files(std::string_view gm_pattern, u32 attr_m
     return results;
 }
 
-std::string Vfs::make_registry_key(std::string_view key, std::string_view name) const {
-    return std::to_string(registry_root_) + "|" + ascii_to_lower(key) + "|" + ascii_to_lower(name);
-}
-
-void Vfs::registry_set_root(i32 root_id) {
-    registry_root_ = root_id;
-}
-
-void Vfs::registry_write_string(std::string_view key, std::string_view name, std::string_view value) {
-    registry_strings_[make_registry_key(key, name)] = std::string(value);
-}
-
-void Vfs::registry_write_real(std::string_view key, std::string_view name, u32 value) {
-    registry_reals_[make_registry_key(key, name)] = value;
-}
-
-std::string Vfs::registry_read_string(std::string_view key, std::string_view name) const {
-    const auto it = registry_strings_.find(make_registry_key(key, name));
-    return it != registry_strings_.end() ? it->second : std::string{};
-}
-
-u32 Vfs::registry_read_real(std::string_view key, std::string_view name) const {
-    const auto it = registry_reals_.find(make_registry_key(key, name));
-    return it != registry_reals_.end() ? it->second : 0u;
-}
-
-bool Vfs::registry_exists(std::string_view key, std::string_view name) const {
-    const std::string k = make_registry_key(key, name);
-    return registry_strings_.contains(k) || registry_reals_.contains(k);
-}
-
 } // namespace gm

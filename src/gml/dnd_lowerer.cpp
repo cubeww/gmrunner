@@ -131,13 +131,13 @@ public:
     DndLowerer(const EventData& ev, const GameData& game, std::vector<DndToken>* tokens = nullptr)
         : ev_(ev), game_(game), tokens_(tokens) {}
 
-    std::string lower() {
+    std::string lower(bool appendable = false) {
         if (ev_.actions.empty()) {
             return {};
         }
 
         // Fast path: single ACT_CODE targeting self with no relative flag — return directly.
-        if (ev_.actions.size() == 1) {
+        if (!appendable && ev_.actions.size() == 1) {
             const auto& a = ev_.actions[0];
             if (a.kind == kActCode && (!a.use_apply_to || a.who == -1) && !a.args.empty()) {
                 return a.args[0];
@@ -454,9 +454,9 @@ std::string lower_dnd_event_to_gml(const EventData& event, const GameData& game)
     return lowerer.lower();
 }
 
-Result<LexResult> lex_dnd_event(const EventData& event, const GameData& game) {
+Result<LexResult> lex_dnd_event(const EventData& event, const GameData& game, bool appendable) {
     std::vector<DndToken> markers;
-    const std::string wrapper = DndLowerer(event, game, &markers).lower();
+    const std::string wrapper = DndLowerer(event, game, &markers).lower(appendable);
     if (markers.empty()) return lex_gml(wrapper);
 
     // Lex the surrounding D&D control flow. Insert the original card as a single

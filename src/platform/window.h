@@ -67,6 +67,7 @@ public:
     [[nodiscard]] bool is_open() const noexcept { return window_ != nullptr; }
 
     WindowEvents poll_events();
+    WindowEvents poll_events_accumulate();
     void swap_buffers();
 
     void set_title(std::string_view title);
@@ -77,6 +78,30 @@ public:
     void set_fullscreen(bool fullscreen);
     void set_vsync(bool enabled);
     void set_cursor_visible(bool visible);
+    void set_borderless(bool borderless);
+    [[nodiscard]] bool is_borderless() const noexcept { return borderless_; }
+    void set_stay_on_top(bool on_top);
+    [[nodiscard]] bool is_stay_on_top() const noexcept { return stay_on_top_; }
+    void set_resizable(bool resizable);
+    [[nodiscard]] bool is_resizable() const noexcept { return resizable_; }
+    void set_visible(bool visible);
+    [[nodiscard]] bool is_visible() const noexcept { return visible_; }
+    void set_mouse_position(i32 x, i32 y);
+    [[nodiscard]] static i32 display_mouse_x() noexcept;
+    [[nodiscard]] static i32 display_mouse_y() noexcept;
+    static void set_display_mouse_position(i32 x, i32 y) noexcept;
+    [[nodiscard]] u64 native_window_handle() const noexcept;
+
+    // Legacy GM8 Joystick API (1-based id: 1 or 2) backed by SDL3 joysticks.
+    [[nodiscard]] static bool joystick_exists(i32 id) noexcept;
+    [[nodiscard]] static std::string joystick_name(i32 id);
+    [[nodiscard]] static i32 joystick_axes(i32 id) noexcept;
+    [[nodiscard]] static i32 joystick_buttons(i32 id) noexcept;
+    [[nodiscard]] static bool joystick_has_pov(i32 id) noexcept;
+    [[nodiscard]] static i32 joystick_direction(i32 id) noexcept;
+    [[nodiscard]] static bool joystick_check_button(i32 id, i32 button) noexcept;
+    [[nodiscard]] static f64 joystick_axis(i32 id, i32 axis_index) noexcept;
+    [[nodiscard]] static f64 joystick_pov(i32 id) noexcept;
 
     [[nodiscard]] i32 x() const noexcept;
     [[nodiscard]] i32 y() const noexcept;
@@ -105,12 +130,17 @@ public:
     static void clipboard_set_text(std::string_view text);
 
 private:
+    WindowEvents poll_events_impl(bool clear_edges);
     static u8 sdl_scancode_to_gm_vk(i32 scancode) noexcept;
     static u8 sdl_mouse_button_to_gm(u8 button) noexcept;
 
     SDL_Window* window_ = nullptr;
     SDL_GLContextState* gl_context_ = nullptr;
     bool fullscreen_ = false;
+    bool borderless_ = false;
+    bool stay_on_top_ = false;
+    bool resizable_ = true;
+    bool visible_ = true;
     bool has_focus_ = true;
     InputState input_{};
 };

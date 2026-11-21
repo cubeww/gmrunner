@@ -58,11 +58,18 @@ Result<void> Runner::init(GameData game, CompiledProgram program, std::vector<st
     game_ = std::move(game);
     ds_.set_string_encoding(game_.meta.encoding);
     program_ = std::move(program);
+    // Timeline wrappers can gain actions during play. Keep a copied program independent.
+    for (auto& moments : program_.timeline_chunks) {
+        for (auto& [step, event] : moments) {
+            if (event.use_count() > 1) event = std::make_shared<BytecodeChunk>(*event);
+        }
+    }
     use_precomputed_events_ = true;
     generated_event_tables_.reset();
     cmd_args_ = std::move(cmd_args);
     const u32 game_codepage = game_.meta.string_codepage();
     vfs_.set_game_path_codepage(game_codepage);
+    vfs_.registry_init(game_.meta.game_id);
     if (game_codepage != 65001u) {
         for (auto& arg : cmd_args_) arg = utf8_to_codepage(arg, game_codepage);
     }
@@ -84,6 +91,10 @@ Result<void> Runner::init(GameData game, CompiledProgram program, std::vector<st
         GM_LOG_WARN("audio", "Audio initialization failed (%s); continuing muted", res.error_message().c_str());
     }
     audio_.load_game_sounds(game_);
+
+    // Register native cross-platform DLL shims (GMFMODSimple, SuperSound, MaizeMusic, CleanMem).
+    dll_registry_.reset(this);
+    dll_registry_.register_builtin_shims();
 
     // Export included files marked export_action == 1 (temp_dir) or 2 (working_dir).
     for (const auto& inc : game_.included_files) {
@@ -134,13 +145,13 @@ Result<void> Runner::init(GameData game, CompiledProgram program, std::vector<st
         for (const auto& c : program_.trigger_chunks) if (c) scan_chunk(*c);
         auto scan_event = [&](const BytecodeChunk& event) {
             scan_chunk(event);
-            for (const auto& action : event.code_actions) scan_chunk(action);
+            for (const auto& action : event.code_actions) scan_chunk(*action);
         };
         for (const auto& arr : program_.object_event_chunks)
             for (const auto& mp : arr)
                 for (const auto& [_, c] : mp) scan_event(c);
         for (const auto& mp : program_.timeline_chunks)
-            for (const auto& [_, c] : mp) scan_event(c);
+            for (const auto& [_, c] : mp) scan_event(*c);
         for (const auto& c : program_.room_creation_chunks) if (c) scan_chunk(*c);
         for (const auto& room : program_.instance_creation_chunks)
             for (const auto& [_, c] : room) scan_chunk(c);
@@ -205,6 +216,7 @@ void Runner::shutdown() noexcept {
     }
 
     // Flush open files & INI.
+    (void)close_legacy_text_file();
     if (ini_.open) {
         (void)ini_close();
     }
@@ -233,6 +245,7 @@ void Runner::shutdown() noexcept {
     particles_.clear_all();
     mp_grids_.destroy_all();
 
+    dll_registry_.reset(this);
     audio_.shutdown();
     renderer_.shutdown();
     vm_.reset();
@@ -253,6 +266,7 @@ void Runner::register_all_builtins() {
     register_builtins_gameplay();
     register_builtins_graphics();
     register_builtins_actions();
+    register_builtins_misc();
 }
 
 // ---------------------------------------------------------------------------
@@ -493,13 +507,20 @@ void Runner::start_room(i32 room_id, bool is_game_start) {
         broadcast_event(7, 2);
     }
 
-    // Update room creation code (only on first visit to room)
+    // Run creation code only when the room is freshly initialized.
     if (!restored_from_save && pending_action_ == PendingRoomAction::None) {
         if (static_cast<usize>(room_id) < program_.room_creation_chunks.size() &&
             program_.room_creation_chunks[static_cast<usize>(room_id)].has_value()) {
             const auto& chunk = *program_.room_creation_chunks[static_cast<usize>(room_id)];
             if (!chunk.code.empty()) {
-                auto r = vm_->execute(chunk, -1, -1);
+                // GM uses a temporary instance of object 0 as both self and other.
+                // It has its own variables but never joins the room's instance lists.
+                Instance context{};
+                set_instance_object(context, 0);
+                context.timeline_running = false;
+                register_instance_handle(context);
+                auto r = vm_->execute(chunk, context.handle, context.handle);
+                inst_by_id_.erase(context.handle);
                 if (!r) {
                     GM_LOG_WARN("runtime", "Room '%s' creation code error: %s",
                                 game_.rooms[static_cast<usize>(room_id)].name.c_str(), r.error_message().c_str());
@@ -838,32 +859,39 @@ void Runner::step_timelines() {
         if (index < 0 || static_cast<usize>(index) >= game_.timelines.size()) continue;
         const auto& tl = game_.timelines[index];
         if (!tl.exists || tl.moments.empty() || inst->timeline_speed == 0.0) continue;
-        const auto& chunks = program_.timeline_chunks[index];
-
         const f64 prev = inst->timeline_position;
         const f64 next = prev + inst->timeline_speed;
         const bool forward = inst->timeline_speed > 0.0;
         inst->timeline_position = next;
-        auto first = forward ? std::ranges::lower_bound(tl.moments, prev, {}, &TimelineMoment::step)
-                             : std::ranges::upper_bound(tl.moments, next, {}, &TimelineMoment::step);
-        auto end = forward ? std::ranges::lower_bound(tl.moments, next, {}, &TimelineMoment::step)
-                           : std::ranges::upper_bound(tl.moments, prev, {}, &TimelineMoment::step);
+        // The native loop fixes its index range, then looks up each moment in the live timeline.
+        const auto bound = [&](f64 pos) {
+            const auto it = forward ? std::ranges::lower_bound(tl.moments, pos, {}, &TimelineMoment::step)
+                                    : std::ranges::upper_bound(tl.moments, pos, {}, &TimelineMoment::step);
+            return static_cast<usize>(it - tl.moments.begin());
+        };
+        usize first = bound(forward ? prev : next);
+        usize end = bound(forward ? next : prev);
         while (first < end && i < instances_.size() && pending_action_ == PendingRoomAction::None) {
-            const i32 step = (forward ? *first++ : *--end).step;
+            const usize slot = forward ? first++ : --end;
+            const auto& moments = game_.timelines[index].moments;
+            if (slot >= moments.size()) continue;
+            const i32 step = moments[slot].step;
+            const auto& chunks = program_.timeline_chunks[index];
             const auto it = chunks.find(step);
-            if (it == chunks.end() || it->second.code.empty()) continue;
+            if (it == chunks.end()) continue;
+            const auto event = it->second; // A callback can delete its own moment.
             // GM fetches the receiver from the current room slot for every moment.
             const i32 handle = instances_[i]->handle;
             const bool saved_rel = action_relative_;
             action_relative_ = false;
             event_stack_.push_back(EventFrame{100000, step, index, handle, handle, 0});
-            auto result = vm_->execute(it->second, handle, handle);
+            auto result = vm_->execute(*event, handle, handle);
             event_stack_.pop_back();
             action_relative_ = saved_rel;
             if (!result) GM_LOG_WARN("runtime", "Timeline %d step %d error: %s", index, step, result.error_message().c_str());
         }
-        if (inst->timeline_loop) {
-            const i32 last_step = tl.moments.back().step;
+        if (inst->timeline_loop && !game_.timelines[index].moments.empty()) {
+            const i32 last_step = game_.timelines[index].moments.back().step;
             if (forward && inst->timeline_position > last_step) inst->timeline_position = 0;
             if (!forward && inst->timeline_position < 0.0) inst->timeline_position = last_step;
         }
@@ -1304,31 +1332,78 @@ void Runner::render_current_frame() {
 
     const i32 dw = std::max(1, window_.drawable_width());
     const i32 dh = std::max(1, window_.drawable_height());
-    renderer_.begin_frame(dw, dh);
-
-    // Clear entire backbuffer with window border color (letterbox bars).
-    gfx_.set_scissor(false);
-    gfx_.set_viewport(ViewportRect{0, 0, dw, dh});
-    renderer_.clear_color(window_color_, 1.0f);
 
     i32 vx = 0, vy = 0, vw = 1, vh = 1, cw = 1, ch = 1;
     compute_canvas_viewport(vx, vy, vw, vh, cw, ch);
-    renderer_.set_screen_region(dw, dh, cw, ch, ViewportRect{vx, vy, vw, vh});
+
+    const i32 user_surf = renderer_.current_surface_target();
+    if (user_surf >= 0) {
+        // screen_redraw() called while a user surface target is active (e.g., save thumbnails in GM80_parasoko).
+        const i32 sw = std::max(1, renderer_.surface_width(user_surf));
+        const i32 sh = std::max(1, renderer_.surface_height(user_surf));
+        if (!view_enabled_) {
+            view_current_ = 0;
+            render_view(0,
+                        0.0f, 0.0f, static_cast<f32>(room_width_), static_cast<f32>(room_height_), 0.0f,
+                        0, 0, sw, sh);
+        } else {
+            const f64 sx = static_cast<f64>(sw) / static_cast<f64>(cw);
+            const f64 sy = static_cast<f64>(sh) / static_cast<f64>(ch);
+            for (i32 vi = 0; vi < 8; ++vi) {
+                const auto& v = views_[static_cast<usize>(vi)];
+                if (!v.visible) continue;
+                view_current_ = vi;
+                const i32 px = static_cast<i32>(std::floor(static_cast<f64>(v.xport) * sx + 0.5));
+                const i32 py = static_cast<i32>(std::floor(static_cast<f64>(v.yport) * sy + 0.5));
+                const i32 pw = std::max(1, static_cast<i32>(std::floor(static_cast<f64>(v.wport) * sx + 0.5)));
+                const i32 ph = std::max(1, static_cast<i32>(std::floor(static_cast<f64>(v.hport) * sy + 0.5)));
+                render_view(vi,
+                            static_cast<f32>(v.xview), static_cast<f32>(v.yview),
+                            static_cast<f32>(v.wview), static_cast<f32>(v.hview),
+                            static_cast<f32>(v.angle),
+                            px, py, pw, ph);
+            }
+            view_current_ = 0;
+        }
+        gfx_.set_scissor(false);
+        renderer_.set_projection_ortho(0.0f, 0.0f, static_cast<f32>(sw), static_cast<f32>(sh),
+                                       0.0f, 0, 0, sw, sh);
+        return;
+    }
+
+    renderer_.begin_frame(dw, dh);
+    renderer_.begin_screen_pass(cw, ch, dw, dh, ViewportRect{vx, vy, vw, vh});
+
+    const bool to_screen_fbo = renderer_.rendering_to_fbo();
+    if (!to_screen_fbo) {
+        // Fallback when screen FBO is unavailable: clear entire backbuffer with border color.
+        gfx_.set_scissor(false);
+        gfx_.set_viewport(ViewportRect{0, 0, dw, dh});
+        renderer_.clear_color(window_color_, 1.0f);
+    }
 
     if (!view_enabled_) {
         view_current_ = 0;
-        render_view(0,
-                    0.0f, 0.0f, static_cast<f32>(room_width_), static_cast<f32>(room_height_), 0.0f,
-                    vx, vy, vw, vh);
+        if (to_screen_fbo) {
+            render_view(0,
+                        0.0f, 0.0f, static_cast<f32>(room_width_), static_cast<f32>(room_height_), 0.0f,
+                        0, 0, cw, ch);
+        } else {
+            render_view(0,
+                        0.0f, 0.0f, static_cast<f32>(room_width_), static_cast<f32>(room_height_), 0.0f,
+                        vx, vy, vw, vh);
+        }
     } else {
-        const f64 sx = static_cast<f64>(vw) / static_cast<f64>(cw);
-        const f64 sy = static_cast<f64>(vh) / static_cast<f64>(ch);
+        const f64 sx = to_screen_fbo ? 1.0 : (static_cast<f64>(vw) / static_cast<f64>(cw));
+        const f64 sy = to_screen_fbo ? 1.0 : (static_cast<f64>(vh) / static_cast<f64>(ch));
+        const i32 ox = to_screen_fbo ? 0 : vx;
+        const i32 oy = to_screen_fbo ? 0 : vy;
         for (i32 vi = 0; vi < 8; ++vi) {
             const auto& v = views_[static_cast<usize>(vi)];
             if (!v.visible) continue;
             view_current_ = vi;
-            const i32 px = vx + static_cast<i32>(std::floor(static_cast<f64>(v.xport) * sx + 0.5));
-            const i32 py = vy + static_cast<i32>(std::floor(static_cast<f64>(v.yport) * sy + 0.5));
+            const i32 px = ox + static_cast<i32>(std::floor(static_cast<f64>(v.xport) * sx + 0.5));
+            const i32 py = oy + static_cast<i32>(std::floor(static_cast<f64>(v.yport) * sy + 0.5));
             const i32 pw = std::max(1, static_cast<i32>(std::floor(static_cast<f64>(v.wport) * sx + 0.5)));
             const i32 ph = std::max(1, static_cast<i32>(std::floor(static_cast<f64>(v.hport) * sy + 0.5)));
             render_view(vi,
@@ -1341,6 +1416,7 @@ void Runner::render_current_frame() {
     }
 
     gfx_.set_scissor(false);
+    renderer_.present_screen(window_color_);
     renderer_.end_frame();
     // GM publishes the complete caption after all views' Draw events have finished.
     update_window_caption();
@@ -1348,7 +1424,7 @@ void Runner::render_current_frame() {
 
 void Runner::render_view(i32 /*view_idx*/, f32 vx, f32 vy, f32 vw, f32 vh, f32 angle, i32 px, i32 py, i32 pw, i32 ph) {
     const i32 dh = std::max(1, window_.drawable_height());
-    const i32 gl_y = dh - (py + ph);
+    const i32 gl_y = renderer_.rendering_to_fbo() ? py : (dh - (py + ph));
     gfx_.set_scissor(true, ViewportRect{px, gl_y, pw, ph});
 
     renderer_.set_projection_ortho(vx, vy, vw, vh, angle, px, py, pw, ph);
@@ -1543,13 +1619,17 @@ void Runner::rebuild_object_instances() {
     for (const auto& inst : instances_) index_instance(*inst);
 }
 
-void Runner::add_room_instance(std::unique_ptr<Instance> inst) {
+void Runner::register_instance_handle(Instance& inst) {
     do {
-        inst->handle = next_handle_;
+        inst.handle = next_handle_;
         next_handle_ = next_handle_ == std::numeric_limits<i32>::min() ? -8 : next_handle_ - 1;
-    } while (inst_by_id_.contains(inst->handle));
+    } while (inst_by_id_.contains(inst.handle));
+    inst_by_id_[inst.handle] = &inst;
+}
+
+void Runner::add_room_instance(std::unique_ptr<Instance> inst) {
+    register_instance_handle(*inst);
     inst_by_id_[inst->id] = inst.get();
-    inst_by_id_[inst->handle] = inst.get();
     if (inst->deactivated) {
         inactive_instances_.push_back(std::move(inst));
     } else {
@@ -1588,30 +1668,35 @@ bool Runner::object_matches(i32 inst_obj, i32 target) const noexcept {
     return object_is_ancestor(inst_obj, target);
 }
 
+void Runner::set_instance_object(Instance& inst, i32 object) const {
+    inst.object_index = object;
+    const auto* obj = object_exists(object) ? &game_.objects[static_cast<usize>(object)] : nullptr;
+    // With a missing object slot, GM leaves the instance's object properties zeroed.
+    inst.sprite_index = obj ? obj->sprite_index : 0;
+    inst.mask_index = obj ? obj->mask_index : 0;
+    inst.depth = obj ? static_cast<f64>(obj->depth) : 0.0;
+    inst.solid = obj && obj->solid;
+    inst.visible = obj && obj->visible;
+    inst.persistent = obj && obj->persistent;
+    inst.mark_bbox_dirty();
+}
+
 i32 Runner::create_instance(f64 x, f64 y, i32 obj_idx, bool run_create, i32 forced_id) {
     if (!object_exists(obj_idx)) {
         return -4; // noone
     }
-    const auto& obj = game_.objects[static_cast<usize>(obj_idx)];
     auto inst = std::make_unique<Instance>();
     inst->id = (forced_id >= 100000) ? forced_id : next_instance_id_++;
     if (inst->id >= next_instance_id_) {
         next_instance_id_ = inst->id + 1;
     }
-    inst->object_index = obj_idx;
+    set_instance_object(*inst, obj_idx);
     inst->x = x;
     inst->y = y;
     inst->xprevious = x;
     inst->yprevious = y;
     inst->xstart = x;
     inst->ystart = y;
-    inst->solid = obj.solid;
-    inst->visible = obj.visible;
-    inst->persistent = obj.persistent;
-    inst->depth = static_cast<f64>(obj.depth);
-    inst->sprite_index = obj.sprite_index;
-    inst->mask_index = obj.mask_index;
-    inst->mark_bbox_dirty();
 
     const i32 id = inst->id;
     add_room_instance(std::move(inst));
@@ -1639,16 +1724,8 @@ void Runner::change_instance(i32 inst_id, i32 new_obj_idx, bool perform_events) 
     }
     // Native AddInstance appends a new slot. Assign copies the public ID; the
     // current GML frame and its other still refer to the old, marked slot.
-    const auto& obj = game_.objects[static_cast<usize>(new_obj_idx)];
     auto changed = std::make_unique<Instance>(*inst);
-    changed->object_index = new_obj_idx;
-    changed->sprite_index = obj.sprite_index;
-    changed->solid = obj.solid;
-    changed->visible = obj.visible;
-    changed->persistent = obj.persistent;
-    changed->depth = static_cast<f64>(obj.depth);
-    changed->mask_index = obj.mask_index;
-    changed->mark_bbox_dirty();
+    set_instance_object(*changed, new_obj_idx);
     ++next_instance_id_;
     const i32 id = inst->id;
     inst->destroyed = true;
@@ -1828,7 +1905,7 @@ bool Runner::execute_instance_event(i32 inst_id, i32 obj_idx, i32 cat, i32 sub, 
     event_stack_.push_back(EventFrame{cat, sub, owner_obj, inst_id, other_id, 0});
 
     auto res = vm_->execute(*chunk, inst_id, other_id);
-    if (!res) {
+    if (!res && running_) {
         error_occurred_ = true;
         error_last_ = res.error_message();
         GM_LOG_WARN("runtime", "Event error (%s): %s", chunk->debug_name.c_str(), error_last_.c_str());
@@ -2370,6 +2447,12 @@ Result<void> Runner::set_builtin_inst(i32 inst_id, u32 var_id, i32 idx, bool has
     return Result<void>::success();
 }
 
+Result<RValue> Runner::ext_call_function(i32 address, i32 self, i32 other, std::span<const RValue> args) {
+    const auto* func = DllRegistry::callback_by_address(address);
+    if (!func) return Error{"Invalid GM function callback"};
+    return call_builtin(func->id, self, other, args);
+}
+
 Result<RValue> Runner::call_builtin(u32 func_id, i32 self_id, i32 other_id, std::span<const RValue> args) {
     if (func_id < builtins_.size() && builtins_[func_id] != nullptr) {
         return builtins_[func_id](*this, self_id, other_id, args);
@@ -2383,11 +2466,12 @@ Result<RValue> Runner::call_builtin(u32 func_id, i32 self_id, i32 other_id, std:
     return RValue(0.0);
 }
 
-Result<RValue> Runner::call_extension_dll(u32 ext_dll_id, std::span<const RValue> /*args*/) {
+Result<RValue> Runner::call_extension_dll(u32 ext_dll_id, std::span<const RValue> args) {
     if (ext_dll_id < program_.symbols.extension_dll_functions().size()) {
         const auto& fn = program_.symbols.extension_dll_functions()[ext_dll_id];
-        GM_LOG_WARN("ext", "Unimplemented extension DLL call: %s -> %s (Phase 4/5)",
-                    fn.dll_filename.c_str(), fn.external_name.c_str());
+        const ExternalValueType ret_type =
+            (fn.return_type == 1) ? ExternalValueType::String : ExternalValueType::Real;
+        return dll_registry_.call_gex_dll(*this, fn.dll_filename, fn.external_name, args, ret_type);
     }
     return RValue(0.0);
 }
@@ -2682,6 +2766,532 @@ void Runner::file_find_close() {
     file_find_.results.clear();
     file_find_.index = 0;
     file_find_.active = false;
+}
+
+// ---------------------------------------------------------------------------
+// Event-Pumping Sleep & Input Wait Helpers
+// ---------------------------------------------------------------------------
+
+bool Runner::sleep_ms(f64 ms) {
+    if (ms <= 0.0) return true;
+    window_.input_mut().begin_frame();
+
+    const u64 dur_us = static_cast<u64>(ms * 1000.0);
+    const u64 end_us = Clock::now_us() + dur_us;
+    while (true) {
+        const WindowEvents ev = window_.poll_events_accumulate();
+        update_mouse_room_coords();
+        if (ev.quit_requested) {
+            running_ = false;
+            pending_action_ = PendingRoomAction::EndGame;
+            return false;
+        }
+        const u64 now = Clock::now_us();
+        if (now >= end_us) break;
+        Clock::sleep_until_us(std::min(end_us, now + 4000u));
+    }
+    return true;
+}
+
+bool Runner::wait_for_key() {
+    auto& inp = window_.input_mut();
+    inp.key_pressed.fill(false);
+    inp.key_released.fill(false);
+    while (true) {
+        const WindowEvents ev = window_.poll_events_accumulate();
+        update_mouse_room_coords();
+        if (ev.quit_requested) {
+            running_ = false;
+            pending_action_ = PendingRoomAction::EndGame;
+            return false;
+        }
+        for (usize k = 1; k < 256; ++k) {
+            if (window_.input().key_pressed[k]) return true;
+        }
+        Clock::sleep_until_us(Clock::now_us() + 4000u);
+    }
+}
+
+bool Runner::wait_for_mouse() {
+    auto& inp = window_.input_mut();
+    inp.mouse_pressed.fill(false);
+    inp.mouse_released.fill(false);
+    while (true) {
+        const WindowEvents ev = window_.poll_events_accumulate();
+        update_mouse_room_coords();
+        if (ev.quit_requested) {
+            running_ = false;
+            pending_action_ = PendingRoomAction::EndGame;
+            return false;
+        }
+        if (window_.input().mouse_pressed[1] ||
+            window_.input().mouse_pressed[2] ||
+            window_.input().mouse_pressed[3]) {
+            return true;
+        }
+        Clock::sleep_until_us(Clock::now_us() + 4000u);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Motion Planning Helpers (mp_linear_* & mp_potential_*)
+// ---------------------------------------------------------------------------
+
+bool Runner::mp_linear_step(Instance& inst, f64 xgoal, f64 ygoal, f64 stepsize, bool checkall, i32 target_obj) {
+    const f64 dx = xgoal - inst.x;
+    const f64 dy = ygoal - inst.y;
+    const f64 dist = std::hypot(dx, dy);
+    if (dist <= kGmlEpsilon) return true;
+
+    const bool solid_only = (target_obj == -3) && !checkall;
+    const f64 dir = gm_point_direction(inst.x, inst.y, xgoal, ygoal);
+
+    if (dist <= std::fabs(stepsize)) {
+        if (find_collision_instance(inst, xgoal, ygoal, target_obj, solid_only) == -4) {
+            inst.x = xgoal;
+            inst.y = ygoal;
+            inst.direction = dir;
+            inst.mark_bbox_dirty();
+            return true;
+        }
+        return false;
+    }
+
+    const f64 nx = inst.x + (dx / dist) * stepsize;
+    const f64 ny = inst.y + (dy / dist) * stepsize;
+    if (find_collision_instance(inst, nx, ny, target_obj, solid_only) == -4) {
+        inst.x = nx;
+        inst.y = ny;
+        inst.direction = dir;
+        inst.mark_bbox_dirty();
+    }
+    return false;
+}
+
+bool Runner::mp_linear_path(Instance& inst, i32 path_id, f64 xgoal, f64 ygoal, f64 stepsize, bool checkall, i32 target_obj) {
+    if (path_id < 0 || static_cast<usize>(path_id) >= game_.paths.size() ||
+        !game_.paths[static_cast<usize>(path_id)].exists) {
+        return false;
+    }
+    auto& path = game_.paths[static_cast<usize>(path_id)];
+    path.points.clear();
+    path.closed = false;
+    path.points.push_back(PathPoint{inst.x, inst.y, 100.0});
+    if (stepsize <= 1e-6) return false;
+
+    Instance sim = inst;
+    const f64 dist = std::hypot(xgoal - sim.x, ygoal - sim.y);
+    const i32 max_steps = std::min(10000, static_cast<i32>(std::ceil(dist / stepsize)) + 4);
+    for (i32 s = 0; s < max_steps; ++s) {
+        const f64 px = sim.x;
+        const f64 py = sim.y;
+        const bool reached = mp_linear_step(sim, xgoal, ygoal, stepsize, checkall, target_obj);
+        if (sim.x != px || sim.y != py) {
+            path.points.push_back(PathPoint{sim.x, sim.y, 100.0});
+        } else {
+            return false;
+        }
+        if (reached) return true;
+    }
+    return false;
+}
+
+bool Runner::mp_potential_step(Instance& inst, f64 xgoal, f64 ygoal, f64 stepsize, bool checkall, i32 target_obj) {
+    if (inst.x == xgoal && inst.y == ygoal) return true;
+    const f64 goal_dir = gm_point_direction(inst.x, inst.y, xgoal, ygoal);
+    const auto set_direction = [&](f64 angle) {
+        inst.direction = wrap_angle_deg(angle);
+        inst.sync_hv_from_polar();
+    };
+    const auto clear_at = [&](f64 x, f64 y) {
+        return find_collision_instance(inst, x, y, target_obj, target_obj == -3 && !checkall) == -4;
+    };
+    if (std::hypot(xgoal - inst.x, ygoal - inst.y) <= stepsize) {
+        if (clear_at(xgoal, ygoal)) {
+            set_direction(goal_dir);
+            inst.x = xgoal;
+            inst.y = ygoal;
+            inst.mark_bbox_dirty();
+        }
+        return true;
+    }
+
+    const auto try_direction = [&](f64 direction) {
+        if (std::abs(std::remainder(direction - inst.direction, 360.0)) > mp_potential_maxrot_) return false;
+        const f64 dx = stepsize * std::cos(deg_to_rad(direction));
+        const f64 dy = -stepsize * std::sin(deg_to_rad(direction));
+        if (!clear_at(inst.x + dx * mp_potential_ahead_, inst.y + dy * mp_potential_ahead_) ||
+            !clear_at(inst.x + dx, inst.y + dy)) return false;
+        set_direction(direction);
+        inst.x += dx;
+        inst.y += dy;
+        inst.mark_bbox_dirty();
+        return true;
+    };
+    for (f64 offset = 0; offset < 180.0; offset += mp_potential_rotstep_) {
+        if (try_direction(goal_dir - offset) || (offset != 0 && try_direction(goal_dir + offset))) return false;
+    }
+    if (mp_potential_onspot_) set_direction(inst.direction + mp_potential_maxrot_);
+    return false;
+}
+
+bool Runner::mp_potential_path(Instance& inst, i32 path_id, f64 xgoal, f64 ygoal, f64 stepsize, f64 factor, bool checkall, i32 target_obj) {
+    if (path_id < 0 || static_cast<usize>(path_id) >= game_.paths.size() ||
+        !game_.paths[static_cast<usize>(path_id)].exists || !(factor >= 1.0) || !(stepsize > 0.0)) return false;
+
+    auto& path = game_.paths[static_cast<usize>(path_id)];
+    path.points.clear();
+    path.closed = false;
+    path.kind = 0;
+    path.points.push_back({inst.x, inst.y, 100.0});
+
+    // Use the live instance so collision checks exclude the correct object. Restore
+    // its complete motion state after the search, including on allocation failure.
+    struct RestoreMotion {
+        Instance& inst;
+        f64 x, y, direction, hspeed, vspeed;
+        ~RestoreMotion() {
+            inst.x = x;
+            inst.y = y;
+            inst.direction = direction;
+            inst.hspeed = hspeed;
+            inst.vspeed = vspeed;
+            inst.mark_bbox_dirty();
+        }
+    } restore{inst, inst.x, inst.y, inst.direction, inst.hspeed, inst.vspeed};
+
+    const f64 max_length = factor * std::hypot(xgoal - inst.x, ygoal - inst.y);
+    f64 length = 0.0;
+    f64 stationary_turn = 0.0;
+    while (!mp_potential_step(inst, xgoal, ygoal, stepsize, checkall, target_obj)) {
+        const auto& previous = path.points.back();
+        const f64 advance = std::hypot(inst.x - previous.x, inst.y - previous.y);
+        path.points.push_back({inst.x, inst.y, 100.0});
+        length += advance;
+        if (length > max_length) return false;
+        // At one position all collision candidates remain fixed. A full turn tests
+        // every heading window, even when maxrot is smaller than rotstep.
+        if (advance == 0.0) {
+            stationary_turn += mp_potential_maxrot_;
+            if (!mp_potential_onspot_ || stationary_turn >= 360.0) return false;
+        } else {
+            stationary_turn = 0.0;
+        }
+    }
+    path.points.push_back({xgoal, ygoal, 100.0});
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Dynamic Asset & Event Mutation Helpers
+// ---------------------------------------------------------------------------
+
+void Runner::apply_removeback_and_smooth(Bitmap32& bmp, bool removeback, bool smooth) {
+    if (bmp.width <= 0 || bmp.height <= 0 || bmp.bgra.empty()) return;
+    if (removeback) {
+        const usize bl = static_cast<usize>(bmp.height - 1) * static_cast<usize>(bmp.width) * 4u;
+        const u8 kb = bmp.bgra[bl + 0];
+        const u8 kg = bmp.bgra[bl + 1];
+        const u8 kr = bmp.bgra[bl + 2];
+        for (usize p = 0; p + 3 < bmp.bgra.size(); p += 4) {
+            if (bmp.bgra[p + 0] == kb && bmp.bgra[p + 1] == kg && bmp.bgra[p + 2] == kr) {
+                bmp.bgra[p + 3] = 0;
+            }
+        }
+    }
+    if (smooth && bmp.width > 2 && bmp.height > 2) {
+        std::vector<u8> orig = bmp.bgra;
+        const i32 w = bmp.width;
+        const i32 h = bmp.height;
+        for (i32 y = 1; y < h - 1; ++y) {
+            for (i32 x = 1; x < w - 1; ++x) {
+                const usize i = (static_cast<usize>(y) * static_cast<usize>(w) + static_cast<usize>(x)) * 4u;
+                if (orig[i + 3] == 0) continue;
+                i32 transparent_neighbors = 0;
+                const i32 offs[4][2] = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
+                for (const auto& o : offs) {
+                    const usize ni = (static_cast<usize>(y + o[1]) * static_cast<usize>(w) + static_cast<usize>(x + o[0])) * 4u;
+                    if (orig[ni + 3] == 0) ++transparent_neighbors;
+                }
+                if (transparent_neighbors > 0) {
+                    bmp.bgra[i + 3] = static_cast<u8>(std::max(0, static_cast<i32>(orig[i + 3]) - transparent_neighbors * 48));
+                }
+            }
+        }
+    }
+}
+
+void Runner::rebuild_sprite_masks(SpriteData& sp, i32 alpha_tolerance, i32 bbox_mode,
+                                  i32 bleft, i32 bright, i32 btop, i32 bbottom) {
+    sp.masks.clear();
+    if (sp.images.empty()) {
+        sp.bbox_left = sp.bbox_right = sp.bbox_top = sp.bbox_bottom = 0;
+        return;
+    }
+
+    auto build_mask_for_range = [&](usize first_img, usize last_img) -> CollisionMask {
+        CollisionMask m{};
+        const i32 w = sp.images[first_img].width;
+        const i32 h = sp.images[first_img].height;
+        m.width = w;
+        m.height = h;
+        m.pixels.assign(static_cast<usize>(w) * static_cast<usize>(h), 0);
+
+        // A merged mask keeps the first bitmap's pixel storage and the union of every frame's bounds.
+        i32 min_x = w - 1, min_y = h - 1, last_x = w - 1, last_y = h - 1;
+        for (usize idx = first_img + 1; idx <= last_img; ++idx) {
+            min_x = std::min(min_x, sp.images[idx].width - 1);
+            min_y = std::min(min_y, sp.images[idx].height - 1);
+            last_x = std::max(last_x, sp.images[idx].width - 1);
+            last_y = std::max(last_y, sp.images[idx].height - 1);
+        }
+        i32 max_x = 0, max_y = 0; // Transparent frames keep inverted automatic bounds.
+        if (bbox_mode == 1) { // full image
+            min_x = 0; max_x = last_x; min_y = 0; max_y = last_y;
+        } else if (bbox_mode != 0) { // manual
+            min_x = std::max(bleft, 0);
+            max_x = std::min(bright, last_x);
+            min_y = std::max(btop, 0);
+            max_y = std::min(bbottom, last_y);
+        } else { // automatic from alpha
+            for (usize idx = first_img; idx <= last_img && idx < sp.images.size(); ++idx) {
+                const auto& img = sp.images[idx];
+                for (i32 y = 0; y < img.height; ++y) {
+                    for (i32 x = 0; x < img.width; ++x) {
+                        const usize p = (static_cast<usize>(y) * static_cast<usize>(img.width) + static_cast<usize>(x)) * 4u;
+                        if (p + 3 < img.bgra.size() && img.bgra[p + 3] > alpha_tolerance) {
+                            min_x = std::min(min_x, x);
+                            max_x = std::max(max_x, x);
+                            min_y = std::min(min_y, y);
+                            max_y = std::max(max_y, y);
+                        }
+                    }
+                }
+            }
+        }
+        m.bbox_left = min_x;
+        m.bbox_right = max_x;
+        m.bbox_top = min_y;
+        m.bbox_bottom = max_y;
+
+        const f64 cx = (static_cast<f64>(min_x) + static_cast<f64>(max_x)) * 0.5;
+        const f64 cy = (static_cast<f64>(min_y) + static_cast<f64>(max_y)) * 0.5;
+        const f64 rx = cx - min_x + 0.5;
+        const f64 ry = cy - min_y + 0.5;
+
+        for (i32 y = std::max(0, min_y); y <= std::min(h - 1, max_y); ++y) {
+            for (i32 x = std::max(0, min_x); x <= std::min(w - 1, max_x); ++x) {
+                bool solid = false;
+                if (sp.bbox_shape == 0) { // precise
+                    for (usize idx = first_img; idx <= last_img && idx < sp.images.size(); ++idx) {
+                        const auto& img = sp.images[idx];
+                        if (x < img.width && y < img.height) {
+                            const usize p = (static_cast<usize>(y) * static_cast<usize>(img.width) + static_cast<usize>(x)) * 4u;
+                            if (p + 3 < img.bgra.size() && img.bgra[p + 3] > alpha_tolerance) {
+                                solid = true;
+                                break;
+                            }
+                        }
+                    }
+                } else if (sp.bbox_shape == 1) { // rectangle
+                    solid = true;
+                } else if (sp.bbox_shape == 2) { // disk/ellipse
+                    const f64 nx = (static_cast<f64>(x) - cx) / rx;
+                    const f64 ny = (static_cast<f64>(y) - cy) / ry;
+                    solid = (nx * nx + ny * ny) < 1.0;
+                } else if (sp.bbox_shape == 3) { // diamond
+                    const f64 nx = (static_cast<f64>(x) - cx) / rx;
+                    const f64 ny = (static_cast<f64>(y) - cy) / ry;
+                    solid = (std::fabs(nx) + std::fabs(ny)) < 1.0;
+                }
+                m.pixels[static_cast<usize>(y) * static_cast<usize>(w) + static_cast<usize>(x)] = solid ? 1u : 0u;
+            }
+        }
+        return m;
+    };
+
+    if (sp.separate_masks) {
+        sp.masks.reserve(sp.images.size());
+        i32 gl = sp.width - 1, gr = 0, gt = sp.height - 1, gb = 0;
+        for (usize i = 0; i < sp.images.size(); ++i) {
+            CollisionMask m = build_mask_for_range(i, i);
+            gl = std::min(gl, m.bbox_left);
+            gr = std::max(gr, m.bbox_right);
+            gt = std::min(gt, m.bbox_top);
+            gb = std::max(gb, m.bbox_bottom);
+            sp.masks.push_back(std::move(m));
+        }
+        sp.bbox_left = gl;
+        sp.bbox_right = gr;
+        sp.bbox_top = gt;
+        sp.bbox_bottom = gb;
+    } else {
+        CollisionMask m = build_mask_for_range(0, sp.images.size() - 1);
+        sp.bbox_left = m.bbox_left;
+        sp.bbox_right = m.bbox_right;
+        sp.bbox_top = m.bbox_top;
+        sp.bbox_bottom = m.bbox_bottom;
+        sp.masks.push_back(std::move(m));
+    }
+}
+
+i32 Runner::create_sprite_from_bitmap(Bitmap32 bmp, bool removeback, bool smooth, i32 xorig, i32 yorig) {
+    if (bmp.width <= 0 || bmp.height <= 0 || bmp.bgra.empty()) return -1;
+    apply_removeback_and_smooth(bmp, removeback, smooth);
+
+    SpriteData sp{};
+    sp.exists = true;
+    sp.width = bmp.width;
+    sp.height = bmp.height;
+    sp.origin_x = xorig;
+    sp.origin_y = yorig;
+    sp.bbox_shape = 1; // rectangle by default for dynamic sprites
+    sp.images.push_back(std::move(bmp));
+    rebuild_sprite_masks(sp, 0, 1);
+
+    const i32 new_id = static_cast<i32>(game_.sprites.size());
+    game_.sprites.push_back(std::move(sp));
+    renderer_.upload_sprite(static_cast<usize>(new_id), game_.sprites[static_cast<usize>(new_id)]);
+    return new_id;
+}
+
+i32 Runner::create_background_from_bitmap(Bitmap32 bmp, bool removeback, bool smooth) {
+    if (bmp.width <= 0 || bmp.height <= 0 || bmp.bgra.empty()) return -1;
+    apply_removeback_and_smooth(bmp, removeback, smooth);
+
+    BackgroundData bg{};
+    bg.exists = true;
+    bg.width = bmp.width;
+    bg.height = bmp.height;
+    bg.bitmap = std::move(bmp);
+
+    const i32 new_id = static_cast<i32>(game_.backgrounds.size());
+    game_.backgrounds.push_back(std::move(bg));
+    renderer_.upload_background(static_cast<usize>(new_id), game_.backgrounds[static_cast<usize>(new_id)]);
+    return new_id;
+}
+
+bool Runner::object_event_add(i32 obj_idx, i32 ev_type, i32 ev_numb, std::string_view code) {
+    if (!object_exists(obj_idx) || ev_type < 0 || ev_type >= 12) return false;
+    if (static_cast<usize>(obj_idx) >= program_.object_event_chunks.size()) {
+        program_.object_event_chunks.resize(static_cast<usize>(obj_idx) + 1);
+    }
+    auto compiled = GmlCompiler::compile_chunk("object_event_add", code, program_.symbols);
+    if (!compiled) {
+        GM_LOG_WARN("runtime", "object_event_add compile error: %s", compiled.error_message().c_str());
+        return false;
+    }
+    auto& ev_map = program_.object_event_chunks[static_cast<usize>(obj_idx)][static_cast<usize>(ev_type)];
+    auto it = ev_map.find(ev_numb);
+    if (it == ev_map.end()) {
+        ev_map[ev_numb] = std::move(compiled.value());
+    } else {
+        // Append newly compiled code as a chained code action.
+        auto& existing = it->second;
+        const u32 action_idx = static_cast<u32>(existing.code_actions.size());
+        existing.code_actions.push_back(std::make_shared<BytecodeChunk>(std::move(compiled.value())));
+        // Remove trailing Exit/Return from existing main chunk before appending RunCodeAction.
+        if (!existing.code.empty() && existing.code.back().op == OpCode::Exit) {
+            existing.code.pop_back();
+        } else if (!existing.code.empty() && existing.code.back().op == OpCode::Return) {
+            existing.code.pop_back();
+            if (!existing.code.empty() && existing.code.back().op == OpCode::PushReal) {
+                existing.code.pop_back();
+            }
+        }
+        existing.code.push_back(Instruction{OpCode::RunCodeAction, 0, 0, action_idx});
+        existing.code.push_back(Instruction{OpCode::Exit, 0, 0, 0});
+    }
+    invalidate_event_tables();
+    return true;
+}
+
+bool Runner::object_event_clear(i32 obj_idx, i32 ev_type, i32 ev_numb) {
+    if (!object_exists(obj_idx) || ev_type < 0 || ev_type >= 12) return false;
+    if (static_cast<usize>(obj_idx) < program_.object_event_chunks.size()) {
+        program_.object_event_chunks[static_cast<usize>(obj_idx)][static_cast<usize>(ev_type)].erase(ev_numb);
+    }
+    invalidate_event_tables();
+    return true;
+}
+
+bool Runner::timeline_moment_add(i32 tl_idx, i32 step, std::string_view code) {
+    if (tl_idx < 0 || static_cast<usize>(tl_idx) >= game_.timelines.size() ||
+        !game_.timelines[static_cast<usize>(tl_idx)].exists) {
+        return false;
+    }
+    if (static_cast<usize>(tl_idx) >= program_.timeline_chunks.size()) {
+        program_.timeline_chunks.resize(static_cast<usize>(tl_idx) + 1);
+    }
+    auto compiled = GmlCompiler::compile_chunk("timeline_moment_add", code, program_.symbols);
+    if (!compiled) {
+        GM_LOG_WARN("runtime", "timeline_moment_add compile error: %s", compiled.error_message().c_str());
+        return false;
+    }
+    auto& moments = game_.timelines[tl_idx].moments;
+    auto moment = std::ranges::lower_bound(moments, step, {}, &TimelineMoment::step);
+    if (moment == moments.end() || moment->step != step) {
+        moment = moments.insert(moment, TimelineMoment{step, {}});
+    }
+    ActionData action;
+    action.kind = 7; // Execute Code
+    action.exe_type = 2;
+    action.args.emplace_back(code);
+    moment->event.actions.push_back(std::move(action));
+
+    auto& event = program_.timeline_chunks[tl_idx][step];
+    if (!event) event = std::make_shared<BytecodeChunk>();
+    const auto action_index = static_cast<u32>(event->code_actions.size());
+    event->code_actions.push_back(std::make_shared<BytecodeChunk>(std::move(compiled.value())));
+    event->emit(OpCode::JumpIfRoomChange, static_cast<u32>(event->code.size()) + 2);
+    event->emit(OpCode::RunCodeAction, action_index);
+    return true;
+}
+
+bool Runner::timeline_moment_clear(i32 tl_idx, i32 step) {
+    if (tl_idx < 0 || static_cast<usize>(tl_idx) >= game_.timelines.size() ||
+        !game_.timelines[static_cast<usize>(tl_idx)].exists) {
+        return false;
+    }
+    auto& moments = game_.timelines[tl_idx].moments;
+    auto moment = std::ranges::lower_bound(moments, step, {}, &TimelineMoment::step);
+    if (moment != moments.end() && moment->step == step) moments.erase(moment);
+    if (static_cast<usize>(tl_idx) < program_.timeline_chunks.size()) {
+        auto& chunks = program_.timeline_chunks[tl_idx];
+        if (auto it = chunks.find(step); it != chunks.end()) {
+            it->second->code.clear(); // Stop the remaining actions if this moment is executing.
+            chunks.erase(it);
+        }
+    }
+    return true;
+}
+
+void Runner::timeline_clear(i32 tl_idx) {
+    if (tl_idx < 0 || static_cast<usize>(tl_idx) >= game_.timelines.size()) return;
+    game_.timelines[tl_idx].moments.clear();
+    if (static_cast<usize>(tl_idx) >= program_.timeline_chunks.size()) return;
+    auto& chunks = program_.timeline_chunks[tl_idx];
+    for (auto& [step, event] : chunks) event->code.clear();
+    chunks.clear();
+}
+
+bool Runner::room_set_code(i32 room_idx, std::string_view code) {
+    if (!room_exists(room_idx)) return false;
+    game_.rooms[static_cast<usize>(room_idx)].creation_code = std::string(code);
+    if (static_cast<usize>(room_idx) >= program_.room_creation_chunks.size()) {
+        program_.room_creation_chunks.resize(static_cast<usize>(room_idx) + 1);
+    }
+    if (code.empty()) {
+        program_.room_creation_chunks[static_cast<usize>(room_idx)].reset();
+        return true;
+    }
+    auto compiled = GmlCompiler::compile_chunk("room_set_code", code, program_.symbols);
+    if (!compiled) {
+        GM_LOG_WARN("runtime", "room_set_code compile error: %s", compiled.error_message().c_str());
+        return false;
+    }
+    program_.room_creation_chunks[static_cast<usize>(room_idx)] = std::move(compiled.value());
+    return true;
 }
 
 } // namespace gm

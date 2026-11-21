@@ -11,6 +11,6 @@ namespace gm {
 [[nodiscard]] std::string lower_dnd_event_to_gml(const EventData& event, const GameData& game);
 
 // Each Execute Code card in a compound event is a separate GML execution frame.
-[[nodiscard]] Result<LexResult> lex_dnd_event(const EventData& event, const GameData& game);
+[[nodiscard]] Result<LexResult> lex_dnd_event(const EventData& event, const GameData& game, bool appendable = false);
 
 } // namespace gm

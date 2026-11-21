@@ -2,6 +2,7 @@
 
 #include "audio/audio_engine.h"
 #include "base/types.h"
+#include "extensions/dll_registry.h"
 #include "gml/compiler.h"
 #include "gml/vm.h"
 #include "graphics/gl_graphics_device.h"
@@ -45,6 +46,19 @@ struct BinFileHandle {
     std::vector<u8> data;
     usize pos = 0;
     bool dirty = false;
+};
+
+struct LegacyTextFile {
+    std::string path;
+    std::string contents;
+    usize pos = 0;
+    bool writable = false;
+
+    [[nodiscard]] bool eof() const noexcept { return pos >= contents.size(); }
+    [[nodiscard]] bool eoln() const noexcept { return eof() || contents[pos] == '\r'; }
+    std::string read_string();
+    f64 read_real();
+    void skip_line();
 };
 
 struct IniState {
@@ -92,7 +106,7 @@ enum class PendingRoomAction : u8 {
     EndGame,
 };
 
-class Runner : public IVmHost, public NonCopyable {
+class Runner : public IVmHost, public IExtensionHost, public NonCopyable {
 public:
     using BuiltinFn = std::function<Result<RValue>(Runner&, i32 self_id, i32 other_id, std::span<const RValue> args)>;
 
@@ -129,6 +143,14 @@ public:
     [[nodiscard]] Result<RValue> call_builtin(u32 func_id, i32 self_id, i32 other_id, std::span<const RValue> args) override;
     [[nodiscard]] Result<RValue> call_extension_dll(u32 ext_dll_id, std::span<const RValue> args) override;
 
+    // IExtensionHost implementation
+    [[nodiscard]] Vfs& ext_vfs() noexcept override { return vfs_; }
+    [[nodiscard]] AudioEngine& ext_audio() noexcept override { return audio_; }
+    [[nodiscard]] const GameData& ext_game() const noexcept override { return game_; }
+    [[nodiscard]] PlatformWindow& ext_window() noexcept override { return window_; }
+    void ext_ds_list_add_real(i32 list_id, f64 value) override { ds_.list_add(list_id, RValue(value)); }
+    Result<RValue> ext_call_function(i32 address, i32 self, i32 other, std::span<const RValue> args) override;
+
     // Subsystems accessors for built-in implementation units
     [[nodiscard]] GameData& game() noexcept { return game_; }
     [[nodiscard]] const GameData& game() const noexcept { return game_; }
@@ -139,6 +161,7 @@ public:
     [[nodiscard]] GlGraphicsDevice& gfx() noexcept { return gfx_; }
     [[nodiscard]] Renderer2D& renderer() noexcept { return renderer_; }
     [[nodiscard]] AudioEngine& audio() noexcept { return audio_; }
+    [[nodiscard]] DllRegistry& dll_registry() noexcept { return dll_registry_; }
     [[nodiscard]] DsManager& ds() noexcept { return ds_; }
     [[nodiscard]] ParticleManager& particles() noexcept { return particles_; }
     [[nodiscard]] MpGridManager& mp_grids() noexcept { return mp_grids_; }
@@ -221,6 +244,28 @@ public:
     void move_bounce(Instance& inst, bool advanced, bool solid_only);
     void start_path(Instance& inst, i32 path_id, f64 speed, i32 endaction, bool absolute);
     void end_path(Instance& inst);
+    bool mp_linear_step(Instance& inst, f64 xgoal, f64 ygoal, f64 stepsize, bool checkall, i32 target_obj = -3);
+    bool mp_linear_path(Instance& inst, i32 path_id, f64 xgoal, f64 ygoal, f64 stepsize, bool checkall, i32 target_obj = -3);
+    bool mp_potential_step(Instance& inst, f64 xgoal, f64 ygoal, f64 stepsize, bool checkall, i32 target_obj = -3);
+    bool mp_potential_path(Instance& inst, i32 path_id, f64 xgoal, f64 ygoal, f64 stepsize, f64 factor, bool checkall, i32 target_obj = -3);
+
+    // Event-pumping wait / sleep helpers (returns false if window quit was requested)
+    bool sleep_ms(f64 ms);
+    bool wait_for_key();
+    bool wait_for_mouse();
+
+    // Dynamic asset & event mutation helpers
+    static void apply_removeback_and_smooth(Bitmap32& bmp, bool removeback, bool smooth);
+    static void rebuild_sprite_masks(SpriteData& sp, i32 alpha_tolerance = 0, i32 bbox_mode = 0,
+                                     i32 bleft = 0, i32 bright = 0, i32 btop = 0, i32 bbottom = 0);
+    i32 create_sprite_from_bitmap(Bitmap32 bmp, bool removeback, bool smooth, i32 xorig, i32 yorig);
+    i32 create_background_from_bitmap(Bitmap32 bmp, bool removeback, bool smooth);
+    bool object_event_add(i32 obj_idx, i32 ev_type, i32 ev_numb, std::string_view code);
+    bool object_event_clear(i32 obj_idx, i32 ev_type, i32 ev_numb);
+    bool timeline_moment_add(i32 tl_idx, i32 step, std::string_view code);
+    bool timeline_moment_clear(i32 tl_idx, i32 step);
+    void timeline_clear(i32 tl_idx);
+    bool room_set_code(i32 room_idx, std::string_view code);
 
     // Room & game control
     void request_room_goto(i32 room_id);
@@ -270,6 +315,8 @@ public:
     // Screen/draw/window helpers
     void render_current_frame();
     void draw_instance_default(const Instance& inst);
+    void compute_canvas_viewport(i32& out_vx, i32& out_vy, i32& out_vw, i32& out_vh, i32& out_cw, i32& out_ch) const noexcept;
+    void update_mouse_room_coords();
 
     // Public state fields accessed by built-in implementation units
     i32 current_room_ = -1;
@@ -319,7 +366,60 @@ public:
     std::vector<std::string> cmd_args_;
     std::array<HighscoreEntry, 10> highscores_{};
 
-    // Registration helper called by the 4 builtins_*.cpp files
+    // Motion planning potential settings
+    f64 mp_potential_maxrot_ = 30.0;
+    f64 mp_potential_rotstep_ = 10.0;
+    f64 mp_potential_ahead_ = 3.0;
+    bool mp_potential_onspot_ = true;
+
+    // Window & transition state
+    bool window_showborder_ = true;
+    bool window_showicons_ = true;
+    f64 window_region_scale_ = -1.0;
+    i32 window_region_w_ = 0;
+    i32 window_region_h_ = 0;
+    std::unordered_map<i32, i32> transition_scripts_;
+
+    // Highscore appearance state
+    i32 highscore_bg_ = -1;
+    bool highscore_border_ = true;
+    u32 highscore_col_back_ = 0xFFFFFFu;
+    u32 highscore_col_new_ = 0x0000FFu;
+    u32 highscore_col_other_ = 0x000000u;
+    std::string highscore_font_name_ = "Arial";
+    i32 highscore_font_size_ = 12;
+    i32 highscore_font_style_ = 0;
+    std::string highscore_caption_ = "Highscores";
+    std::string highscore_nobody_ = "<nobody>";
+    std::string highscore_escape_ = "Press <Escape> to close";
+
+    // Splash screen settings
+    std::string splash_caption_;
+    bool splash_fullscreen_ = false;
+    bool splash_border_ = true;
+    i32 splash_size_w_ = 0;
+    i32 splash_size_h_ = 0;
+    i32 splash_pos_x_ = -1;
+    i32 splash_pos_y_ = -1;
+    bool splash_adapt_ = true;
+    bool splash_top_ = true;
+    u32 splash_color_ = 0;
+    bool splash_main_ = true;
+    f64 splash_scale_ = -1.0;
+    bool splash_cursor_ = true;
+    bool splash_interrupt_ = true;
+    bool splash_stop_key_ = true;
+    bool splash_stop_mouse_ = true;
+    bool splash_close_button_ = true;
+
+    // Legacy D&D action state
+    u32 action_fill_color_ = 0xFFFFFFu;
+    u32 action_line_color_ = 0x000000u;
+    i32 action_part_system_ = -1;
+    std::array<i32, 16> action_part_types_{-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
+    std::array<i32, 16> action_part_emitters_{-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
+
+    // Registration helper called by the builtins_*.cpp files
     void register_builtin(std::string_view name, BuiltinFn fn);
 
 private:
@@ -328,6 +428,7 @@ private:
     void register_builtins_gameplay();
     void register_builtins_graphics();
     void register_builtins_actions();
+    void register_builtins_misc();
 
     template<class Fn>
     void for_instances_at_position(f64 x, f64 y, Fn visit) {
@@ -343,7 +444,9 @@ private:
     }
 
     void start_game();
+    void register_instance_handle(Instance& instance);
     void add_room_instance(std::unique_ptr<Instance> instance);
+    void set_instance_object(Instance& instance, i32 object) const;
     void index_instance(Instance& instance);
     [[nodiscard]] const Instance* field_target_by_id(i32 id, TargetUse use) const;
     mutable std::array<usize, 2> cached_field_indices_{};
@@ -354,9 +457,7 @@ private:
     void start_room(i32 room_id, bool is_game_start);
     void process_pending_room_action();
 
-    void update_mouse_room_coords();
     void update_window_caption();
-    void compute_canvas_viewport(i32& out_vx, i32& out_vy, i32& out_vw, i32& out_vh, i32& out_cw, i32& out_ch) const noexcept;
     void update_view_following();
     void step_triggers(i32 moment);
     void step_event(i32 moment);
@@ -414,8 +515,10 @@ private:
     std::unique_ptr<GmlVm> vm_;
     Renderer2D renderer_;
     AudioEngine audio_;
+    DllRegistry dll_registry_;
     DsManager ds_;
-    ParticleManager particles_;
+    GmlRandom rng_;
+    ParticleManager particles_{rng_};
     MpGridManager mp_grids_;
 
     // CRoom maintains separate ordered active and inactive lists. Object lists
@@ -442,8 +545,6 @@ private:
     bool no_more_lives_armed_ = false;
     bool no_more_health_armed_ = false;
 
-    GmlRandom rng_;
-
     u32 fps_frame_accum_ = 0;
     u64 fps_last_sample_us_ = 0;
 
@@ -452,6 +553,9 @@ private:
 
     std::unordered_map<i32, TextFileHandle> text_files_;
     i32 next_text_file_id_ = 1;
+    std::optional<LegacyTextFile> legacy_text_file_;
+    Result<RValue> open_legacy_text_file(std::string_view path, i32 mode);
+    Result<RValue> close_legacy_text_file();
     std::unordered_map<i32, BinFileHandle> bin_files_;
     i32 next_bin_file_id_ = 1;
     IniState ini_;

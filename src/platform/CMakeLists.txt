@@ -3,6 +3,7 @@ add_library(gm_platform STATIC
     clock.cpp
     platform.h
     platform.cpp
+    registry.cpp
     vfs.h
     vfs.cpp
     window.h

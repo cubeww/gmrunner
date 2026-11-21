@@ -58,12 +58,12 @@ public:
         chunk_.debug_name = std::string(debug_name);
     }
 
-    Result<BytecodeChunk> compile_program() {
+    Result<BytecodeChunk> compile_program(bool appendable = false) {
         while (!at(TokenKind::Eof)) {
             if (auto e = parse_statement(); !e) return e.error();
         }
-        if (chunk_.code.empty() ||
-            (chunk_.code.back().op != OpCode::Return && chunk_.code.back().op != OpCode::Exit)) {
+        if (!appendable && (chunk_.code.empty() ||
+            (chunk_.code.back().op != OpCode::Return && chunk_.code.back().op != OpCode::Exit))) {
             chunk_.emit(OpCode::Exit, 0, 0, cur_line());
         }
         chunk_.local_count = static_cast<u32>(locals_.size());
@@ -285,7 +285,7 @@ private:
                 if (!action) return action.error();
                 chunk_.emit(OpCode::RunCodeAction, static_cast<u32>(chunk_.code_actions.size()),
                             0, static_cast<u16>(token.line));
-                chunk_.code_actions.push_back(std::move(action.value()));
+                chunk_.code_actions.push_back(std::make_shared<BytecodeChunk>(std::move(action.value())));
                 return Result<void>::success();
             }
             case TokenKind::LBrace:
@@ -883,7 +883,7 @@ private:
             if (stack_inputs) chunk_.emit(OpCode::DupN, 1, stack_inputs, line);
             emit_lvalue_load(lv);
             chunk_.emit(OpCode::Swap, 0, 0, line);
-            chunk_.emit(compound_assign_op(op_tok.kind), 0, 0, static_cast<u16>(op_tok.line));
+            chunk_.emit(compound_assign_op(op_tok.kind), 0, 1, static_cast<u16>(op_tok.line));
             emit_lvalue_store(lv);
         }
 
@@ -1196,11 +1196,11 @@ CompiledProgram GmlCompiler::compile_game(const GameData& game) {
     CompiledProgram prog{};
     prog.symbols.populate_from_game(game);
 
-    auto compile_event = [&](std::string_view name, const EventData& event) -> Result<BytecodeChunk> {
-        auto lexed = lex_dnd_event(event, game);
+    auto compile_event = [&](std::string_view name, const EventData& event, bool appendable = false) -> Result<BytecodeChunk> {
+        auto lexed = lex_dnd_event(event, game, appendable);
         if (!lexed) return Error{std::string(name) + ": " + lexed.error_message()};
         ParserCompiler parser(name, std::move(lexed.value().tokens), prog.symbols);
-        return parser.compile_program();
+        return parser.compile_program(appendable);
     };
 
     auto record_error = [&](std::string name, std::string msg, std::string_view src = {}) {
@@ -1308,11 +1308,11 @@ CompiledProgram GmlCompiler::compile_game(const GameData& game) {
         if (!tl.exists) continue;
         for (const auto& [step, event] : tl.moments) {
             std::string uname = "tl:" + tl.name + ":step" + std::to_string(step);
-            auto res = compile_event(uname, event);
+            auto res = compile_event(uname, event, true);
             if (res) {
                 prog.stats.total_instructions += res.value().instruction_count();
                 ++prog.stats.timeline_moments_compiled;
-                prog.timeline_chunks[ti].emplace(step, std::move(res.value()));
+                prog.timeline_chunks[ti].emplace(step, std::make_shared<BytecodeChunk>(std::move(res.value())));
             } else {
                 record_error(uname, res.error_message());
             }

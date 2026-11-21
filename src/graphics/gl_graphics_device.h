@@ -44,6 +44,18 @@ public:
 
     void read_pixels_rgba8(i32 x, i32 y, i32 w, i32 h, std::span<u8> out_rgba) override;
 
+    [[nodiscard]] bool texture_exists(TextureHandle tex) const noexcept {
+        return tex.valid() && textures_.contains(tex.id);
+    }
+    [[nodiscard]] i32 texture_width(TextureHandle tex) const noexcept {
+        const auto it = textures_.find(tex.id);
+        return it != textures_.end() ? it->second.width : 0;
+    }
+    [[nodiscard]] i32 texture_height(TextureHandle tex) const noexcept {
+        const auto it = textures_.find(tex.id);
+        return it != textures_.end() ? it->second.height : 0;
+    }
+
 private:
     struct FramebufferEntry {
         u32 fbo = 0;

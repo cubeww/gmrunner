@@ -551,6 +551,7 @@ Result<RValue> GmlVm::execute(
         RValue rhs = pop();                        \
         RValue lhs = pop();                        \
         auto res = RValue::fn(lhs, rhs);           \
+        if (!res && ins.aux) res = std::move(lhs); \
         if (!res) return res.error();              \
         stack.push_back(std::move(res.value()));   \
         break;                                     \
@@ -727,7 +728,8 @@ Result<RValue> GmlVm::execute(
             }
 
             case OpCode::RunCodeAction: {
-                auto result = execute(chunk.code_actions[ins.operand], cur_self, cur_other);
+                const auto action = chunk.code_actions[ins.operand];
+                auto result = execute(*action, cur_self, cur_other);
                 if (!result) return result.error();
                 break;
             }

@@ -113,7 +113,7 @@ int main(int argc, char** argv) {
     }
     gm::Logger::set_trace_flags(opts.trace);
 
-    GM_LOG_INFO("app", "gmrunner Phase 3 (version_override=%s, codepage=%u)",
+    GM_LOG_INFO("app", "gmrunner Phase 4 (version_override=%s, codepage=%u)",
                 std::string(gm::version_mode_name(opts.version_override)).c_str(),
                 opts.codepage);
 
