@@ -4,6 +4,16 @@
 
 #include <SDL3/SDL.h>
 
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 namespace gm {
 
 void InputState::begin_frame() {
@@ -423,6 +433,30 @@ void PlatformWindow::set_visible(bool visible) {
     }
 }
 
+bool PlatformWindow::is_maximized() const noexcept {
+    return window_ && (SDL_GetWindowFlags(window_) & SDL_WINDOW_MAXIMIZED) != 0;
+}
+
+bool PlatformWindow::is_minimized() const noexcept {
+    return window_ && (SDL_GetWindowFlags(window_) & SDL_WINDOW_MINIMIZED) != 0;
+}
+
+void PlatformWindow::maximize() {
+    if (window_) SDL_MaximizeWindow(window_);
+}
+
+void PlatformWindow::minimize() {
+    if (window_) SDL_MinimizeWindow(window_);
+}
+
+void PlatformWindow::restore() {
+    if (window_) SDL_RestoreWindow(window_);
+}
+
+void PlatformWindow::raise_focus() {
+    if (window_) SDL_RaiseWindow(window_);
+}
+
 void PlatformWindow::set_mouse_position(i32 x, i32 y) {
     if (window_) {
         SDL_WarpMouseInWindow(window_, static_cast<float>(x), static_cast<float>(y));
@@ -611,6 +645,32 @@ i32 PlatformWindow::display_height() const noexcept {
         return mode->h;
     }
     return 1080;
+}
+
+bool PlatformWindow::keyboard_check_direct(i32 key) noexcept {
+#if defined(_WIN32)
+    // GM tests the whole return value, including the press since the last query.
+    return GetAsyncKeyState(key) != 0;
+#else
+    if (key <= 0 || key > 255) return false;
+    SDL_PumpEvents();
+    int count = 0;
+    const bool* down = SDL_GetKeyboardState(&count);
+    switch (key) {
+        case 1: return (SDL_GetMouseState(nullptr, nullptr) & SDL_BUTTON_LMASK) != 0;
+        case 2: return (SDL_GetMouseState(nullptr, nullptr) & SDL_BUTTON_RMASK) != 0;
+        case 4: return (SDL_GetMouseState(nullptr, nullptr) & SDL_BUTTON_MMASK) != 0;
+        case 5: return (SDL_GetMouseState(nullptr, nullptr) & SDL_BUTTON_X1MASK) != 0;
+        case 6: return (SDL_GetMouseState(nullptr, nullptr) & SDL_BUTTON_X2MASK) != 0;
+        case 16: return down[SDL_SCANCODE_LSHIFT] || down[SDL_SCANCODE_RSHIFT];
+        case 17: return down[SDL_SCANCODE_LCTRL] || down[SDL_SCANCODE_RCTRL];
+        case 18: return down[SDL_SCANCODE_LALT] || down[SDL_SCANCODE_RALT];
+    }
+    for (int i = 0; i < count; ++i) {
+        if (down[i] && sdl_scancode_to_gm_vk(i) == key) return true;
+    }
+    return false;
+#endif
 }
 
 bool PlatformWindow::numlock_on() noexcept {

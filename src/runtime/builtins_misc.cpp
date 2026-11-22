@@ -209,9 +209,13 @@ void Runner::register_builtins_misc() {
     register_builtin("MCI_command", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(std::string{}); });
 
     // -----------------------------------------------------------------------
-    // Fixed-Function D3D Projection, Transforms & Primitives
-    // (Used by GM80_parasoko 3D puzzle rooms & GM81_kamilia HUD projections)
+    // Fixed-Function D3D Pipeline, Lighting, Fog, Projection, Transforms, Shapes & Models
     // -----------------------------------------------------------------------
+    auto tex_from_arg = [](std::span<const RValue> a, usize idx) noexcept -> TextureHandle {
+        const i32 tid = arg_i32(a, idx, -1);
+        return tid > 0 ? TextureHandle{static_cast<u32>(tid)} : TextureHandle{};
+    };
+
     register_builtin("d3d_start", [](Runner& r, i32, i32, std::span<const RValue>) {
         r.renderer().d3d_start();
         return RValue(true);
@@ -240,9 +244,46 @@ void Runner::register_builtins_misc() {
         r.renderer().d3d_set_culling(arg_bool(a, 0));
         return RValue(0.0);
     });
-    register_builtin("d3d_set_lighting", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
-    register_builtin("d3d_set_shading", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
-    register_builtin("d3d_set_fog", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
+    register_builtin("d3d_set_lighting", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        r.renderer().d3d_set_lighting(arg_bool(a, 0));
+        return RValue(0.0);
+    });
+    register_builtin("d3d_set_shading", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        r.renderer().d3d_set_shading(arg_bool(a, 0, true));
+        return RValue(0.0);
+    });
+    register_builtin("d3d_set_fog", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        r.renderer().d3d_set_fog(
+            arg_bool(a, 0),
+            static_cast<u32>(arg_i32(a, 1, 0)) & 0x00FFFFFFu,
+            static_cast<f32>(arg_real(a, 2, 0.0)),
+            static_cast<f32>(arg_real(a, 3, 1.0)));
+        return RValue(0.0);
+    });
+
+    register_builtin("d3d_light_define_ambient", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        r.renderer().d3d_light_define_ambient(static_cast<u32>(arg_i32(a, 0, 0)) & 0x00FFFFFFu);
+        return RValue(0.0);
+    });
+    register_builtin("d3d_light_define_direction", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        r.renderer().d3d_light_define_direction(
+            arg_i32(a, 0, 0),
+            static_cast<f32>(arg_real(a, 1)), static_cast<f32>(arg_real(a, 2)), static_cast<f32>(arg_real(a, 3)),
+            static_cast<u32>(arg_i32(a, 4, 0xFFFFFF)) & 0x00FFFFFFu);
+        return RValue(0.0);
+    });
+    register_builtin("d3d_light_define_point", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        r.renderer().d3d_light_define_point(
+            arg_i32(a, 0, 0),
+            static_cast<f32>(arg_real(a, 1)), static_cast<f32>(arg_real(a, 2)), static_cast<f32>(arg_real(a, 3)),
+            static_cast<f32>(arg_real(a, 4, 1.0)),
+            static_cast<u32>(arg_i32(a, 5, 0xFFFFFF)) & 0x00FFFFFFu);
+        return RValue(0.0);
+    });
+    register_builtin("d3d_light_enable", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        r.renderer().d3d_light_enable(arg_i32(a, 0, 0), arg_bool(a, 1));
+        return RValue(0.0);
+    });
 
     register_builtin("d3d_set_projection", [](Runner& r, i32, i32, std::span<const RValue> a) {
         r.renderer().d3d_set_projection(
@@ -317,8 +358,8 @@ void Runner::register_builtins_misc() {
         r.renderer().primitive_begin(arg_i32(a, 0, 4), TextureHandle{});
         return RValue(0.0);
     });
-    register_builtin("d3d_primitive_begin_texture", [](Runner& r, i32, i32, std::span<const RValue> a) {
-        r.renderer().primitive_begin(arg_i32(a, 0, 4), TextureHandle{static_cast<u32>(arg_i32(a, 1, 0))});
+    register_builtin("d3d_primitive_begin_texture", [tex_from_arg](Runner& r, i32, i32, std::span<const RValue> a) {
+        r.renderer().primitive_begin(arg_i32(a, 0, 4), tex_from_arg(a, 1));
         return RValue(0.0);
     });
     register_builtin("d3d_primitive_end", [](Runner& r, i32, i32, std::span<const RValue>) {
@@ -327,96 +368,225 @@ void Runner::register_builtins_misc() {
     });
     register_builtin("d3d_vertex", [](Runner& r, i32, i32, std::span<const RValue> a) {
         r.renderer().primitive_vertex_3d(static_cast<f32>(arg_real(a, 0)), static_cast<f32>(arg_real(a, 1)), static_cast<f32>(arg_real(a, 2)),
-                                         0.0f, 0.0f, r.renderer().color(), r.renderer().alpha());
+                                         0.0f, 0.0f, r.renderer().d3d_vertex_color(), r.renderer().alpha());
         return RValue(0.0);
     });
     register_builtin("d3d_vertex_color", [](Runner& r, i32, i32, std::span<const RValue> a) {
         r.renderer().primitive_vertex_3d(static_cast<f32>(arg_real(a, 0)), static_cast<f32>(arg_real(a, 1)), static_cast<f32>(arg_real(a, 2)),
-                                         0.0f, 0.0f, static_cast<u32>(arg_i32(a, 3)), static_cast<f32>(arg_real(a, 4, 1.0)));
+                                         0.0f, 0.0f, r.renderer().d3d_vertex_color(static_cast<u32>(arg_i32(a, 3))), static_cast<f32>(arg_real(a, 4, 1.0)));
         return RValue(0.0);
     });
     register_builtin("d3d_vertex_texture", [](Runner& r, i32, i32, std::span<const RValue> a) {
         r.renderer().primitive_vertex_3d(static_cast<f32>(arg_real(a, 0)), static_cast<f32>(arg_real(a, 1)), static_cast<f32>(arg_real(a, 2)),
-                                         static_cast<f32>(arg_real(a, 3)), static_cast<f32>(arg_real(a, 4)), r.renderer().color(), r.renderer().alpha());
+                                         static_cast<f32>(arg_real(a, 3)), static_cast<f32>(arg_real(a, 4)), r.renderer().d3d_vertex_color(), r.renderer().alpha());
         return RValue(0.0);
     });
     register_builtin("d3d_vertex_texture_color", [](Runner& r, i32, i32, std::span<const RValue> a) {
         r.renderer().primitive_vertex_3d(static_cast<f32>(arg_real(a, 0)), static_cast<f32>(arg_real(a, 1)), static_cast<f32>(arg_real(a, 2)),
                                          static_cast<f32>(arg_real(a, 3)), static_cast<f32>(arg_real(a, 4)),
-                                         static_cast<u32>(arg_i32(a, 5)), static_cast<f32>(arg_real(a, 6, 1.0)));
+                                         r.renderer().d3d_vertex_color(static_cast<u32>(arg_i32(a, 5))), static_cast<f32>(arg_real(a, 6, 1.0)));
         return RValue(0.0);
     });
     register_builtin("d3d_vertex_normal", [](Runner& r, i32, i32, std::span<const RValue> a) {
-        r.renderer().primitive_vertex_3d(static_cast<f32>(arg_real(a, 0)), static_cast<f32>(arg_real(a, 1)), static_cast<f32>(arg_real(a, 2)),
-                                         0.0f, 0.0f, r.renderer().color(), r.renderer().alpha());
+        r.renderer().primitive_vertex_normal_3d(
+            static_cast<f32>(arg_real(a, 0)), static_cast<f32>(arg_real(a, 1)), static_cast<f32>(arg_real(a, 2)),
+            static_cast<f32>(arg_real(a, 3)), static_cast<f32>(arg_real(a, 4)), static_cast<f32>(arg_real(a, 5)),
+            0.0f, 0.0f, r.renderer().d3d_vertex_color(), r.renderer().alpha());
         return RValue(0.0);
     });
     register_builtin("d3d_vertex_normal_color", [](Runner& r, i32, i32, std::span<const RValue> a) {
-        r.renderer().primitive_vertex_3d(static_cast<f32>(arg_real(a, 0)), static_cast<f32>(arg_real(a, 1)), static_cast<f32>(arg_real(a, 2)),
-                                         0.0f, 0.0f, static_cast<u32>(arg_i32(a, 6)), static_cast<f32>(arg_real(a, 7, 1.0)));
+        r.renderer().primitive_vertex_normal_3d(
+            static_cast<f32>(arg_real(a, 0)), static_cast<f32>(arg_real(a, 1)), static_cast<f32>(arg_real(a, 2)),
+            static_cast<f32>(arg_real(a, 3)), static_cast<f32>(arg_real(a, 4)), static_cast<f32>(arg_real(a, 5)),
+            0.0f, 0.0f, r.renderer().d3d_vertex_color(static_cast<u32>(arg_i32(a, 6))), static_cast<f32>(arg_real(a, 7, 1.0)));
         return RValue(0.0);
     });
     register_builtin("d3d_vertex_normal_texture", [](Runner& r, i32, i32, std::span<const RValue> a) {
-        r.renderer().primitive_vertex_3d(static_cast<f32>(arg_real(a, 0)), static_cast<f32>(arg_real(a, 1)), static_cast<f32>(arg_real(a, 2)),
-                                         static_cast<f32>(arg_real(a, 6)), static_cast<f32>(arg_real(a, 7)), r.renderer().color(), r.renderer().alpha());
+        r.renderer().primitive_vertex_normal_3d(
+            static_cast<f32>(arg_real(a, 0)), static_cast<f32>(arg_real(a, 1)), static_cast<f32>(arg_real(a, 2)),
+            static_cast<f32>(arg_real(a, 3)), static_cast<f32>(arg_real(a, 4)), static_cast<f32>(arg_real(a, 5)),
+            static_cast<f32>(arg_real(a, 6)), static_cast<f32>(arg_real(a, 7)), r.renderer().d3d_vertex_color(), r.renderer().alpha());
         return RValue(0.0);
     });
     register_builtin("d3d_vertex_normal_texture_color", [](Runner& r, i32, i32, std::span<const RValue> a) {
-        r.renderer().primitive_vertex_3d(static_cast<f32>(arg_real(a, 0)), static_cast<f32>(arg_real(a, 1)), static_cast<f32>(arg_real(a, 2)),
-                                         static_cast<f32>(arg_real(a, 6)), static_cast<f32>(arg_real(a, 7)),
-                                         static_cast<u32>(arg_i32(a, 8)), static_cast<f32>(arg_real(a, 9, 1.0)));
+        r.renderer().primitive_vertex_normal_3d(
+            static_cast<f32>(arg_real(a, 0)), static_cast<f32>(arg_real(a, 1)), static_cast<f32>(arg_real(a, 2)),
+            static_cast<f32>(arg_real(a, 3)), static_cast<f32>(arg_real(a, 4)), static_cast<f32>(arg_real(a, 5)),
+            static_cast<f32>(arg_real(a, 6)), static_cast<f32>(arg_real(a, 7)),
+            r.renderer().d3d_vertex_color(static_cast<u32>(arg_i32(a, 8))), static_cast<f32>(arg_real(a, 9, 1.0)));
         return RValue(0.0);
     });
 
-    register_builtin("d3d_draw_block", [](Runner& r, i32, i32, std::span<const RValue> a) {
+    register_builtin("d3d_draw_block", [tex_from_arg](Runner& r, i32, i32, std::span<const RValue> a) {
         r.renderer().d3d_draw_block(
             static_cast<f32>(arg_real(a, 0)), static_cast<f32>(arg_real(a, 1)), static_cast<f32>(arg_real(a, 2)),
             static_cast<f32>(arg_real(a, 3)), static_cast<f32>(arg_real(a, 4)), static_cast<f32>(arg_real(a, 5)),
-            TextureHandle{static_cast<u32>(arg_i32(a, 6, 0))},
+            tex_from_arg(a, 6),
             static_cast<f32>(arg_real(a, 7, 1.0)), static_cast<f32>(arg_real(a, 8, 1.0)));
         return RValue(0.0);
     });
-    register_builtin("d3d_draw_floor", [](Runner& r, i32, i32, std::span<const RValue> a) {
+    register_builtin("d3d_draw_floor", [tex_from_arg](Runner& r, i32, i32, std::span<const RValue> a) {
         r.renderer().d3d_draw_floor(
             static_cast<f32>(arg_real(a, 0)), static_cast<f32>(arg_real(a, 1)), static_cast<f32>(arg_real(a, 2)),
             static_cast<f32>(arg_real(a, 3)), static_cast<f32>(arg_real(a, 4)), static_cast<f32>(arg_real(a, 5)),
-            TextureHandle{static_cast<u32>(arg_i32(a, 6, 0))},
+            tex_from_arg(a, 6),
             static_cast<f32>(arg_real(a, 7, 1.0)), static_cast<f32>(arg_real(a, 8, 1.0)));
         return RValue(0.0);
     });
-    register_builtin("d3d_draw_wall", [](Runner& r, i32, i32, std::span<const RValue> a) {
+    register_builtin("d3d_draw_wall", [tex_from_arg](Runner& r, i32, i32, std::span<const RValue> a) {
         r.renderer().d3d_draw_wall(
             static_cast<f32>(arg_real(a, 0)), static_cast<f32>(arg_real(a, 1)), static_cast<f32>(arg_real(a, 2)),
             static_cast<f32>(arg_real(a, 3)), static_cast<f32>(arg_real(a, 4)), static_cast<f32>(arg_real(a, 5)),
-            TextureHandle{static_cast<u32>(arg_i32(a, 6, 0))},
+            tex_from_arg(a, 6),
             static_cast<f32>(arg_real(a, 7, 1.0)), static_cast<f32>(arg_real(a, 8, 1.0)));
         return RValue(0.0);
     });
-    register_builtin("d3d_draw_cylinder", [](Runner& r, i32, i32, std::span<const RValue> a) {
+    register_builtin("d3d_draw_cylinder", [tex_from_arg](Runner& r, i32, i32, std::span<const RValue> a) {
         r.renderer().d3d_draw_cylinder(
             static_cast<f32>(arg_real(a, 0)), static_cast<f32>(arg_real(a, 1)), static_cast<f32>(arg_real(a, 2)),
             static_cast<f32>(arg_real(a, 3)), static_cast<f32>(arg_real(a, 4)), static_cast<f32>(arg_real(a, 5)),
-            TextureHandle{static_cast<u32>(arg_i32(a, 6, 0))},
+            tex_from_arg(a, 6),
             static_cast<f32>(arg_real(a, 7, 1.0)), static_cast<f32>(arg_real(a, 8, 1.0)),
             arg_bool(a, 9, true), arg_i32(a, 10, 24));
         return RValue(0.0);
     });
-    register_builtin("d3d_draw_cone", [](Runner& r, i32, i32, std::span<const RValue> a) {
+    register_builtin("d3d_draw_cone", [tex_from_arg](Runner& r, i32, i32, std::span<const RValue> a) {
         r.renderer().d3d_draw_cone(
             static_cast<f32>(arg_real(a, 0)), static_cast<f32>(arg_real(a, 1)), static_cast<f32>(arg_real(a, 2)),
             static_cast<f32>(arg_real(a, 3)), static_cast<f32>(arg_real(a, 4)), static_cast<f32>(arg_real(a, 5)),
-            TextureHandle{static_cast<u32>(arg_i32(a, 6, 0))},
+            tex_from_arg(a, 6),
             static_cast<f32>(arg_real(a, 7, 1.0)), static_cast<f32>(arg_real(a, 8, 1.0)),
             arg_bool(a, 9, true), arg_i32(a, 10, 24));
         return RValue(0.0);
     });
-    register_builtin("d3d_draw_ellipsoid", [](Runner& r, i32, i32, std::span<const RValue> a) {
+    register_builtin("d3d_draw_ellipsoid", [tex_from_arg](Runner& r, i32, i32, std::span<const RValue> a) {
         r.renderer().d3d_draw_ellipsoid(
             static_cast<f32>(arg_real(a, 0)), static_cast<f32>(arg_real(a, 1)), static_cast<f32>(arg_real(a, 2)),
             static_cast<f32>(arg_real(a, 3)), static_cast<f32>(arg_real(a, 4)), static_cast<f32>(arg_real(a, 5)),
-            TextureHandle{static_cast<u32>(arg_i32(a, 6, 0))},
+            tex_from_arg(a, 6),
             static_cast<f32>(arg_real(a, 7, 1.0)), static_cast<f32>(arg_real(a, 8, 1.0)),
             arg_i32(a, 9, 24));
+        return RValue(0.0);
+    });
+
+    // -----------------------------------------------------------------------
+    // 3D Models (C3D_Model + GM8 v100 .d3d/.g3d text format + static VBO cache)
+    // -----------------------------------------------------------------------
+    auto model_cmd = [](Runner& r, i32 op, std::span<const RValue> a, usize param_count) {
+        const i32 id = arg_i32(a, 0, -1);
+        std::array<f64, 10> p{};
+        for (usize i = 0; i < param_count && i < 10; ++i) {
+            p[i] = arg_real(a, i + 1, 0.0);
+        }
+        r.renderer().d3d_model_command(id, op, p);
+    };
+
+    register_builtin("d3d_model_create", [](Runner& r, i32, i32, std::span<const RValue>) {
+        return RValue(r.renderer().d3d_model_create());
+    });
+    register_builtin("d3d_model_destroy", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        r.renderer().d3d_model_destroy(arg_i32(a, 0, -1));
+        return RValue(0.0);
+    });
+    register_builtin("d3d_model_clear", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        r.renderer().d3d_model_clear(arg_i32(a, 0, -1));
+        return RValue(0.0);
+    });
+    register_builtin("d3d_model_load", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        const i32 id = arg_i32(a, 0, -1);
+        const std::string_view fname = arg_str(a, 1);
+        auto bytes = r.vfs().read_all_bytes(fname);
+        if (!bytes) {
+            r.renderer().d3d_model_clear(id);
+            GM_LOG_WARN("graphics", "d3d_model_load: failed to read '%.*s'",
+                        static_cast<int>(fname.size()), fname.data());
+            return RValue(0.0);
+        }
+        const auto& data = bytes.value();
+        const std::string_view text = data.empty() ? std::string_view{} :
+            std::string_view(reinterpret_cast<const char*>(data.data()), data.size());
+        r.renderer().d3d_model_load_text(id, text);
+        return RValue(0.0);
+    });
+    register_builtin("d3d_model_save", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        const i32 id = arg_i32(a, 0, -1);
+        const std::string_view fname = arg_str(a, 1);
+        const std::string text = r.renderer().d3d_model_save_text(id);
+        if (!text.empty()) {
+            (void)r.vfs().write_all_bytes(
+                fname, std::span<const u8>(reinterpret_cast<const u8*>(text.data()), text.size()));
+        }
+        return RValue(0.0);
+    });
+    register_builtin("d3d_model_draw", [tex_from_arg](Runner& r, i32, i32, std::span<const RValue> a) {
+        r.renderer().d3d_model_draw(
+            arg_i32(a, 0, -1),
+            static_cast<f32>(arg_real(a, 1)), static_cast<f32>(arg_real(a, 2)), static_cast<f32>(arg_real(a, 3)),
+            tex_from_arg(a, 4));
+        return RValue(0.0);
+    });
+    register_builtin("d3d_model_primitive_begin", [model_cmd](Runner& r, i32, i32, std::span<const RValue> a) {
+        model_cmd(r, 0, a, 1);
+        return RValue(0.0);
+    });
+    register_builtin("d3d_model_primitive_end", [model_cmd](Runner& r, i32, i32, std::span<const RValue> a) {
+        model_cmd(r, 1, a, 0);
+        return RValue(0.0);
+    });
+    register_builtin("d3d_model_vertex", [model_cmd](Runner& r, i32, i32, std::span<const RValue> a) {
+        model_cmd(r, 2, a, 3);
+        return RValue(0.0);
+    });
+    register_builtin("d3d_model_vertex_color", [model_cmd](Runner& r, i32, i32, std::span<const RValue> a) {
+        model_cmd(r, 3, a, 5);
+        return RValue(0.0);
+    });
+    register_builtin("d3d_model_vertex_texture", [model_cmd](Runner& r, i32, i32, std::span<const RValue> a) {
+        model_cmd(r, 4, a, 5);
+        return RValue(0.0);
+    });
+    register_builtin("d3d_model_vertex_texture_color", [model_cmd](Runner& r, i32, i32, std::span<const RValue> a) {
+        model_cmd(r, 5, a, 7);
+        return RValue(0.0);
+    });
+    register_builtin("d3d_model_vertex_normal", [model_cmd](Runner& r, i32, i32, std::span<const RValue> a) {
+        model_cmd(r, 6, a, 6);
+        return RValue(0.0);
+    });
+    register_builtin("d3d_model_vertex_normal_color", [model_cmd](Runner& r, i32, i32, std::span<const RValue> a) {
+        model_cmd(r, 7, a, 8);
+        return RValue(0.0);
+    });
+    register_builtin("d3d_model_vertex_normal_texture", [model_cmd](Runner& r, i32, i32, std::span<const RValue> a) {
+        model_cmd(r, 8, a, 8);
+        return RValue(0.0);
+    });
+    register_builtin("d3d_model_vertex_normal_texture_color", [model_cmd](Runner& r, i32, i32, std::span<const RValue> a) {
+        model_cmd(r, 9, a, 10);
+        return RValue(0.0);
+    });
+    register_builtin("d3d_model_block", [model_cmd](Runner& r, i32, i32, std::span<const RValue> a) {
+        model_cmd(r, 10, a, 8);
+        return RValue(0.0);
+    });
+    register_builtin("d3d_model_cylinder", [model_cmd](Runner& r, i32, i32, std::span<const RValue> a) {
+        model_cmd(r, 11, a, 10);
+        return RValue(0.0);
+    });
+    register_builtin("d3d_model_cone", [model_cmd](Runner& r, i32, i32, std::span<const RValue> a) {
+        model_cmd(r, 12, a, 10);
+        return RValue(0.0);
+    });
+    register_builtin("d3d_model_ellipsoid", [model_cmd](Runner& r, i32, i32, std::span<const RValue> a) {
+        model_cmd(r, 13, a, 9);
+        return RValue(0.0);
+    });
+    register_builtin("d3d_model_wall", [model_cmd](Runner& r, i32, i32, std::span<const RValue> a) {
+        model_cmd(r, 14, a, 8);
+        return RValue(0.0);
+    });
+    register_builtin("d3d_model_floor", [model_cmd](Runner& r, i32, i32, std::span<const RValue> a) {
+        model_cmd(r, 15, a, 8);
         return RValue(0.0);
     });
 }

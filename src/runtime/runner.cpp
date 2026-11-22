@@ -16,6 +16,10 @@ namespace gm {
 
 namespace {
 
+i32 scaled_extent(i32 extent, f64 scale) noexcept {
+    return static_cast<i32>(std::clamp<i64>(delphi_round(extent * scale), 1, std::numeric_limits<i32>::max()));
+}
+
 const SpriteData* instance_sprite(const Instance& inst, const GameData& game) noexcept {
     if (inst.sprite_index < 0 || static_cast<usize>(inst.sprite_index) >= game.sprites.size()) return nullptr;
     const auto& sprite = game.sprites[static_cast<usize>(inst.sprite_index)];
@@ -77,6 +81,7 @@ Result<void> Runner::init(GameData game, CompiledProgram program, std::vector<st
     next_instance_id_ = std::max(100001, game_.room_max_id + 1);
     next_tile_id_ = std::max(10000001, game_.room_max_tile_id + 1);
     window_color_ = game_.options.window_color;
+    window_region_scale_ = game_.options.scale / 100.0;
     sync_vsync_ = (game_.options.sync_vertex != 0);
 
     // Initialize renderer and upload all embedded sprites/backgrounds/fonts.
@@ -100,7 +105,7 @@ Result<void> Runner::init(GameData game, CompiledProgram program, std::vector<st
     for (const auto& inc : game_.included_files) {
         if (!inc.exists || !inc.store || inc.data.empty()) continue;
         if (inc.export_action == 1) {
-            const std::string p = vfs_.temp_directory_gm() + inc.filename;
+            const std::string p = vfs_.temp_directory_gm() + "/" + inc.filename;
             if (inc.overwrite || !vfs_.exists(p)) {
                 (void)vfs_.write_all_bytes(p, inc.data);
             }
@@ -111,11 +116,21 @@ Result<void> Runner::init(GameData game, CompiledProgram program, std::vector<st
         }
     }
 
-    // Extract GEX DLL payloads into temp_dir for external DLL shims / lookups.
+    // Extract GEX DLL (kind == 1) and File/Other (kind == 4) payloads into temp_dir[/ext.folder]/filename.
     for (const auto& ext : game_.extensions) {
+        std::string base_dir = vfs_.temp_directory_gm();
+        if (!base_dir.empty() && base_dir.back() != '\\' && base_dir.back() != '/') {
+            base_dir.push_back('/');
+        }
+        if (!ext.folder.empty()) {
+            base_dir += ext.folder;
+            if (!base_dir.empty() && base_dir.back() != '\\' && base_dir.back() != '/') {
+                base_dir.push_back('/');
+            }
+        }
         for (const auto& inc : ext.includes) {
-            if (inc.kind == 1 && !inc.payload.empty() && !inc.filename.empty()) {
-                const std::string p = vfs_.temp_directory_gm() + inc.filename;
+            if ((inc.kind == 1 || inc.kind == 4) && !inc.payload.empty() && !inc.filename.empty()) {
+                const std::string p = base_dir + inc.filename;
                 (void)vfs_.write_all_bytes(p, inc.payload);
             }
         }
@@ -172,31 +187,52 @@ Result<void> Runner::init(GameData game, CompiledProgram program, std::vector<st
         GM_LOG_WARN("runtime", "Constant initialization warning: %s", res.error_message().c_str());
     }
 
-    // Run extension GML init functions (if any).
-    for (const auto& ext : game_.extensions) {
-        for (const auto& inc : ext.includes) {
-            if (inc.kind == 2 && !inc.init_func.empty()) {
-                if (const auto* target = program_.symbols.find_callable(inc.init_func)) {
-                    if (target->kind == CallableKind::ExtensionGml) {
-                        auto r = vm_->execute_ext_gml(target->id, -1, -1);
-                        if (!r) {
-                            GM_LOG_WARN("runtime", "Extension init '%s' error: %s",
-                                        inc.init_func.c_str(), r.error_message().c_str());
+    // Run extension init functions for both kind == 1 (DLL) and kind == 2 (GML) in include order.
+    // Provide a temporary context instance (matching GM8's startup context) so non-var scratch
+    // variables inside extension init scripts (e.g. __gm82core_init's __s) resolve properly.
+    {
+        Instance ext_ctx{};
+        set_instance_object(ext_ctx, 0);
+        ext_ctx.timeline_running = false;
+        register_instance_handle(ext_ctx);
+
+        for (const auto& ext : game_.extensions) {
+            for (const auto& inc : ext.includes) {
+                if (inc.init_func.empty()) continue;
+                if (inc.kind == 2) {
+                    if (const auto* target = program_.symbols.find_callable(inc.init_func)) {
+                        if (target->kind == CallableKind::ExtensionGml) {
+                            auto r = vm_->execute_ext_gml(target->id, ext_ctx.handle, ext_ctx.handle);
+                            if (!r) {
+                                GM_LOG_WARN("runtime", "Extension init '%s' error: %s",
+                                            inc.init_func.c_str(), r.error_message().c_str());
+                            }
                         }
                     }
+                } else if (inc.kind == 1) {
+                    std::string ext_sym = inc.init_func;
+                    for (const auto& fn : inc.functions) {
+                        if (fn.name == inc.init_func && !fn.external_name.empty()) {
+                            ext_sym = fn.external_name;
+                            break;
+                        }
+                    }
+                    (void)dll_registry_.call_gex_dll(*this, inc.filename, ext_sym, {}, ExternalValueType::Real);
                 }
             }
         }
-    }
 
-    // Run D&D library initialization code chunks.
-    for (const auto& chunk : program_.library_init_chunks) {
-        if (!chunk.code.empty()) {
-            auto r = vm_->execute(chunk, -1, -1);
-            if (!r) {
-                GM_LOG_WARN("runtime", "Library init error: %s", r.error_message().c_str());
+        // Run D&D library initialization code chunks.
+        for (const auto& chunk : program_.library_init_chunks) {
+            if (!chunk.code.empty()) {
+                auto r = vm_->execute(chunk, ext_ctx.handle, ext_ctx.handle);
+                if (!r) {
+                    GM_LOG_WARN("runtime", "Library init error: %s", r.error_message().c_str());
+                }
             }
         }
+
+        inst_by_id_.erase(ext_ctx.handle);
     }
 
     running_ = true;
@@ -213,6 +249,36 @@ void Runner::shutdown() noexcept {
     if (vm_ && current_room_ >= 0) {
         // Fire Game End event on remaining active instances.
         broadcast_event(7, 3); // ev_other, ev_game_end
+    }
+
+    // Run extension finalization functions (both kind == 1 DLL and kind == 2 GML) before teardown.
+    if (vm_) {
+        Instance ext_ctx{};
+        set_instance_object(ext_ctx, 0);
+        ext_ctx.timeline_running = false;
+        register_instance_handle(ext_ctx);
+        for (const auto& ext : game_.extensions) {
+            for (const auto& inc : ext.includes) {
+                if (inc.final_func.empty()) continue;
+                if (inc.kind == 2) {
+                    if (const auto* target = program_.symbols.find_callable(inc.final_func)) {
+                        if (target->kind == CallableKind::ExtensionGml) {
+                            (void)vm_->execute_ext_gml(target->id, ext_ctx.handle, ext_ctx.handle);
+                        }
+                    }
+                } else if (inc.kind == 1) {
+                    std::string ext_sym = inc.final_func;
+                    for (const auto& fn : inc.functions) {
+                        if (fn.name == inc.final_func && !fn.external_name.empty()) {
+                            ext_sym = fn.external_name;
+                            break;
+                        }
+                    }
+                    (void)dll_registry_.call_gex_dll(*this, inc.filename, ext_sym, {}, ExternalValueType::Real);
+                }
+            }
+        }
+        inst_by_id_.erase(ext_ctx.handle);
     }
 
     // Flush open files & INI.
@@ -313,6 +379,9 @@ void Runner::start_room(i32 room_id, bool is_game_start) {
     if (!is_game_start && current_room_ >= 0) {
         broadcast_event(7, 5); // ev_other, ev_room_end
         remove_marked_instances();
+        if (io_roomend_clear_) {
+            window_.input_mut().clear_all();
+        }
 
         SavedRoomState state{};
         if (room_persistent_) {
@@ -381,7 +450,7 @@ void Runner::start_room(i32 room_id, bool is_game_start) {
     } else {
         room_width_ = rm.width;
         room_height_ = rm.height;
-        room_speed_ = rm.speed > 0 ? rm.speed : 30;
+        room_speed_ = rm.speed > 0 ? rm.speed : (version_mode() == VersionMode::GM82 ? 1 : 30);
         room_persistent_ = rm.persistent;
         room_caption_ = rm.caption;
         bg_color_ = rm.color & 0x00FFFFFFu;
@@ -452,9 +521,21 @@ void Runner::start_room(i32 room_id, bool is_game_start) {
 
     // GM8 sets the room's screen region before instance creation code, including on re-entry.
     i32 vx, vy, vw, vh, cw, ch;
+    room_canvas_size(cw, ch);
+    cw = std::min(cw, window_.display_width());
+    ch = std::min(ch, window_.display_height());
+    if (!window_fixed_ && (cw != window_region_w_ || ch != window_region_h_)) {
+        window_region_w_ = cw;
+        window_region_h_ = ch;
+        window_default();
+        requested_backbuffer_w_ = cw;
+        requested_backbuffer_h_ = ch;
+    }
     compute_canvas_viewport(vx, vy, vw, vh, cw, ch);
     renderer_.set_screen_region(window_.drawable_width(), window_.drawable_height(),
-                                cw, ch, ViewportRect{vx, vy, vw, vh});
+                                requested_backbuffer_w_ > 0 ? requested_backbuffer_w_ : cw,
+                                requested_backbuffer_h_ > 0 ? requested_backbuffer_h_ : ch,
+                                ViewportRect{vx, vy, vw, vh});
 
     if (!restored_from_save) {
         // First allocate all room instances so creation codes can reference each other by ID.
@@ -538,7 +619,7 @@ void Runner::start_room(i32 room_id, bool is_game_start) {
     if (pending_action_ == PendingRoomAction::None && auto_draw_) {
         // Room Start draws the initial image before the new room's first step.
         render_current_frame();
-        window_.swap_buffers();
+        present_current_frame();
     } else {
         update_view_following();
     }
@@ -736,7 +817,9 @@ void Runner::tick_frame() {
         return;
     }
 
-    // Stage 14: Draw pass (when automatic draw is enabled)
+    // Stage 14: Draw pass (when automatic draw is enabled).
+    // Defer presenting screen_fbo_ until after Stage 15 so extensions like gm82dx9
+    // can compose application_surface onto the screen in ev_other / ev_animation_end.
     if (auto_draw_) {
         render_current_frame();
     }
@@ -753,7 +836,7 @@ void Runner::tick_frame() {
 
     // Stage 16: Present + FPS measurement
     if (auto_draw_) {
-        window_.swap_buffers();
+        present_current_frame();
     }
 
     ++fps_frame_accum_;
@@ -983,95 +1066,63 @@ void Runner::step_mouse_events() {
     if (input.mouse_wheel_down) dispatch(61, true);
 }
 
-// Path following and velocity are reapplied after a solid collision, without
-// applying gravity or friction a second time.
-static bool advance_instance_motion(Instance& inst, const GameData& game) {
+static bool advance_instance_path(Instance& inst, const GameData& game) {
+    if (inst.path_index < 0 || static_cast<usize>(inst.path_index) >= game.paths.size() || inst.path_speed == 0.0) return false;
+    const auto& path = game.paths[static_cast<usize>(inst.path_index)];
+    if (!path.exists || path.length() <= 0.0) return false;
+
+    const f64 speed = path.sample(inst.path_position).speed / (100.0 * inst.path_scale);
+    inst.path_position += inst.path_speed * speed / path.length();
+
+    const PathPoint start = path.sample(0.0);
+    const f64 angle = deg_to_rad(inst.path_orientation);
+    const f64 c = std::cos(angle), s = std::sin(angle);
+    const auto offset = [&](const PathPoint& p) {
+        const f64 dx = p.x - start.x, dy = p.y - start.y;
+        return std::pair{inst.path_scale * (dx * c + dy * s), inst.path_scale * (dy * c - dx * s)};
+    };
+
+    const bool reached_end = inst.path_position >= 1.0 || inst.path_position <= 0.0;
+    if (reached_end) {
+        const bool before_start = inst.path_position < 0.0;
+        switch (inst.path_endaction) {
+            case 2: { // Continue from the opposite endpoint.
+                const auto [dx, dy] = offset(path.sample(1.0));
+                inst.path_xstart += before_start ? -dx : dx;
+                inst.path_ystart += before_start ? -dy : dy;
+                [[fallthrough]];
+            }
+            case 1: // Restart.
+                inst.path_position += before_start ? 1.0 : -1.0;
+                break;
+            case 3: // Reverse.
+                inst.path_position = before_start ? -inst.path_position : 2.0 - inst.path_position;
+                inst.path_speed = before_start ? std::fabs(inst.path_speed) : -std::fabs(inst.path_speed);
+                break;
+            default: // Stop.
+                inst.path_position = 1.0;
+                inst.path_index = -1;
+                break;
+        }
+    }
+
+    const auto [dx, dy] = offset(path.sample(inst.path_position));
+    const f64 x = inst.path_xstart + dx, y = inst.path_ystart + dy;
+    // GM keeps the direction of the path displacement and clears ordinary motion.
+    if (x != inst.x || y != inst.y) inst.direction = gm_point_direction(inst.x, inst.y, x, y);
+    inst.speed = inst.hspeed = inst.vspeed = 0.0;
+    inst.x = x;
+    inst.y = y;
+    inst.mark_bbox_dirty();
+    return reached_end;
+}
+
+static void apply_instance_velocity(Instance& inst) {
     if (inst.hspeed != 0.0 || inst.vspeed != 0.0) {
         inst.x += inst.hspeed;
         inst.y += inst.vspeed;
         inst.mark_bbox_dirty();
     }
-
-    if (inst.path_index >= 0 && static_cast<usize>(inst.path_index) < game.paths.size()) {
-        const auto& path = game.paths[static_cast<usize>(inst.path_index)];
-        if (path.exists && !path.points.empty() && inst.path_speed != 0.0) {
-            const f64 len = compute_path_length(path);
-            if (len > 1e-6) {
-                const f64 sp_step = inst.path_speed / (len * std::max(1e-6, std::fabs(inst.path_scale)));
-                inst.path_position += sp_step;
-                bool reached_end = false;
-                if (inst.path_position >= 1.0) {
-                    reached_end = true;
-                    switch (inst.path_endaction) {
-                        case 0: // stop
-                            inst.path_position = 1.0;
-                            inst.path_index = -1;
-                            inst.path_speed = 0.0;
-                            break;
-                        case 1: // restart
-                            inst.path_position -= 1.0;
-                            break;
-                        case 2: // continue from current
-                            inst.path_position -= 1.0;
-                            inst.path_xstart = inst.x;
-                            inst.path_ystart = inst.y;
-                            break;
-                        case 3: // reverse
-                            inst.path_position = 2.0 - inst.path_position;
-                            inst.path_speed = -inst.path_speed;
-                            break;
-                        default:
-                            inst.path_position = 1.0;
-                            inst.path_index = -1;
-                            break;
-                    }
-                } else if (inst.path_position <= 0.0) {
-                    reached_end = true;
-                    switch (inst.path_endaction) {
-                        case 0:
-                            inst.path_position = 0.0;
-                            inst.path_index = -1;
-                            inst.path_speed = 0.0;
-                            break;
-                        case 1:
-                            inst.path_position += 1.0;
-                            break;
-                        case 2:
-                            inst.path_position += 1.0;
-                            inst.path_xstart = inst.x;
-                            inst.path_ystart = inst.y;
-                            break;
-                        case 3:
-                            inst.path_position = -inst.path_position;
-                            inst.path_speed = -inst.path_speed;
-                            break;
-                        default:
-                            inst.path_position = 0.0;
-                            inst.path_index = -1;
-                            break;
-                    }
-                }
-
-                f64 px = 0.0, py = 0.0;
-                evaluate_path_point(path, std::clamp(inst.path_position, 0.0, 1.0), px, py);
-                if (inst.path_absolute) {
-                    inst.x = px;
-                    inst.y = py;
-                } else {
-                    const f64 dx = (px - path.points[0].x) * inst.path_scale;
-                    const f64 dy = (py - path.points[0].y) * inst.path_scale;
-                    const f64 rad = deg_to_rad(inst.path_orientation);
-                    const f64 c = std::cos(rad);
-                    const f64 s = std::sin(rad);
-                    inst.x = inst.path_xstart + dx * c + dy * s;
-                    inst.y = inst.path_ystart - dx * s + dy * c;
-                }
-                inst.mark_bbox_dirty();
-                return reached_end;
-            }
-        }
-    }
-    return false;
 }
 
 void Runner::step_physics_and_paths() {
@@ -1098,10 +1149,11 @@ void Runner::step_physics_and_paths() {
             inst.sync_polar_from_hv();
         }
 
-        if (advance_instance_motion(inst, game_)) {
+        if (advance_instance_path(inst, game_)) {
             perform_event_on_instance(inst.handle, -1, 7, 8, inst.handle);
             if (pending_action_ != PendingRoomAction::None) return;
         }
+        apply_instance_velocity(inst);
     }
 }
 
@@ -1177,8 +1229,10 @@ void Runner::step_collisions() {
                     execute_instance_event(b.handle, b.object_index, 4, a.object_index, a.handle);
                 }
                 if (a.solid || b.solid) {
-                    advance_instance_motion(a, game_);
-                    advance_instance_motion(b, game_);
+                    advance_instance_path(a, game_);
+                    advance_instance_path(b, game_);
+                    apply_instance_velocity(a);
+                    apply_instance_velocity(b);
                     if (check_instance_collision(a, a.x, a.y, b, game_, version_mode())) {
                         rollback(a);
                         rollback(b);
@@ -1218,36 +1272,60 @@ void Runner::step_animations() {
 // Rendering & View / Mouse Projection
 // ---------------------------------------------------------------------------
 
-void Runner::compute_canvas_viewport(i32& out_vx, i32& out_vy, i32& out_vw, i32& out_vh, i32& out_cw, i32& out_ch) const noexcept {
-    i32 cw = std::max(1, room_width_);
-    i32 ch = std::max(1, room_height_);
+void Runner::room_canvas_size(i32& width, i32& height) const noexcept {
+    width = std::max(1, room_width_);
+    height = std::max(1, room_height_);
     if (view_enabled_) {
-        i32 max_r = 0;
-        i32 max_b = 0;
+        width = 8;
+        height = 8;
         for (const auto& v : views_) {
             if (!v.visible) continue;
-            max_r = std::max(max_r, v.xport + v.wport);
-            max_b = std::max(max_b, v.yport + v.hport);
-        }
-        if (max_r > 0 && max_b > 0) {
-            cw = max_r;
-            ch = max_b;
+            width = std::max(width, v.xport + v.wport);
+            height = std::max(height, v.yport + v.hport);
         }
     }
+}
 
+void Runner::set_window_size(i32 width, i32 height) {
+    if (window_region_scale_ > 0.0) {
+        width = std::max(width, scaled_extent(window_region_w_, window_region_scale_));
+        height = std::max(height, scaled_extent(window_region_h_, window_region_scale_));
+    }
+    if (width != window_.width() || height != window_.height()) window_.set_size(width, height);
+}
+
+void Runner::adapt_window_to_region(bool adapt) {
+    if (window_region_scale_ > 0.0) {
+        set_window_size(adapt ? 1 : window_.width(), adapt ? 1 : window_.height());
+    }
+}
+
+void Runner::window_default() {
+    const f64 scale = window_region_scale_ > 0.0 ? window_region_scale_ : 1.0;
+    window_.set_size(scaled_extent(window_region_w_, scale), scaled_extent(window_region_h_, scale));
+    window_.center();
+}
+
+void Runner::compute_canvas_viewport(i32& out_vx, i32& out_vy, i32& out_vw, i32& out_vh, i32& out_cw, i32& out_ch) const noexcept {
+    room_canvas_size(out_cw, out_ch);
+    const i32 cw = window_region_w_ > 0 ? window_region_w_ : out_cw;
+    const i32 ch = window_region_h_ > 0 ? window_region_h_ : out_ch;
     const i32 dw = std::max(1, window_.drawable_width());
     const i32 dh = std::max(1, window_.drawable_height());
 
-    const f64 scale = std::min(static_cast<f64>(dw) / static_cast<f64>(cw),
-                               static_cast<f64>(dh) / static_cast<f64>(ch));
-    const i32 vw = std::max(1, static_cast<i32>(std::floor(static_cast<f64>(cw) * scale + 0.5)));
-    const i32 vh = std::max(1, static_cast<i32>(std::floor(static_cast<f64>(ch) * scale + 0.5)));
+    i32 vw = dw, vh = dh;
+    if (window_region_scale_ < 0.0) {
+        const f64 scale = std::min(static_cast<f64>(dw) / cw, static_cast<f64>(dh) / ch);
+        vw = scaled_extent(cw, scale);
+        vh = scaled_extent(ch, scale);
+    } else if (window_region_scale_ > 0.0) {
+        vw = scaled_extent(cw, window_region_scale_ * dw / std::max(1, window_.width()));
+        vh = scaled_extent(ch, window_region_scale_ * dh / std::max(1, window_.height()));
+    }
     out_vx = (dw - vw) / 2;
     out_vy = (dh - vh) / 2;
     out_vw = vw;
     out_vh = vh;
-    out_cw = cw;
-    out_ch = ch;
 }
 
 void Runner::update_mouse_room_coords() {
@@ -1336,9 +1414,15 @@ void Runner::render_current_frame() {
     i32 vx = 0, vy = 0, vw = 1, vh = 1, cw = 1, ch = 1;
     compute_canvas_viewport(vx, vy, vw, vh, cw, ch);
 
+    // Always synchronize the logical screen region before rendering so surface_reset_target()
+    // during post-draw composition (e.g. gm82dx9 application_surface) binds the right screen FBO.
+    const i32 bw = requested_backbuffer_w_ > 0 ? requested_backbuffer_w_ : cw;
+    const i32 bh = requested_backbuffer_h_ > 0 ? requested_backbuffer_h_ : ch;
+    renderer_.set_screen_region(dw, dh, bw, bh, ViewportRect{vx, vy, vw, vh});
+
     const i32 user_surf = renderer_.current_surface_target();
     if (user_surf >= 0) {
-        // screen_redraw() called while a user surface target is active (e.g., save thumbnails in GM80_parasoko).
+        // Drawing into an active user surface target (e.g. gm82dx9 application_surface or screen_redraw thumbnails).
         const i32 sw = std::max(1, renderer_.surface_width(user_surf));
         const i32 sh = std::max(1, renderer_.surface_height(user_surf));
         if (!view_enabled_) {
@@ -1368,11 +1452,12 @@ void Runner::render_current_frame() {
         gfx_.set_scissor(false);
         renderer_.set_projection_ortho(0.0f, 0.0f, static_cast<f32>(sw), static_cast<f32>(sh),
                                        0.0f, 0, 0, sw, sh);
+        update_window_caption();
         return;
     }
 
     renderer_.begin_frame(dw, dh);
-    renderer_.begin_screen_pass(cw, ch, dw, dh, ViewportRect{vx, vy, vw, vh});
+    renderer_.begin_screen_pass(bw, bh, dw, dh, ViewportRect{vx, vy, vw, vh});
 
     const bool to_screen_fbo = renderer_.rendering_to_fbo();
     if (!to_screen_fbo) {
@@ -1413,13 +1498,20 @@ void Runner::render_current_frame() {
                         px, py, pw, ph);
         }
         view_current_ = 0;
+        const i32 rw = window_region_w_ > 0 ? window_region_w_ : cw;
+        const i32 rh = window_region_h_ > 0 ? window_region_h_ : ch;
+        const ViewportRect region = to_screen_fbo ? ViewportRect{0, 0, rw, rh} : ViewportRect{vx, vy, vw, vh};
+        renderer_.set_view_projection(0.0f, 0.0f, static_cast<f32>(rw), static_cast<f32>(rh), 0.0f, region);
     }
 
     gfx_.set_scissor(false);
-    renderer_.present_screen(window_color_);
-    renderer_.end_frame();
-    // GM publishes the complete caption after all views' Draw events have finished.
     update_window_caption();
+}
+
+void Runner::present_current_frame() {
+    renderer_.present_screen(window_color_);
+    window_.swap_buffers();
+    renderer_.end_frame();
 }
 
 void Runner::render_view(i32 /*view_idx*/, f32 vx, f32 vy, f32 vw, f32 vh, f32 angle, i32 px, i32 py, i32 pw, i32 ph) {
@@ -1427,12 +1519,15 @@ void Runner::render_view(i32 /*view_idx*/, f32 vx, f32 vy, f32 vw, f32 vh, f32 a
     const i32 gl_y = renderer_.rendering_to_fbo() ? py : (dh - (py + ph));
     gfx_.set_scissor(true, ViewportRect{px, gl_y, pw, ph});
 
-    renderer_.set_projection_ortho(vx, vy, vw, vh, angle, px, py, pw, ph);
+    renderer_.set_view_projection(vx, vy, vw, vh, angle, {px, py, pw, ph});
     if (bg_showcolor_) {
         renderer_.clear_color(bg_color_, 1.0f);
+    } else if (renderer_.d3d_active()) {
+        renderer_.clear_depth(1.0f);
     }
 
     // 1. Non-foreground backgrounds (0..7)
+    if (renderer_.d3d_active()) renderer_.d3d_set_depth(12000.0f);
     for (const auto& bg : backgrounds_) {
         if (!bg.visible || bg.foreground || bg.index < 0) continue;
         if (bg.stretch) {
@@ -1488,6 +1583,9 @@ void Runner::render_view(i32 /*view_idx*/, f32 vx, f32 vy, f32 vw, f32 vh, f32 a
     });
 
     for (const auto& item : items) {
+        if (renderer_.d3d_active()) {
+            renderer_.d3d_set_depth(static_cast<f32>(std::min(item.depth, 11000.0)));
+        }
         if (item.kind == 0) {
             const auto& t = tiles_[static_cast<usize>(item.ref_id)];
             renderer_.draw_tile(
@@ -1511,6 +1609,7 @@ void Runner::render_view(i32 /*view_idx*/, f32 vx, f32 vy, f32 vw, f32 vh, f32 a
     }
 
     // 3. Foreground backgrounds (0..7)
+    if (renderer_.d3d_active()) renderer_.d3d_set_depth(-12000.0f);
     for (const auto& bg : backgrounds_) {
         if (!bg.visible || !bg.foreground || bg.index < 0) continue;
         if (bg.stretch) {
@@ -1536,6 +1635,7 @@ void Runner::render_view(i32 /*view_idx*/, f32 vx, f32 vy, f32 vw, f32 vh, f32 a
 
     // 4. Custom cursor_sprite (if set)
     if (cursor_sprite_ >= 0) {
+        if (renderer_.d3d_active()) renderer_.d3d_set_depth(-13000.0f);
         renderer_.draw_sprite_ext(
             game_, cursor_sprite_, 0,
             static_cast<f32>(mouse_x_), static_cast<f32>(mouse_y_),
@@ -1543,6 +1643,7 @@ void Runner::render_view(i32 /*view_idx*/, f32 vx, f32 vy, f32 vw, f32 vh, f32 a
     }
 
     renderer_.flush();
+    if (renderer_.d3d_active()) renderer_.d3d_set_depth(0.0f);
 }
 
 void Runner::draw_instance_default(const Instance& inst) {
@@ -2014,28 +2115,29 @@ void Runner::start_path(Instance& inst, i32 path_id, f64 speed, i32 endaction, b
         return;
     }
     const auto& p = game_.paths[static_cast<usize>(path_id)];
+    if (p.length() <= 0.0) {
+        inst.path_index = -1;
+        return;
+    }
     inst.path_index = path_id;
     inst.path_speed = speed;
     inst.path_endaction = endaction;
-    inst.path_absolute = absolute;
     inst.path_position = (speed >= 0.0) ? 0.0 : 1.0;
     inst.path_positionprevious = inst.path_position;
     inst.path_scale = 1.0;
     inst.path_orientation = 0.0;
-    inst.path_xstart = inst.x;
-    inst.path_ystart = inst.y;
-    if (absolute && !p.points.empty()) {
-        f64 px = 0.0, py = 0.0;
-        evaluate_path_point(p, inst.path_position, px, py);
-        inst.x = px;
-        inst.y = py;
+    if (absolute) {
+        const auto start = p.sample(inst.path_position);
+        inst.x = start.x;
+        inst.y = start.y;
         inst.mark_bbox_dirty();
     }
+    inst.path_xstart = inst.x;
+    inst.path_ystart = inst.y;
 }
 
 void Runner::end_path(Instance& inst) {
     inst.path_index = -1;
-    inst.path_speed = 0.0;
 }
 
 // ---------------------------------------------------------------------------
@@ -2115,7 +2217,7 @@ Result<RValue> Runner::get_builtin_global(u32 var_id, i32 idx, bool has_idx) {
         case 27u: return RValue(game_.meta.game_id);
         case 28u: return RValue(vfs_.working_directory_gm());
         case 29u: return RValue(vfs_.temp_directory_gm());
-        case 30u: return RValue(vfs_.working_directory_gm());
+        case 30u: return RValue(vfs_.program_directory_gm());
         case 31u: return RValue(static_cast<i32>(instances_.size()));
         case 32u: {
             const i32 target_i = has_idx ? idx : 0;
@@ -2453,6 +2555,48 @@ Result<RValue> Runner::ext_call_function(i32 address, i32 self, i32 other, std::
     return call_builtin(func->id, self, other, args);
 }
 
+void Runner::ext_resize_backbuffer(i32 width, i32 height) {
+    width = std::min(width, window_.display_width());
+    height = std::min(height, window_.display_height());
+    if (width > 0 && height > 0 && renderer_.resize_backbuffer(width, height)) {
+        requested_backbuffer_w_ = width;
+        requested_backbuffer_h_ = height;
+    }
+}
+
+i32 Runner::ext_game_get_state() const noexcept {
+    switch (pending_action_) {
+        case PendingRoomAction::None:        return -1; // gs_running
+        case PendingRoomAction::EndGame:     return -100;
+        case PendingRoomAction::RestartGame: return -200;
+        case PendingRoomAction::RestartRoom: return current_room_;
+        case PendingRoomAction::Goto:        return pending_room_id_;
+    }
+    return -1;
+}
+
+std::string Runner::ext_var_name_get(i32 index) const {
+    if (index < 0 || static_cast<usize>(index) >= program_.symbols.user_var_count()) {
+        return {};
+    }
+    return std::string(program_.symbols.user_var_name(kUserVarIdBase + static_cast<u32>(index)));
+}
+
+std::vector<std::string> Runner::ext_instance_var_names(i32 inst_id) const {
+    std::vector<std::string> out;
+    const auto* inst = find_instance(inst_id);
+    if (!inst) return out;
+    const auto ids = inst->vars.all_var_ids();
+    out.reserve(ids.size());
+    for (u32 vid : ids) {
+        if (vid >= kUserVarIdBase) {
+            const std::string_view name = program_.symbols.user_var_name(vid);
+            if (!name.empty()) out.emplace_back(name);
+        }
+    }
+    return out;
+}
+
 Result<RValue> Runner::call_builtin(u32 func_id, i32 self_id, i32 other_id, std::span<const RValue> args) {
     if (func_id < builtins_.size() && builtins_[func_id] != nullptr) {
         return builtins_[func_id](*this, self_id, other_id, args);
@@ -2471,6 +2615,25 @@ Result<RValue> Runner::call_extension_dll(u32 ext_dll_id, std::span<const RValue
         const auto& fn = program_.symbols.extension_dll_functions()[ext_dll_id];
         const ExternalValueType ret_type =
             (fn.return_type == 1) ? ExternalValueType::String : ExternalValueType::Real;
+
+        if (!fn.arg_types.empty()) {
+            std::vector<RValue> coerced;
+            coerced.reserve(args.size());
+            for (usize i = 0; i < args.size(); ++i) {
+                if (i < fn.arg_types.size()) {
+                    if (fn.arg_types[i] == 1 && !args[i].is_string()) {
+                        coerced.emplace_back(format_gm_real(args[i].as_real()));
+                    } else if (fn.arg_types[i] == 2 && args[i].is_string()) {
+                        coerced.emplace_back(std::strtod(args[i].as_string().c_str(), nullptr));
+                    } else {
+                        coerced.push_back(args[i]);
+                    }
+                } else {
+                    coerced.push_back(args[i]);
+                }
+            }
+            return dll_registry_.call_gex_dll(*this, fn.dll_filename, fn.external_name, coerced, ret_type);
+        }
         return dll_registry_.call_gex_dll(*this, fn.dll_filename, fn.external_name, args, ret_type);
     }
     return RValue(0.0);
@@ -2500,7 +2663,7 @@ i32 Runner::text_file_open(std::string_view gm_path, i32 mode) {
     TextFileHandle tf{};
     tf.open = true;
     tf.mode = mode;
-    tf.gm_path = std::string(gm_path);
+    tf.gm_path = vfs_.absolute_path_gm(gm_path);
 
     if (mode == 0) { // read
         auto bytes = vfs_.read_all_bytes(gm_path);
@@ -2553,7 +2716,7 @@ i32 Runner::bin_file_open(std::string_view gm_path, i32 mode) {
     BinFileHandle bf{};
     bf.open = true;
     bf.mode = mode;
-    bf.gm_path = std::string(gm_path);
+    bf.gm_path = vfs_.absolute_path_gm(gm_path);
 
     if (auto bytes = vfs_.read_all_bytes(gm_path); bytes) {
         bf.data = std::move(bytes.value());
@@ -2631,7 +2794,8 @@ void Runner::ini_open(std::string_view gm_path) {
     if (ini_.open) (void)ini_close();
     ini_ = IniState{};
     ini_.open = true;
-    ini_.gm_path = std::string(gm_path);
+    // GM8.1/8.2 pass the supplied name to TMemIniFile and resolve it again at close.
+    ini_.gm_path = version_mode() == VersionMode::GM80 ? vfs_.absolute_path_gm(gm_path) : std::string(gm_path);
     if (auto bytes = vfs_.read_all_bytes(gm_path); bytes) {
         parse_ini_text(std::string_view(reinterpret_cast<const char*>(bytes.value().data()), bytes.value().size()));
     }
@@ -2873,7 +3037,7 @@ bool Runner::mp_linear_path(Instance& inst, i32 path_id, f64 xgoal, f64 ygoal, f
         !game_.paths[static_cast<usize>(path_id)].exists) {
         return false;
     }
-    auto& path = game_.paths[static_cast<usize>(path_id)];
+    auto& path = game_.paths[static_cast<usize>(path_id)].edit_geometry();
     path.points.clear();
     path.closed = false;
     path.points.push_back(PathPoint{inst.x, inst.y, 100.0});
@@ -2939,7 +3103,7 @@ bool Runner::mp_potential_path(Instance& inst, i32 path_id, f64 xgoal, f64 ygoal
     if (path_id < 0 || static_cast<usize>(path_id) >= game_.paths.size() ||
         !game_.paths[static_cast<usize>(path_id)].exists || !(factor >= 1.0) || !(stepsize > 0.0)) return false;
 
-    auto& path = game_.paths[static_cast<usize>(path_id)];
+    auto& path = game_.paths[static_cast<usize>(path_id)].edit_geometry();
     path.points.clear();
     path.closed = false;
     path.kind = 0;
@@ -3190,7 +3354,7 @@ bool Runner::object_event_add(i32 obj_idx, i32 ev_type, i32 ev_numb, std::string
         auto& existing = it->second;
         const u32 action_idx = static_cast<u32>(existing.code_actions.size());
         existing.code_actions.push_back(std::make_shared<BytecodeChunk>(std::move(compiled.value())));
-        // Remove trailing Exit/Return from existing main chunk before appending RunCodeAction.
+        // Remove the trailing Exit/Return before appending the action.
         if (!existing.code.empty() && existing.code.back().op == OpCode::Exit) {
             existing.code.pop_back();
         } else if (!existing.code.empty() && existing.code.back().op == OpCode::Return) {
@@ -3199,8 +3363,9 @@ bool Runner::object_event_add(i32 obj_idx, i32 ev_type, i32 ev_numb, std::string
                 existing.code.pop_back();
             }
         }
-        existing.code.push_back(Instruction{OpCode::RunCodeAction, 0, 0, action_idx});
-        existing.code.push_back(Instruction{OpCode::Exit, 0, 0, 0});
+        existing.emit(OpCode::CallCodeAction, action_idx);
+        existing.emit(OpCode::Pop);
+        existing.emit(OpCode::Exit);
     }
     invalidate_event_tables();
     return true;
@@ -3243,8 +3408,10 @@ bool Runner::timeline_moment_add(i32 tl_idx, i32 step, std::string_view code) {
     if (!event) event = std::make_shared<BytecodeChunk>();
     const auto action_index = static_cast<u32>(event->code_actions.size());
     event->code_actions.push_back(std::make_shared<BytecodeChunk>(std::move(compiled.value())));
-    event->emit(OpCode::JumpIfRoomChange, static_cast<u32>(event->code.size()) + 2);
-    event->emit(OpCode::RunCodeAction, action_index);
+    const u32 skip = event->emit(OpCode::JumpIfRoomChange);
+    event->emit(OpCode::CallCodeAction, action_index);
+    event->emit(OpCode::Pop);
+    event->patch_operand(skip, static_cast<u32>(event->code.size()));
     return true;
 }
 

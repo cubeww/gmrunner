@@ -2,7 +2,14 @@
 
 #include "base/encoding.h"
 #include "base/log.h"
+#include "extensions/buffer_store.h"
 #include "extensions/shim_cleanmem.h"
+#include "extensions/shim_gm82buf.h"
+#include "extensions/shim_gm82core.h"
+#include "extensions/shim_gm82drag.h"
+#include "extensions/shim_gm82dx.h"
+#include "extensions/shim_gm82joy.h"
+#include "extensions/shim_gm82test.h"
 #include "extensions/shim_gmfmod.h"
 #include "extensions/shim_maizemusic.h"
 #include "extensions/shim_supersound.h"
@@ -22,10 +29,17 @@ void DllRegistry::register_shim(std::unique_ptr<IDllShim> shim) {
 
 void DllRegistry::register_builtin_shims() {
     shims_.clear();
+    auto buffers = std::make_shared<GmBufferStore>();
     register_shim(create_gmfmod_shim());
     register_shim(create_supersound_shim());
     register_shim(create_maizemusic_shim());
     register_shim(create_cleanmem_shim());
+    register_shim(create_gm82core_shim(buffers));
+    register_shim(create_gm82buf_shim(buffers));
+    register_shim(create_gm82joy_shim());
+    register_shim(create_gm82drag_shim());
+    register_shim(create_gm82test_shim());
+    register_shim(create_gm82dx_shim(buffers));
 }
 
 void DllRegistry::reset(IExtensionHost* host) {

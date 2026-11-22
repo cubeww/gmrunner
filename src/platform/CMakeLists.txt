@@ -17,7 +17,7 @@ target_link_libraries(gm_platform
 )
 
 if(WIN32)
-    target_link_libraries(gm_platform PRIVATE winmm)
+    target_link_libraries(gm_platform PRIVATE winmm user32)
 endif()
 
 gmrunner_apply_warnings(gm_platform)

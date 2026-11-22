@@ -1,5 +1,6 @@
 add_library(gm_loader STATIC
     game_data.h
+    path.cpp
     crypto.h
     crypto.cpp
     exe_loader.h

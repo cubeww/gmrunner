@@ -7,20 +7,11 @@
 #include <algorithm>
 #include <fstream>
 #include <random>
+#include <unordered_set>
 
 namespace gm {
 
 namespace {
-
-bool is_windows_drive_path(std::string_view p) noexcept {
-    return p.size() >= 2 &&
-           ((p[0] >= 'A' && p[0] <= 'Z') || (p[0] >= 'a' && p[0] <= 'z')) &&
-           p[1] == ':';
-}
-
-bool is_absolute_gm_path(std::string_view norm) noexcept {
-    return (!norm.empty() && norm[0] == '/') || is_windows_drive_path(norm);
-}
 
 std::string canonical_pipe_key(std::string_view path) {
     return ascii_to_lower(Vfs::normalize_separators(path));
@@ -79,7 +70,8 @@ Result<void> Vfs::mount_game_root(const std::filesystem::path& game_root) {
     if (ec) {
         resolved = game_root;
     }
-    game_root_ = resolved;
+    game_root_ = resolved.make_preferred();
+    working_directory_ = game_root_;
     if (save_root_.empty()) {
         save_root_ = game_root_;
     }
@@ -139,17 +131,31 @@ void Vfs::cleanup_temp_dir() noexcept {
 }
 
 std::string Vfs::working_directory_gm() const {
-    std::string s = path_to_utf8(game_root_);
-    if (!s.empty() && s.back() != '/' && s.back() != '\\') {
-        s.push_back('/');
+    return utf8_to_codepage(path_to_utf8(working_directory_), game_path_codepage_);
+}
+
+std::string Vfs::program_directory_gm() const {
+    return utf8_to_codepage(path_to_utf8(game_root_), game_path_codepage_);
+}
+
+std::string Vfs::absolute_path_gm(std::string_view gm_path) const {
+    if (gm_path.empty() || is_virtual_pipe(gm_path)) return std::string(gm_path);
+    return utf8_to_codepage(path_to_utf8(resolve_paths(gm_path).game), game_path_codepage_);
+}
+
+void Vfs::set_working_directory(std::string_view gm_path) {
+    if (gm_path.empty()) return;
+    auto paths = resolve_paths(gm_path);
+    std::error_code ec;
+    if (std::filesystem::is_directory(paths.for_read(), ec)) {
+        working_directory_ = std::move(paths.game);
     }
-    return utf8_to_codepage(s, game_path_codepage_);
 }
 
 std::string Vfs::temp_directory_gm() const {
     std::string s = path_to_utf8(temp_dir_);
-    if (!s.empty() && s.back() != '/' && s.back() != '\\') {
-        s.push_back('/');
+    while (s.size() > 1 && (s.back() == '/' || s.back() == '\\')) {
+        s.pop_back();
     }
     return utf8_to_codepage(s, game_path_codepage_);
 }
@@ -206,44 +212,41 @@ std::filesystem::path Vfs::resolve_case_insensitive(
 }
 
 std::filesystem::path Vfs::resolve_for_read(std::string_view gm_path) const {
-    return resolve_normalized_for_read(normalize_separators(codepage_to_utf8(gm_path, game_path_codepage_)));
+    return resolve_paths(gm_path).for_read();
 }
 
-std::filesystem::path Vfs::resolve_normalized_for_read(std::string_view norm) const {
+const std::filesystem::path& Vfs::FilePaths::for_read() const {
     std::error_code ec;
+    return !overlay.empty() && std::filesystem::exists(overlay, ec) ? overlay : game;
+}
 
-    if (is_absolute_gm_path(norm)) {
-        const auto abs_path = path_from_utf8(norm);
-        if (std::filesystem::exists(abs_path, ec) && !ec) {
-            return abs_path;
+Vfs::FilePaths Vfs::resolve_paths(std::string_view gm_path) const {
+    const std::string norm = normalize_separators(codepage_to_utf8(gm_path, game_path_codepage_));
+    auto path = (working_directory_ / path_from_utf8(norm)).lexically_normal();
+    if (!path.has_filename() && path.has_relative_path()) path = path.parent_path();
+    auto part = path.begin();
+    auto root = game_root_.begin();
+    while (root != game_root_.end() && part != path.end() &&
+           (*root == *part || ascii_to_lower(path_to_utf8(*root)) == ascii_to_lower(path_to_utf8(*part)))) {
+        ++part;
+        ++root;
+    }
+    if (!game_root_.empty() && root == game_root_.end()) {
+        std::filesystem::path relative;
+        for (; part != path.end(); ++part) relative /= *part;
+        const auto suffix = normalize_separators(path_to_utf8(relative));
+        FilePaths paths{resolve_case_insensitive(game_root_, suffix), {}};
+        if (!save_root_.empty() && save_root_ != game_root_) {
+            paths.overlay = resolve_case_insensitive(save_root_, suffix);
         }
-        return abs_path;
+        return paths;
     }
-
-    // Check writable save overlay first if distinct from game_root.
-    if (!save_root_.empty() && save_root_ != game_root_) {
-        const auto save_candidate = resolve_case_insensitive(save_root_, norm);
-        if (std::filesystem::exists(save_candidate, ec) && !ec) {
-            return save_candidate;
-        }
-    }
-
-    if (!game_root_.empty()) {
-        return resolve_case_insensitive(game_root_, norm);
-    }
-    return path_from_utf8(norm);
+    return {resolve_case_insensitive(path.root_path(), normalize_separators(path_to_utf8(path.relative_path()))), {}};
 }
 
 std::filesystem::path Vfs::resolve_for_write(std::string_view gm_path) const {
-    const std::string norm = normalize_separators(codepage_to_utf8(gm_path, game_path_codepage_));
-    if (is_absolute_gm_path(norm)) {
-        return path_from_utf8(norm);
-    }
-    const auto& root = !save_root_.empty() ? save_root_ : game_root_;
-    if (root.empty()) {
-        return path_from_utf8(norm);
-    }
-    return resolve_case_insensitive(root, norm);
+    auto paths = resolve_paths(gm_path);
+    return paths.overlay.empty() ? std::move(paths.game) : std::move(paths.overlay);
 }
 
 bool Vfs::exists(std::string_view gm_path) const {
@@ -392,27 +395,23 @@ bool Vfs::wildcard_match_ci(std::string_view pattern, std::string_view text) noe
 std::vector<std::string> Vfs::find_files(std::string_view gm_pattern, u32 attr_mask) const {
     const std::string norm = normalize_separators(codepage_to_utf8(gm_pattern, game_path_codepage_));
     const usize last_slash = norm.rfind('/');
-    const std::string_view dir_part = (last_slash == std::string_view::npos) ? std::string_view{} : std::string_view(norm).substr(0, last_slash);
+    const std::string_view dir_part = (last_slash == std::string_view::npos) ? std::string_view{} : std::string_view(norm).substr(0, last_slash + 1);
     const std::string_view mask_part = (last_slash == std::string_view::npos) ? std::string_view(norm) : std::string_view(norm).substr(last_slash + 1);
 
-    const std::filesystem::path dir = dir_part.empty() ? game_root_ : resolve_normalized_for_read(dir_part);
+    const auto dirs = resolve_paths(utf8_to_codepage(dir_part, game_path_codepage_));
     std::vector<std::string> results;
-
     std::error_code ec;
-    if (!std::filesystem::is_directory(dir, ec) || ec) {
-        return results;
-    }
-
+    if (!std::filesystem::is_directory(dirs.for_read(), ec)) return results;
     const bool want_dirs = (attr_mask & kFaDirectory) != 0;
-    for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
-        if (ec) break;
-        const bool is_dir = entry.is_directory(ec);
-        if (is_dir && !want_dirs) {
-            continue;
-        }
-        const std::string name = path_to_utf8(entry.path().filename());
-        if (wildcard_match_ci(mask_part, name)) {
-            results.push_back(utf8_to_codepage(name, game_path_codepage_));
+    std::unordered_set<std::string> seen;
+    for (const auto* dir : {&dirs.overlay, &dirs.game}) {
+        if (dir->empty()) continue;
+        for (const auto& entry : std::filesystem::directory_iterator(*dir, ec)) {
+            const std::string name = path_to_utf8(entry.path().filename());
+            if (!dirs.overlay.empty() && !seen.insert(ascii_to_lower(name)).second) continue;
+            if ((want_dirs || !entry.is_directory(ec)) && wildcard_match_ci(mask_part, name)) {
+                results.push_back(utf8_to_codepage(name, game_path_codepage_));
+            }
         }
     }
 

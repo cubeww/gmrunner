@@ -454,60 +454,6 @@ bool check_line_collision(
     return false;
 }
 
-// ---- Paths ----
-
-f64 compute_path_length(const PathData& path) noexcept {
-    if (path.points.size() < 2) return 0.0;
-    f64 total = 0.0;
-    const usize n = path.points.size();
-    const usize segs = path.closed ? n : (n - 1);
-    for (usize i = 0; i < segs; ++i) {
-        const auto& p0 = path.points[i];
-        const auto& p1 = path.points[(i + 1) % n];
-        total += std::hypot(p1.x - p0.x, p1.y - p0.y);
-    }
-    return total;
-}
-
-void evaluate_path_point(const PathData& path, f64 pos, f64& out_x, f64& out_y) noexcept {
-    if (path.points.empty()) {
-        out_x = 0.0;
-        out_y = 0.0;
-        return;
-    }
-    if (path.points.size() == 1) {
-        out_x = path.points[0].x;
-        out_y = path.points[0].y;
-        return;
-    }
-
-    pos = std::clamp(pos, 0.0, 1.0);
-    const f64 total = compute_path_length(path);
-    if (total <= 1e-9) {
-        out_x = path.points[0].x;
-        out_y = path.points[0].y;
-        return;
-    }
-
-    const f64 target = pos * total;
-    f64 accum = 0.0;
-    const usize n = path.points.size();
-    const usize segs = path.closed ? n : (n - 1);
-
-    for (usize i = 0; i < segs; ++i) {
-        const auto& p0 = path.points[i];
-        const auto& p1 = path.points[(i + 1) % n];
-        const f64 seg_len = std::hypot(p1.x - p0.x, p1.y - p0.y);
-        if (accum + seg_len >= target || i + 1 == segs) {
-            const f64 t = (seg_len > 1e-9) ? std::clamp((target - accum) / seg_len, 0.0, 1.0) : 0.0;
-            out_x = p0.x + (p1.x - p0.x) * t;
-            out_y = p0.y + (p1.y - p0.y) * t;
-            return;
-        }
-        accum += seg_len;
-    }
-}
-
 // ---- Motion Planning Grid ----
 
 i32 MpGridManager::create(f64 left, f64 top, i32 hcells, i32 vcells, f64 cell_w, f64 cell_h) {
@@ -651,19 +597,20 @@ bool MpGridManager::find_path(
     }
     std::reverse(chain.begin(), chain.end());
 
-    out_path.points.clear();
-    out_path.closed = false;
-    out_path.points.push_back(PathPoint{xstart, ystart, 100.0});
+    auto& geometry = out_path.edit_geometry();
+    geometry.points.clear();
+    geometry.closed = false;
+    geometry.points.push_back(PathPoint{xstart, ystart, 100.0});
     for (usize i = 1; i + 1 < chain.size(); ++i) {
         const i32 cx = chain[i] % g->hcells;
         const i32 cy = chain[i] / g->hcells;
-        out_path.points.push_back(PathPoint{
+        geometry.points.push_back(PathPoint{
             g->left + (static_cast<f64>(cx) + 0.5) * g->cell_w,
             g->top + (static_cast<f64>(cy) + 0.5) * g->cell_h,
             100.0,
         });
     }
-    out_path.points.push_back(PathPoint{xgoal, ygoal, 100.0});
+    geometry.points.push_back(PathPoint{xgoal, ygoal, 100.0});
     return true;
 }
 

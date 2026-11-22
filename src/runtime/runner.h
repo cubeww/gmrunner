@@ -120,7 +120,10 @@ public:
     void shutdown() noexcept;
 
     [[nodiscard]] bool is_running() const noexcept { return running_; }
-    [[nodiscard]] i32 room_speed() const noexcept { return room_speed_ > 0 ? room_speed_ : 30; }
+    [[nodiscard]] i32 room_speed() const noexcept {
+        if (room_speed_ > 0) return room_speed_;
+        return version_mode() == VersionMode::GM82 ? 1 : 30;
+    }
     [[nodiscard]] u64 target_frame_us() const noexcept {
         return static_cast<u64>(1000000.0 / static_cast<f64>(room_speed()));
     }
@@ -148,8 +151,26 @@ public:
     [[nodiscard]] AudioEngine& ext_audio() noexcept override { return audio_; }
     [[nodiscard]] const GameData& ext_game() const noexcept override { return game_; }
     [[nodiscard]] PlatformWindow& ext_window() noexcept override { return window_; }
+    [[nodiscard]] GlGraphicsDevice& ext_gfx() noexcept override { return gfx_; }
+    [[nodiscard]] Renderer2D& ext_renderer() noexcept override { return renderer_; }
     void ext_ds_list_add_real(i32 list_id, f64 value) override { ds_.list_add(list_id, RValue(value)); }
     Result<RValue> ext_call_function(i32 address, i32 self, i32 other, std::span<const RValue> args) override;
+    [[nodiscard]] bool ext_error_is_enabled() const noexcept override { return game_.options.display_errors; }
+    void ext_error_set_enabled(bool enabled) noexcept override { game_.options.display_errors = enabled; }
+    void ext_io_set_roomend_clear(bool enabled) noexcept override { io_roomend_clear_ = enabled; }
+    void ext_window_set_fixed(bool enabled) noexcept override { window_fixed_ = enabled; }
+    void ext_resize_backbuffer(i32 width, i32 height) override;
+    [[nodiscard]] i32 ext_game_get_state() const noexcept override;
+    void ext_room_goto_cancel() noexcept override {
+        pending_action_ = PendingRoomAction::None;
+        pending_room_id_ = -1;
+    }
+    void ext_game_end() noexcept override { request_game_end(); }
+    [[nodiscard]] i32 ext_var_name_count() const noexcept override {
+        return static_cast<i32>(program_.symbols.user_var_count());
+    }
+    [[nodiscard]] std::string ext_var_name_get(i32 index) const override;
+    [[nodiscard]] std::vector<std::string> ext_instance_var_names(i32 inst_id) const override;
 
     // Subsystems accessors for built-in implementation units
     [[nodiscard]] GameData& game() noexcept { return game_; }
@@ -308,12 +329,17 @@ public:
     std::string file_find_next();
     void file_find_close();
 
-    // Tiles accessors
+    // Tiles & instance ID allocators
     [[nodiscard]] std::vector<ActiveTile>& tiles() noexcept { return tiles_; }
     [[nodiscard]] i32 alloc_tile_id() noexcept { return next_tile_id_++; }
+    [[nodiscard]] i32 alloc_instance_id() noexcept { return next_instance_id_++; }
 
     // Screen/draw/window helpers
     void render_current_frame();
+    void present_current_frame();
+    void set_window_size(i32 width, i32 height);
+    void adapt_window_to_region(bool adapt);
+    void window_default();
     void draw_instance_default(const Instance& inst);
     void compute_canvas_viewport(i32& out_vx, i32& out_vy, i32& out_vw, i32& out_vh, i32& out_cw, i32& out_ch) const noexcept;
     void update_mouse_room_coords();
@@ -378,6 +404,8 @@ public:
     f64 window_region_scale_ = -1.0;
     i32 window_region_w_ = 0;
     i32 window_region_h_ = 0;
+    i32 requested_backbuffer_w_ = 0;
+    i32 requested_backbuffer_h_ = 0;
     std::unordered_map<i32, i32> transition_scripts_;
 
     // Highscore appearance state
@@ -458,6 +486,7 @@ private:
     void process_pending_room_action();
 
     void update_window_caption();
+    void room_canvas_size(i32& width, i32& height) const noexcept;
     void update_view_following();
     void step_triggers(i32 moment);
     void step_event(i32 moment);
@@ -542,6 +571,8 @@ private:
     PendingRoomAction pending_action_ = PendingRoomAction::None;
     i32 pending_room_id_ = -1;
     bool running_ = false;
+    bool io_roomend_clear_ = true;
+    bool window_fixed_ = false;
     bool no_more_lives_armed_ = false;
     bool no_more_health_armed_ = false;
 

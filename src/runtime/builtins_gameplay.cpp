@@ -507,32 +507,28 @@ void Runner::register_builtins_gameplay() {
     register_builtin("path_get_length", [](Runner& r, i32, i32, std::span<const RValue> a) {
         const i32 id = arg_i32(a, 0, -1);
         if (id >= 0 && static_cast<usize>(id) < r.game().paths.size() && r.game().paths[static_cast<usize>(id)].exists) {
-            return RValue(compute_path_length(r.game().paths[static_cast<usize>(id)]));
+            return RValue(r.game().paths[static_cast<usize>(id)].length());
         }
-        return RValue(0.0);
+        return RValue(-1.0);
     });
     register_builtin("path_get_x", [](Runner& r, i32, i32, std::span<const RValue> a) {
         const i32 id = arg_i32(a, 0, -1);
         if (id >= 0 && static_cast<usize>(id) < r.game().paths.size() && r.game().paths[static_cast<usize>(id)].exists) {
-            f64 px = 0.0, py = 0.0;
-            evaluate_path_point(r.game().paths[static_cast<usize>(id)], arg_real(a, 1), px, py);
-            return RValue(px);
+            return RValue(r.game().paths[static_cast<usize>(id)].sample(arg_real(a, 1)).x);
         }
-        return RValue(0.0);
+        return RValue(-1.0);
     });
     register_builtin("path_get_y", [](Runner& r, i32, i32, std::span<const RValue> a) {
         const i32 id = arg_i32(a, 0, -1);
         if (id >= 0 && static_cast<usize>(id) < r.game().paths.size() && r.game().paths[static_cast<usize>(id)].exists) {
-            f64 px = 0.0, py = 0.0;
-            evaluate_path_point(r.game().paths[static_cast<usize>(id)], arg_real(a, 1), px, py);
-            return RValue(py);
+            return RValue(r.game().paths[static_cast<usize>(id)].sample(arg_real(a, 1)).y);
         }
-        return RValue(0.0);
+        return RValue(-1.0);
     });
     register_builtin("path_get_number", [](Runner& r, i32, i32, std::span<const RValue> a) {
         const i32 id = arg_i32(a, 0, -1);
         if (id >= 0 && static_cast<usize>(id) < r.game().paths.size() && r.game().paths[static_cast<usize>(id)].exists) {
-            return RValue(static_cast<i32>(r.game().paths[static_cast<usize>(id)].points.size()));
+            return RValue(static_cast<i32>(r.game().paths[static_cast<usize>(id)].geometry().points.size()));
         }
         return RValue(0);
     });
@@ -551,13 +547,13 @@ void Runner::register_builtins_gameplay() {
     register_builtin("path_add_point", [](Runner& r, i32, i32, std::span<const RValue> a) {
         const i32 id = arg_i32(a, 0, -1);
         if (id >= 0 && static_cast<usize>(id) < r.game().paths.size() && r.game().paths[static_cast<usize>(id)].exists) {
-            r.game().paths[static_cast<usize>(id)].points.push_back(PathPoint{arg_real(a, 1), arg_real(a, 2), arg_real(a, 3, 100.0)});
+            r.game().paths[static_cast<usize>(id)].edit_geometry().points.push_back(PathPoint{arg_real(a, 1), arg_real(a, 2), arg_real(a, 3, 100.0)});
         }
         return RValue(0.0);
     });
     register_builtin("path_clear_points", [](Runner& r, i32, i32, std::span<const RValue> a) {
         const i32 id = arg_i32(a, 0, -1);
-        if (id >= 0 && static_cast<usize>(id) < r.game().paths.size()) r.game().paths[static_cast<usize>(id)].points.clear();
+        if (id >= 0 && static_cast<usize>(id) < r.game().paths.size()) r.game().paths[static_cast<usize>(id)].edit_geometry().points.clear();
         return RValue(0.0);
     });
     register_builtin("path_name", [](Runner& r, i32, i32, std::span<const RValue> a) {
@@ -570,67 +566,63 @@ void Runner::register_builtins_gameplay() {
     register_builtin("path_get_kind", [](Runner& r, i32, i32, std::span<const RValue> a) {
         const i32 id = arg_i32(a, 0, -1);
         return RValue((id >= 0 && static_cast<usize>(id) < r.game().paths.size() && r.game().paths[static_cast<usize>(id)].exists)
-                          ? r.game().paths[static_cast<usize>(id)].kind : 0);
+                          ? r.game().paths[static_cast<usize>(id)].geometry().kind : 0);
     });
     register_builtin("path_get_closed", [](Runner& r, i32, i32, std::span<const RValue> a) {
         const i32 id = arg_i32(a, 0, -1);
         return RValue(id >= 0 && static_cast<usize>(id) < r.game().paths.size() && r.game().paths[static_cast<usize>(id)].exists &&
-                      r.game().paths[static_cast<usize>(id)].closed);
+                      r.game().paths[static_cast<usize>(id)].geometry().closed);
     });
     register_builtin("path_get_precision", [](Runner& r, i32, i32, std::span<const RValue> a) {
         const i32 id = arg_i32(a, 0, -1);
         return RValue((id >= 0 && static_cast<usize>(id) < r.game().paths.size() && r.game().paths[static_cast<usize>(id)].exists)
-                          ? r.game().paths[static_cast<usize>(id)].precision : 4);
+                          ? r.game().paths[static_cast<usize>(id)].geometry().precision : 4);
     });
     register_builtin("path_get_speed", [](Runner& r, i32, i32, std::span<const RValue> a) {
         const i32 id = arg_i32(a, 0, -1);
-        if (id < 0 || static_cast<usize>(id) >= r.game().paths.size() || !r.game().paths[static_cast<usize>(id)].exists) return RValue(100.0);
-        const auto& pts = r.game().paths[static_cast<usize>(id)].points;
-        if (pts.empty()) return RValue(100.0);
-        const f64 pos = std::clamp(arg_real(a, 1), 0.0, 1.0);
-        const usize idx = std::min(pts.size() - 1, static_cast<usize>(pos * static_cast<f64>(pts.size() - 1)));
-        return RValue(pts[idx].speed);
+        if (id < 0 || static_cast<usize>(id) >= r.game().paths.size() || !r.game().paths[static_cast<usize>(id)].exists) return RValue(-1.0);
+        return RValue(r.game().paths[static_cast<usize>(id)].sample(arg_real(a, 1)).speed);
     });
     register_builtin("path_get_point_x", [](Runner& r, i32, i32, std::span<const RValue> a) {
         const i32 id = arg_i32(a, 0, -1), n = arg_i32(a, 1);
         if (id >= 0 && static_cast<usize>(id) < r.game().paths.size() && r.game().paths[static_cast<usize>(id)].exists &&
-            n >= 0 && static_cast<usize>(n) < r.game().paths[static_cast<usize>(id)].points.size()) {
-            return RValue(r.game().paths[static_cast<usize>(id)].points[static_cast<usize>(n)].x);
+            n >= 0 && static_cast<usize>(n) < r.game().paths[static_cast<usize>(id)].geometry().points.size()) {
+            return RValue(r.game().paths[static_cast<usize>(id)].geometry().points[static_cast<usize>(n)].x);
         }
         return RValue(0.0);
     });
     register_builtin("path_get_point_y", [](Runner& r, i32, i32, std::span<const RValue> a) {
         const i32 id = arg_i32(a, 0, -1), n = arg_i32(a, 1);
         if (id >= 0 && static_cast<usize>(id) < r.game().paths.size() && r.game().paths[static_cast<usize>(id)].exists &&
-            n >= 0 && static_cast<usize>(n) < r.game().paths[static_cast<usize>(id)].points.size()) {
-            return RValue(r.game().paths[static_cast<usize>(id)].points[static_cast<usize>(n)].y);
+            n >= 0 && static_cast<usize>(n) < r.game().paths[static_cast<usize>(id)].geometry().points.size()) {
+            return RValue(r.game().paths[static_cast<usize>(id)].geometry().points[static_cast<usize>(n)].y);
         }
         return RValue(0.0);
     });
     register_builtin("path_get_point_speed", [](Runner& r, i32, i32, std::span<const RValue> a) {
         const i32 id = arg_i32(a, 0, -1), n = arg_i32(a, 1);
         if (id >= 0 && static_cast<usize>(id) < r.game().paths.size() && r.game().paths[static_cast<usize>(id)].exists &&
-            n >= 0 && static_cast<usize>(n) < r.game().paths[static_cast<usize>(id)].points.size()) {
-            return RValue(r.game().paths[static_cast<usize>(id)].points[static_cast<usize>(n)].speed);
+            n >= 0 && static_cast<usize>(n) < r.game().paths[static_cast<usize>(id)].geometry().points.size()) {
+            return RValue(r.game().paths[static_cast<usize>(id)].geometry().points[static_cast<usize>(n)].speed);
         }
         return RValue(0.0);
     });
     register_builtin("path_set_kind", [](Runner& r, i32, i32, std::span<const RValue> a) {
         const i32 id = arg_i32(a, 0, -1);
         if (id >= 0 && static_cast<usize>(id) < r.game().paths.size() && r.game().paths[static_cast<usize>(id)].exists)
-            r.game().paths[static_cast<usize>(id)].kind = arg_i32(a, 1);
+            r.game().paths[static_cast<usize>(id)].edit_geometry().kind = arg_i32(a, 1) == 1 ? 1 : 0;
         return RValue(0.0);
     });
     register_builtin("path_set_closed", [](Runner& r, i32, i32, std::span<const RValue> a) {
         const i32 id = arg_i32(a, 0, -1);
         if (id >= 0 && static_cast<usize>(id) < r.game().paths.size() && r.game().paths[static_cast<usize>(id)].exists)
-            r.game().paths[static_cast<usize>(id)].closed = arg_bool(a, 1);
+            r.game().paths[static_cast<usize>(id)].edit_geometry().closed = arg_bool(a, 1);
         return RValue(0.0);
     });
     register_builtin("path_set_precision", [](Runner& r, i32, i32, std::span<const RValue> a) {
         const i32 id = arg_i32(a, 0, -1);
         if (id >= 0 && static_cast<usize>(id) < r.game().paths.size() && r.game().paths[static_cast<usize>(id)].exists)
-            r.game().paths[static_cast<usize>(id)].precision = std::clamp(arg_i32(a, 1, 4), 1, 8);
+            r.game().paths[static_cast<usize>(id)].edit_geometry().precision = std::clamp(arg_i32(a, 1, 4), 0, 8);
         return RValue(0.0);
     });
     register_builtin("path_duplicate", [](Runner& r, i32, i32, std::span<const RValue> a) {
@@ -655,8 +647,8 @@ void Runner::register_builtins_gameplay() {
         const i32 dst = arg_i32(a, 0, -1), src = arg_i32(a, 1, -1);
         if (dst >= 0 && static_cast<usize>(dst) < r.game().paths.size() && r.game().paths[static_cast<usize>(dst)].exists &&
             src >= 0 && static_cast<usize>(src) < r.game().paths.size() && r.game().paths[static_cast<usize>(src)].exists) {
-            const auto src_pts = r.game().paths[static_cast<usize>(src)].points;
-            auto& dst_pts = r.game().paths[static_cast<usize>(dst)].points;
+            const auto src_pts = r.game().paths[static_cast<usize>(src)].geometry().points;
+            auto& dst_pts = r.game().paths[static_cast<usize>(dst)].edit_geometry().points;
             dst_pts.insert(dst_pts.end(), src_pts.begin(), src_pts.end());
         }
         return RValue(0.0);
@@ -664,7 +656,7 @@ void Runner::register_builtins_gameplay() {
     register_builtin("path_insert_point", [](Runner& r, i32, i32, std::span<const RValue> a) {
         const i32 id = arg_i32(a, 0, -1), n = arg_i32(a, 1);
         if (id >= 0 && static_cast<usize>(id) < r.game().paths.size() && r.game().paths[static_cast<usize>(id)].exists) {
-            auto& pts = r.game().paths[static_cast<usize>(id)].points;
+            auto& pts = r.game().paths[static_cast<usize>(id)].edit_geometry().points;
             const usize idx = static_cast<usize>(std::clamp(n, 0, static_cast<i32>(pts.size())));
             pts.insert(pts.begin() + static_cast<std::ptrdiff_t>(idx), PathPoint{arg_real(a, 2), arg_real(a, 3), arg_real(a, 4, 100.0)});
         }
@@ -673,28 +665,28 @@ void Runner::register_builtins_gameplay() {
     register_builtin("path_change_point", [](Runner& r, i32, i32, std::span<const RValue> a) {
         const i32 id = arg_i32(a, 0, -1), n = arg_i32(a, 1);
         if (id >= 0 && static_cast<usize>(id) < r.game().paths.size() && r.game().paths[static_cast<usize>(id)].exists &&
-            n >= 0 && static_cast<usize>(n) < r.game().paths[static_cast<usize>(id)].points.size()) {
-            r.game().paths[static_cast<usize>(id)].points[static_cast<usize>(n)] = PathPoint{arg_real(a, 2), arg_real(a, 3), arg_real(a, 4, 100.0)};
+            n >= 0 && static_cast<usize>(n) < r.game().paths[static_cast<usize>(id)].edit_geometry().points.size()) {
+            r.game().paths[static_cast<usize>(id)].edit_geometry().points[static_cast<usize>(n)] = PathPoint{arg_real(a, 2), arg_real(a, 3), arg_real(a, 4, 100.0)};
         }
         return RValue(0.0);
     });
     register_builtin("path_delete_point", [](Runner& r, i32, i32, std::span<const RValue> a) {
         const i32 id = arg_i32(a, 0, -1), n = arg_i32(a, 1);
         if (id >= 0 && static_cast<usize>(id) < r.game().paths.size() && r.game().paths[static_cast<usize>(id)].exists &&
-            n >= 0 && static_cast<usize>(n) < r.game().paths[static_cast<usize>(id)].points.size()) {
-            r.game().paths[static_cast<usize>(id)].points.erase(r.game().paths[static_cast<usize>(id)].points.begin() + n);
+            n >= 0 && static_cast<usize>(n) < r.game().paths[static_cast<usize>(id)].edit_geometry().points.size()) {
+            r.game().paths[static_cast<usize>(id)].edit_geometry().points.erase(r.game().paths[static_cast<usize>(id)].edit_geometry().points.begin() + n);
         }
         return RValue(0.0);
     });
     register_builtin("path_reverse", [](Runner& r, i32, i32, std::span<const RValue> a) {
         const i32 id = arg_i32(a, 0, -1);
         if (id >= 0 && static_cast<usize>(id) < r.game().paths.size() && r.game().paths[static_cast<usize>(id)].exists) {
-            auto& pts = r.game().paths[static_cast<usize>(id)].points;
+            auto& pts = r.game().paths[static_cast<usize>(id)].edit_geometry().points;
             std::reverse(pts.begin(), pts.end());
         }
         return RValue(0.0);
     });
-    auto path_center = [](const PathData& p, f64& cx, f64& cy) {
+    auto path_center = [](const PathGeometry& p, f64& cx, f64& cy) {
         cx = cy = 0.0;
         if (p.points.empty()) return;
         f64 x0 = p.points[0].x, x1 = x0, y0 = p.points[0].y, y1 = y0;
@@ -708,7 +700,7 @@ void Runner::register_builtins_gameplay() {
     register_builtin("path_mirror", [path_center](Runner& r, i32, i32, std::span<const RValue> a) {
         const i32 id = arg_i32(a, 0, -1);
         if (id >= 0 && static_cast<usize>(id) < r.game().paths.size() && r.game().paths[static_cast<usize>(id)].exists) {
-            auto& p = r.game().paths[static_cast<usize>(id)];
+            auto& p = r.game().paths[static_cast<usize>(id)].edit_geometry();
             f64 cx = 0, cy = 0; path_center(p, cx, cy);
             for (auto& pt : p.points) pt.x = 2.0 * cx - pt.x;
         }
@@ -717,7 +709,7 @@ void Runner::register_builtins_gameplay() {
     register_builtin("path_flip", [path_center](Runner& r, i32, i32, std::span<const RValue> a) {
         const i32 id = arg_i32(a, 0, -1);
         if (id >= 0 && static_cast<usize>(id) < r.game().paths.size() && r.game().paths[static_cast<usize>(id)].exists) {
-            auto& p = r.game().paths[static_cast<usize>(id)];
+            auto& p = r.game().paths[static_cast<usize>(id)].edit_geometry();
             f64 cx = 0, cy = 0; path_center(p, cx, cy);
             for (auto& pt : p.points) pt.y = 2.0 * cy - pt.y;
         }
@@ -726,7 +718,7 @@ void Runner::register_builtins_gameplay() {
     register_builtin("path_rotate", [path_center](Runner& r, i32, i32, std::span<const RValue> a) {
         const i32 id = arg_i32(a, 0, -1);
         if (id >= 0 && static_cast<usize>(id) < r.game().paths.size() && r.game().paths[static_cast<usize>(id)].exists) {
-            auto& p = r.game().paths[static_cast<usize>(id)];
+            auto& p = r.game().paths[static_cast<usize>(id)].edit_geometry();
             f64 cx = 0, cy = 0; path_center(p, cx, cy);
             const f64 rad = deg_to_rad(arg_real(a, 1));
             const f64 c = std::cos(rad), s = std::sin(rad);
@@ -741,7 +733,7 @@ void Runner::register_builtins_gameplay() {
     register_builtin("path_scale", [path_center](Runner& r, i32, i32, std::span<const RValue> a) {
         const i32 id = arg_i32(a, 0, -1);
         if (id >= 0 && static_cast<usize>(id) < r.game().paths.size() && r.game().paths[static_cast<usize>(id)].exists) {
-            auto& p = r.game().paths[static_cast<usize>(id)];
+            auto& p = r.game().paths[static_cast<usize>(id)].edit_geometry();
             f64 cx = 0, cy = 0; path_center(p, cx, cy);
             const f64 sx = arg_real(a, 1, 1.0), sy = arg_real(a, 2, 1.0);
             for (auto& pt : p.points) {
@@ -755,7 +747,7 @@ void Runner::register_builtins_gameplay() {
         const i32 id = arg_i32(a, 0, -1);
         if (id >= 0 && static_cast<usize>(id) < r.game().paths.size() && r.game().paths[static_cast<usize>(id)].exists) {
             const f64 dx = arg_real(a, 1), dy = arg_real(a, 2);
-            for (auto& pt : r.game().paths[static_cast<usize>(id)].points) { pt.x += dx; pt.y += dy; }
+            for (auto& pt : r.game().paths[static_cast<usize>(id)].edit_geometry().points) { pt.x += dx; pt.y += dy; }
         }
         return RValue(0.0);
     });
@@ -989,9 +981,11 @@ void Runner::register_builtins_gameplay() {
         ri.x = arg_i32(a, 1);
         ri.y = arg_i32(a, 2);
         ri.object_index = arg_i32(a, 3, -1);
-        ri.id = ++r.game().room_max_id;
+        ri.id = r.alloc_instance_id();
+        r.game().room_max_id = std::max(r.game().room_max_id, ri.id);
+        const i32 assigned_id = ri.id;
         r.game().rooms[static_cast<usize>(id)].instances.push_back(std::move(ri));
-        return RValue(r.game().room_max_id);
+        return RValue(assigned_id);
     });
     register_builtin("room_instance_clear", [](Runner& r, i32, i32, std::span<const RValue> a) {
         const i32 id = arg_i32(a, 0, -1);
@@ -1148,8 +1142,8 @@ void Runner::register_builtins_gameplay() {
     register_builtin("keyboard_check_released", [](Runner& r, i32, i32, std::span<const RValue> a) {
         return RValue(check_key_array(r.window().input().key_released, arg_i32(a, 0)));
     });
-    register_builtin("keyboard_check_direct", [](Runner& r, i32, i32, std::span<const RValue> a) {
-        return RValue(check_key_array(r.window().input().key_down, arg_i32(a, 0)));
+    register_builtin("keyboard_check_direct", [](Runner&, i32, i32, std::span<const RValue> a) {
+        return RValue(PlatformWindow::keyboard_check_direct(arg_i32(a, 0)));
     });
     register_builtin("keyboard_clear", [](Runner& r, i32, i32, std::span<const RValue> a) {
         const i32 k = arg_i32(a, 0);
@@ -1238,34 +1232,55 @@ void Runner::register_builtins_gameplay() {
         if (!r.wait_for_mouse()) return Error{"Window close requested during mouse_wait"};
         return RValue(0.0);
     });
-    register_builtin("joystick_exists", [](Runner&, i32, i32, std::span<const RValue> a) {
+    // GM 8.2 stubs all 14 built-in joystick_* functions (gm82joy overrides them via GEX when included).
+    register_builtin("joystick_exists", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        if (r.version_mode() == VersionMode::GM82) return RValue(false);
         return RValue(PlatformWindow::joystick_exists(arg_i32(a, 0, 1)));
     });
-    register_builtin("joystick_name", [](Runner&, i32, i32, std::span<const RValue> a) {
+    register_builtin("joystick_name", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        if (r.version_mode() == VersionMode::GM82) return RValue(std::string{});
         return RValue(PlatformWindow::joystick_name(arg_i32(a, 0, 1)));
     });
-    register_builtin("joystick_axes", [](Runner&, i32, i32, std::span<const RValue> a) {
+    register_builtin("joystick_axes", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        if (r.version_mode() == VersionMode::GM82) return RValue(0);
         return RValue(PlatformWindow::joystick_axes(arg_i32(a, 0, 1)));
     });
-    register_builtin("joystick_buttons", [](Runner&, i32, i32, std::span<const RValue> a) {
+    register_builtin("joystick_buttons", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        if (r.version_mode() == VersionMode::GM82) return RValue(0);
         return RValue(PlatformWindow::joystick_buttons(arg_i32(a, 0, 1)));
     });
-    register_builtin("joystick_has_pov", [](Runner&, i32, i32, std::span<const RValue> a) {
+    register_builtin("joystick_has_pov", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        if (r.version_mode() == VersionMode::GM82) return RValue(false);
         return RValue(PlatformWindow::joystick_has_pov(arg_i32(a, 0, 1)));
     });
-    register_builtin("joystick_direction", [](Runner&, i32, i32, std::span<const RValue> a) {
+    register_builtin("joystick_direction", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        if (r.version_mode() == VersionMode::GM82) return RValue(101);
         return RValue(PlatformWindow::joystick_direction(arg_i32(a, 0, 1)));
     });
-    register_builtin("joystick_check_button", [](Runner&, i32, i32, std::span<const RValue> a) {
+    register_builtin("joystick_check_button", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        if (r.version_mode() == VersionMode::GM82) return RValue(false);
         return RValue(PlatformWindow::joystick_check_button(arg_i32(a, 0, 1), arg_i32(a, 1, 1)));
     });
-    register_builtin("joystick_xpos", [](Runner&, i32, i32, std::span<const RValue> a) { return RValue(PlatformWindow::joystick_axis(arg_i32(a, 0, 1), 0)); });
-    register_builtin("joystick_ypos", [](Runner&, i32, i32, std::span<const RValue> a) { return RValue(PlatformWindow::joystick_axis(arg_i32(a, 0, 1), 1)); });
-    register_builtin("joystick_zpos", [](Runner&, i32, i32, std::span<const RValue> a) { return RValue(PlatformWindow::joystick_axis(arg_i32(a, 0, 1), 2)); });
-    register_builtin("joystick_rpos", [](Runner&, i32, i32, std::span<const RValue> a) { return RValue(PlatformWindow::joystick_axis(arg_i32(a, 0, 1), 3)); });
-    register_builtin("joystick_upos", [](Runner&, i32, i32, std::span<const RValue> a) { return RValue(PlatformWindow::joystick_axis(arg_i32(a, 0, 1), 4)); });
-    register_builtin("joystick_vpos", [](Runner&, i32, i32, std::span<const RValue> a) { return RValue(PlatformWindow::joystick_axis(arg_i32(a, 0, 1), 5)); });
-    register_builtin("joystick_pov", [](Runner&, i32, i32, std::span<const RValue> a) {
+    register_builtin("joystick_xpos", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        return RValue(r.version_mode() == VersionMode::GM82 ? 0.0 : PlatformWindow::joystick_axis(arg_i32(a, 0, 1), 0));
+    });
+    register_builtin("joystick_ypos", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        return RValue(r.version_mode() == VersionMode::GM82 ? 0.0 : PlatformWindow::joystick_axis(arg_i32(a, 0, 1), 1));
+    });
+    register_builtin("joystick_zpos", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        return RValue(r.version_mode() == VersionMode::GM82 ? 0.0 : PlatformWindow::joystick_axis(arg_i32(a, 0, 1), 2));
+    });
+    register_builtin("joystick_rpos", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        return RValue(r.version_mode() == VersionMode::GM82 ? 0.0 : PlatformWindow::joystick_axis(arg_i32(a, 0, 1), 3));
+    });
+    register_builtin("joystick_upos", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        return RValue(r.version_mode() == VersionMode::GM82 ? 0.0 : PlatformWindow::joystick_axis(arg_i32(a, 0, 1), 4));
+    });
+    register_builtin("joystick_vpos", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        return RValue(r.version_mode() == VersionMode::GM82 ? 0.0 : PlatformWindow::joystick_axis(arg_i32(a, 0, 1), 5));
+    });
+    register_builtin("joystick_pov", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        if (r.version_mode() == VersionMode::GM82) return RValue(-1.0);
         return RValue(PlatformWindow::joystick_pov(arg_i32(a, 0, 1)));
     });
 

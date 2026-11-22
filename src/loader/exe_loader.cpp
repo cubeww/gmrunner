@@ -650,17 +650,18 @@ Result<PathData> parse_path_entry(BinaryReader& r, i32) {
         return Error{"header read error"};
     }
     p.name = std::move(name.value());
-    p.kind = kind.value();
-    p.closed = closed.value();
-    p.precision = prec.value();
+    auto& geometry = p.edit_geometry();
+    geometry.kind = kind.value();
+    geometry.closed = closed.value();
+    geometry.precision = prec.value();
 
-    p.points.reserve(static_cast<usize>(pt_cnt.value()));
+    geometry.points.reserve(static_cast<usize>(pt_cnt.value()));
     for (i32 k = 0; k < pt_cnt.value(); ++k) {
         auto x = r.read_f64();
         auto y = r.read_f64();
         auto spd = r.read_f64();
         if (!x || !y || !spd) return Error{"point read error"};
-        p.points.push_back(PathPoint{x.value(), y.value(), spd.value()});
+        geometry.points.push_back(PathPoint{x.value(), y.value(), spd.value()});
     }
     return p;
 }

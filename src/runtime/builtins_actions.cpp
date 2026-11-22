@@ -371,7 +371,7 @@ void Runner::register_builtins_actions() {
     register_builtin("action_sleep", [](Runner& r, i32, i32, std::span<const RValue> a) {
         if (arg_bool(a, 1, false)) {
             r.render_current_frame();
-            r.window().swap_buffers();
+            r.present_current_frame();
         }
         const f64 ms = std::max(0.0, arg_real(a, 0));
         if (ms > 0.0) Clock::sleep_until_us(Clock::now_us() + static_cast<u64>(ms * 1000.0));

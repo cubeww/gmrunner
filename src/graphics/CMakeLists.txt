@@ -4,6 +4,12 @@ add_library(gm_graphics STATIC
     gl_headers.h
     gl_graphics_device.h
     gl_graphics_device.cpp
+    dx9_shader_transpiler.h
+    dx9_shader_transpiler.cpp
+    dx9_pipeline.h
+    dx9_pipeline.cpp
+    model3d.h
+    model3d.cpp
     renderer2d.h
     renderer2d.cpp
 )

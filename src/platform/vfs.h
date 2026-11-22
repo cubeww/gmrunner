@@ -27,7 +27,7 @@ enum FileFindAttr : u32 {
 // Cross-platform Virtual Filesystem:
 // - Normalizes Windows backslashes ('\') to '/'
 // - Resolves paths case-insensitively on case-sensitive filesystems (Linux/Android/APFS)
-// - Maintains working_directory (game root), writable save overlay, and ephemeral temp_directory
+// - Maintains the game's working directory, writable save overlay, and ephemeral temp_directory
 // - Intercepts virtual named pipes (e.g. \\.\pipe\gm82netpipe.*) in memory for gm82buf/d3d_model_load
 // - Emulates the Windows registry in the runner's per-user data directory
 class Vfs : public NonCopyable {
@@ -45,6 +45,9 @@ public:
     [[nodiscard]] const std::filesystem::path& temp_dir() const noexcept { return temp_dir_; }
 
     [[nodiscard]] std::string working_directory_gm() const;
+    [[nodiscard]] std::string program_directory_gm() const;
+    [[nodiscard]] std::string absolute_path_gm(std::string_view gm_path) const;
+    void set_working_directory(std::string_view gm_path);
     [[nodiscard]] std::string temp_directory_gm() const;
 
     // Virtual in-memory named pipes (cross-platform replacement for \\.\pipe\gm82netpipe.*).
@@ -91,7 +94,12 @@ private:
     [[nodiscard]] std::filesystem::path resolve_case_insensitive(
         const std::filesystem::path& base,
         std::string_view relative_norm) const;
-    [[nodiscard]] std::filesystem::path resolve_normalized_for_read(std::string_view utf8_path) const;
+    struct FilePaths {
+        std::filesystem::path game;
+        std::filesystem::path overlay;
+        [[nodiscard]] const std::filesystem::path& for_read() const;
+    };
+    [[nodiscard]] FilePaths resolve_paths(std::string_view gm_path) const;
 
     [[nodiscard]] static bool wildcard_match_ci(std::string_view pattern, std::string_view text) noexcept;
     using RegistryValue = std::variant<f64, std::string>;
@@ -99,6 +107,7 @@ private:
         std::optional<std::string_view> key, std::string_view name, const RegistryValue* replacement = nullptr) const;
 
     std::filesystem::path game_root_;
+    std::filesystem::path working_directory_;
     std::filesystem::path save_root_;
     std::filesystem::path temp_dir_;
     bool owns_temp_dir_ = false;

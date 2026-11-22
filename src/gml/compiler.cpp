@@ -120,6 +120,9 @@ private:
     }
 
     bool at(TokenKind k) const noexcept { return peek().kind == k; }
+    bool at_call() const noexcept {
+        return (at(TokenKind::Identifier) || at(TokenKind::DndCodeAction)) && peek(1).kind == TokenKind::LParen;
+    }
     u16 cur_line() const noexcept { return static_cast<u16>(peek().line); }
 
     const Token& advance() noexcept {
@@ -278,16 +281,6 @@ private:
         }
 
         switch (peek().kind) {
-            case TokenKind::DndCodeAction: {
-                const auto& token = advance();
-                const auto name = chunk_.debug_name + ":action" + std::to_string(token.line);
-                auto action = GmlCompiler::compile_chunk(name, token.text, symbols_);
-                if (!action) return action.error();
-                chunk_.emit(OpCode::RunCodeAction, static_cast<u32>(chunk_.code_actions.size()),
-                            0, static_cast<u16>(token.line));
-                chunk_.code_actions.push_back(std::make_shared<BytecodeChunk>(std::move(action.value())));
-                return Result<void>::success();
-            }
             case TokenKind::LBrace:
             case TokenKind::KwBegin:
                 return parse_block();
@@ -783,7 +776,7 @@ private:
             }
         }
         // Case B: Function call (possibly followed by `.field = ...`, e.g. `instance_create(...).speed = 5`)
-        else if (at(TokenKind::Identifier) && peek(1).kind == TokenKind::LParen) {
+        else if (at_call()) {
             if (auto e = parse_call_expr(); !e) return e.error();
             produced_value = true;
         }
@@ -1010,7 +1003,7 @@ private:
     }
 
     Result<void> parse_call_expr() {
-        const Token fn_tok = advance(); // identifier
+        const Token& fn_tok = advance();
         if (auto e = expect(TokenKind::LParen, "'(' in function call"); !e) return e.error();
 
         u8 argc = 0;
@@ -1025,12 +1018,20 @@ private:
         }
         if (auto e = expect(TokenKind::RParen, "')' after function arguments"); !e) return e.error();
 
+        const u16 line = static_cast<u16>(fn_tok.line);
+        if (fn_tok.kind == TokenKind::DndCodeAction) {
+            const auto name = chunk_.debug_name + ":action" + std::to_string(fn_tok.line);
+            auto action = GmlCompiler::compile_chunk(name, fn_tok.text, symbols_);
+            if (!action) return action.error();
+            chunk_.emit(OpCode::CallCodeAction, static_cast<u32>(chunk_.code_actions.size()), argc, line);
+            chunk_.code_actions.push_back(std::make_shared<BytecodeChunk>(std::move(action.value())));
+            return Result<void>::success();
+        }
         const CallableTarget* target = symbols_.find_callable(fn_tok.text);
         if (!target) {
             return error_here("Unknown function or script '" + fn_tok.text + "'");
         }
 
-        const u16 line = static_cast<u16>(fn_tok.line);
         switch (target->kind) {
             case CallableKind::Builtin:
                 chunk_.emit(OpCode::CallBuiltin, target->id, argc, line);
@@ -1060,10 +1061,10 @@ private:
         } else if (match(TokenKind::LParen)) {
             if (auto e = parse_expression(); !e) return e.error();
             if (auto e = expect(TokenKind::RParen, "')'"); !e) return e.error();
+        } else if (at_call()) {
+            if (auto e = parse_call_expr(); !e) return e.error();
         } else if (at(TokenKind::Identifier)) {
-            if (peek(1).kind == TokenKind::LParen) {
-                if (auto e = parse_call_expr(); !e) return e.error();
-            } else if (peek().text == "global" && peek(1).kind == TokenKind::Dot) {
+            if (peek().text == "global" && peek(1).kind == TokenKind::Dot) {
                 advance(); // 'global'
                 advance(); // '.'
                 if (!at(TokenKind::Identifier)) return error_here("Expected member name after 'global.'");

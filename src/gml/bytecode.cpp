@@ -83,7 +83,7 @@ const char* opcode_name(OpCode op) noexcept {
         case OpCode::CallScript:           return "CALL_SCRIPT";
         case OpCode::CallExtGml:           return "CALL_EXT_GML";
         case OpCode::CallExtDll:           return "CALL_EXT_DLL";
-        case OpCode::RunCodeAction:        return "RUN_CODE_ACTION";
+        case OpCode::CallCodeAction:       return "CALL_CODE_ACTION";
         case OpCode::JumpIfRoomChange:     return "JMP_ROOM_CHANGE";
         case OpCode::Return:               return "RETURN";
         case OpCode::Exit:                 return "EXIT";

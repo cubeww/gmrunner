@@ -32,6 +32,7 @@ enum ArgType : i32 {
     kArgExpression = 0,
     kArgString = 1,
     kArgStringExp = 2,
+    kArgFontString = 15,
 };
 
 std::string_view trim_sv(std::string_view s) noexcept {
@@ -208,7 +209,7 @@ private:
             const std::string_view val = (i < a.args.size()) ? std::string_view(a.args[i]) : std::string_view{};
             const i32 type = (i < a.arg_types.size()) ? a.arg_types[i] : kArgExpression;
 
-            if (type == kArgString) {
+            if (type == kArgString || type == kArgFontString) {
                 out_.append(quote_gml_literal(val));
             } else if (type == kArgStringExp) {
                 const std::string_view tv = trim_sv(val);
@@ -222,6 +223,21 @@ private:
                 out_.append(tv.empty() ? "0" : tv);
             }
         }
+    }
+
+    void emit_custom_action(usize n) {
+        const auto& a = ev_.actions[n];
+        if (tokens_) {
+            tokens_->push_back({out_.size(), n + 1, TokenKind::DndCodeAction, a.code});
+            out_.push_back('(');
+        } else {
+            // Show the action body and its bindings in the diagnostic listing.
+            out_.append("execute_string(");
+            out_.append(quote_gml_literal(a.code));
+            if (a.arg_count > 0) out_.append(", ");
+        }
+        emit_func_args(a);
+        out_.push_back(')');
     }
 
     void emit_execute_script_call(const ActionData& a) {
@@ -320,10 +336,9 @@ private:
                 out_.append(");\n");
             }
         } else if (a.exe_type == kExeCode) {
-            // Custom GML question action: evaluate expression/code.
-            out_.append("__b__ = (");
-            out_.append(a.code.empty() ? "0" : a.code);
-            out_.append(");\n");
+            out_.append("__b__ = ");
+            emit_custom_action(n);
+            out_.append(";\n");
         }
 
         if (existential_with) {
@@ -377,7 +392,7 @@ private:
             const std::string_view code = (!a.args.empty()) ? std::string_view(a.args[0]) : std::string_view(a.code);
             if (tokens_) {
                 tokens_->push_back({out_.size(), n + 1, TokenKind::DndCodeAction, code});
-                out_.push_back('\n');
+                out_.append("();\n");
             } else {
                 out_.append("{\n");
                 out_.append(code);
@@ -397,12 +412,8 @@ private:
                 out_.append(");\n");
             }
         } else if (a.exe_type == kExeCode) {
-            out_.append("{\n");
-            out_.append(a.code);
-            if (has_unclosed_block_comment(a.code)) {
-                out_.append("*/");
-            }
-            out_.append("\n}\n");
+            emit_custom_action(n);
+            out_.append(";\n");
         }
 
         if (pushed_rel) pop_relative();

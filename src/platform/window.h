@@ -86,6 +86,12 @@ public:
     [[nodiscard]] bool is_resizable() const noexcept { return resizable_; }
     void set_visible(bool visible);
     [[nodiscard]] bool is_visible() const noexcept { return visible_; }
+    [[nodiscard]] bool is_maximized() const noexcept;
+    [[nodiscard]] bool is_minimized() const noexcept;
+    void maximize();
+    void minimize();
+    void restore();
+    void raise_focus();
     void set_mouse_position(i32 x, i32 y);
     [[nodiscard]] static i32 display_mouse_x() noexcept;
     [[nodiscard]] static i32 display_mouse_y() noexcept;
@@ -111,6 +117,7 @@ public:
     [[nodiscard]] i32 drawable_height() const noexcept;
     [[nodiscard]] i32 display_width() const noexcept;
     [[nodiscard]] i32 display_height() const noexcept;
+    [[nodiscard]] static bool keyboard_check_direct(i32 key) noexcept;
     [[nodiscard]] static bool numlock_on() noexcept;
     [[nodiscard]] static bool capslock_on() noexcept;
     [[nodiscard]] static bool scrolllock_on() noexcept;

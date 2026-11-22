@@ -45,10 +45,6 @@ void ensure_instance_bbox(const Instance& inst, const GameData& game) noexcept;
     const Instance& inst, f64 x1, f64 y1, f64 x2, f64 y2, bool prec,
     const GameData& game, VersionMode ver_mode) noexcept;
 
-// Path sampling helper (straight & smooth quadratic Bezier evaluation at pos in [0, 1]).
-void evaluate_path_point(const PathData& path, f64 pos, f64& out_x, f64& out_y) noexcept;
-[[nodiscard]] f64 compute_path_length(const PathData& path) noexcept;
-
 // Motion planning grid (mp_grid_*).
 struct MpGrid {
     f64 left = 0.0;

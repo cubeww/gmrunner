@@ -243,11 +243,42 @@ void SymbolTable::populate_from_game(const GameData& game) {
                     }
                 }
             }
+            if (inc.kind == 2 && !gml_defines.empty()) {
+                auto ensure_special_gml = [&](const std::string& sym_name) {
+                    if (sym_name.empty()) return;
+                    auto def_it = gml_defines.find(sym_name);
+                    if (def_it == gml_defines.end()) return;
+                    // Check whether this exact include already registered this GML define.
+                    for (const auto& existing : ext_gml_funcs_) {
+                        if (existing.extension_index == ei && existing.include_index == ii &&
+                            (existing.name == sym_name || existing.external_name == sym_name)) {
+                            return;
+                        }
+                    }
+                    const u32 gid = static_cast<u32>(ext_gml_funcs_.size());
+                    ext_gml_funcs_.push_back(ExtensionGmlFunction{
+                        gid,
+                        static_cast<u32>(ei),
+                        static_cast<u32>(ii),
+                        sym_name,
+                        sym_name,
+                        def_it->second,
+                    });
+                    callables_.try_emplace(sym_name, CallableTarget{
+                        CallableKind::ExtensionGml,
+                        gid,
+                        -1,
+                        sym_name,
+                    });
+                };
+                ensure_special_gml(inc.init_func);
+                ensure_special_gml(inc.final_func);
+            }
         }
     }
 
     // 4. Register resource name constants in exact GM8 precedence order:
-    //    Objects -> Sprites -> Sounds -> Backgrounds -> Paths -> Fonts -> Timelines -> Scripts -> Rooms -> Triggers (1-based)
+    //    Objects -> Sprites -> Sounds -> Backgrounds -> Paths -> Fonts -> Timelines -> Scripts -> Rooms -> Triggers
     for (usize i = 0; i < game.objects.size(); ++i) {
         if (game.objects[i].exists) register_resource_constant(game.objects[i].name, static_cast<i32>(i));
     }
@@ -277,8 +308,7 @@ void SymbolTable::populate_from_game(const GameData& game) {
     }
     for (usize i = 0; i < game.triggers.size(); ++i) {
         if (game.triggers[i].exists) {
-            // Triggers are 1-based constants in GM8!
-            register_resource_constant(game.triggers[i].const_name, static_cast<i32>(i + 1));
+            register_resource_constant(game.triggers[i].const_name, static_cast<i32>(i));
         }
     }
 

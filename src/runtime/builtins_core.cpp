@@ -158,7 +158,7 @@ Result<RValue> Runner::open_legacy_text_file(std::string_view path, i32 mode) {
     auto closed = close_legacy_text_file();
     if (!closed) return closed.error();
     LegacyTextFile file;
-    file.path = path;
+    file.path = vfs_.absolute_path_gm(path);
     file.writable = mode != 0;
     if (mode == 0 || (mode == 2 && vfs_.exists(path))) {
         auto contents = vfs_.read_all_bytes(path);
@@ -1503,8 +1503,12 @@ void Runner::register_builtins_core() {
     register_builtin("show_error", [](Runner& r, i32, i32, std::span<const RValue> a) {
         const std::string msg(arg_str(a, 0));
         const bool abort_game = arg_bool(a, 1, false);
+        r.error_occurred_ = true;
+        r.error_last_ = msg;
         GM_LOG_ERROR("gml", "show_error: %s", msg.c_str());
-        r.window().show_message("Error", msg);
+        if (r.game().options.display_errors) {
+            r.window().show_message("Error", msg);
+        }
         if (abort_game) r.request_game_end();
         return RValue(0.0);
     });
@@ -1740,7 +1744,10 @@ void Runner::register_builtins_core() {
         (void)PlatformWindow::open_url(arg_str(a, 0));
         return RValue(0.0);
     });
-    register_builtin("YoYo_EnableAlphaBlend", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
+    register_builtin("YoYo_EnableAlphaBlend", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        r.renderer().set_alpha_blend_enable(arg_bool(a, 0, true));
+        return RValue(0.0);
+    });
     register_builtin("YoYo_AddVirtualKey", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(-1); });
     register_builtin("YoYo_DeleteVirtualKey", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
     register_builtin("YoYo_ShowVirtualKey", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });

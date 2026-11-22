@@ -175,13 +175,33 @@ struct PathPoint {
     f64 speed = 100.0;
 };
 
-struct PathData {
-    bool exists = false;
-    std::string name;
+struct PathGeometry {
     i32 kind = 0; // 0=straight, 1=smooth
     bool closed = false;
     i32 precision = 4;
     std::vector<PathPoint> points;
+};
+
+struct PathData {
+    bool exists = false;
+    std::string name;
+
+    [[nodiscard]] const PathGeometry& geometry() const noexcept { return geometry_; }
+    PathGeometry& edit_geometry() noexcept { samples_.clear(); return geometry_; }
+    [[nodiscard]] f64 length() const;
+    [[nodiscard]] PathPoint sample(f64 position) const;
+
+private:
+    struct Sample {
+        PathPoint point;
+        f64 distance;
+    };
+    PathGeometry geometry_;
+    mutable std::vector<Sample> samples_;
+
+    void build_samples() const;
+    void add_sample(PathPoint point) const;
+    void subdivide(const PathPoint& a, const PathPoint& b, const PathPoint& c, i32 depth) const;
 };
 
 struct ScriptData {

@@ -8,7 +8,7 @@
 
 - **Language & Layout**: C++20 (`gmrunner`, MIT License), CMake 3.24+ + Ninja, with `.h` and `.cpp` co-located in each module directory under `src/` and third-party libraries tracked as git submodules under `third_party/`.
 - **Graphics RHI**: Abstract `IGraphicsDevice` backed by a unified **OpenGL 3.3 Core (Desktop) / OpenGL ES 3.0 (Android) / WebGL 2.0 (WebAssembly)** implementation.
-- **D3D9 Shader Support (`gm82dx9`)**: In-house lightweight **D3D9 SM2/SM3 bytecode (`.vs3`/`.ps3`) + HLSL-SM3 (`.hlsl`) -> GLSL 330 core / 300 es transpiler** with `CTAB` reflection.
+- **D3D9 Shader Support (`gm82dx9`)**: In-house lightweight **D3D9 SM1/SM2/SM3 bytecode (`.vs3`/`.ps3`) -> GLSL 330 core / 300 es transpiler** with `CTAB` reflection.
 - **Audio Engine**: Pure open-source cross-platform software mixer (`miniaudio` + `libogg`/`libvorbis` + `libopenmpt` + `TinySoundFont` + custom DSP effects) powering vanilla GM8 audio and all audio DLL shims (`GMFMODSimple`, `gm82snd`, `SuperSound`, `MaizeMusic`).
 - **Extension / DLL Strategy**: Native cross-platform C++ shims intercepting both embedded `.gex` DLLs (`gm82core`, `gm82buf`, `gm82dx9`, `gm82snd`, `gm82joy`, `gm82drag`, `gm82test`) and runtime `external_define`/`external_call` DLLs (`GMFMODSimple`, `SuperSound`, `MaizeMusic`, `CleanMem`), while executing extensions' bundled `.gml` wrapper scripts unmodified in the GML VM.
 - **Rollout Order**: Build and verify Phases 0–6 on Windows x64 first while maintaining strict platform abstraction across PAL and CMake, then complete Linux, macOS, WebAssembly, and Android packaging in Phase 7.
@@ -89,7 +89,7 @@ gmrunner/
     ├── platform/                  # gm_platform: clock, platform, vfs (case-insensitive + virtual pipes + registry), window
     ├── loader/                    # gm_loader: PE scanner, GM80/81/82 decryptors, asset parsers, GameData IR
     ├── gml/                       # gm_gml: lexer, parser, D&D lowerer, bytecode compiler, VM, RValue
-    ├── graphics/                  # gm_graphics: IGraphicsDevice, GlGraphicsDevice, 2D/3D renderers, surfaces, SM2/3+HLSL transpiler
+    ├── graphics/                  # gm_graphics: IGraphicsDevice, GlGraphicsDevice, 2D/3D renderers, surfaces, SM1/2/3 bytecode transpiler
     ├── audio/                     # gm_audio: software mixer, decoders, DSP, 3D, .wasd, FMODSIMPLEPW crypto
     ├── runtime/                   # gm_runtime: StepLoop, Room/Instance/Object, TMask collisions, mp_*, particles, ds_*, 1281 built-ins
     ├── extensions/                # gm_extensions: GEX loader, external_call dispatcher, native C++ shims
@@ -119,7 +119,7 @@ gmrunner/
 ### 4.4 `gm_graphics` — Unified GL 3.3 / GLES 3.0 / WebGL 2.0 RHI & Shader Transpiler
 - Single OpenGL 3.3 Core / GLES 3.0 / WebGL 2.0 backend behind `IGraphicsDevice`.
 - Fixed-function D3D8/9 uber-shader emulation (texture + vertex color, alpha test, fog, up to 8 lights, 1x1 white null-texture fallback), batched 2D renderer with 3-way depth merge (instances/tiles/particles), FBO surfaces & `application_surface`, 22 built-in room transitions, and `d3d_*` 3D pipeline (`C3D_Model` VBO caching).
-- In-house D3D9 SM2/SM3 bytecode (`.vs3`/`.ps3`) + HLSL-SM3 (`.hlsl`) -> GLSL 330/300 es transpiler with `CTAB` uniform reflection and register mapping (`c0`–`c255`, `s0`–`s7`).
+- In-house D3D9 SM1/SM2/SM3 bytecode (`.vs3`/`.ps3`) -> GLSL 330/300 es transpiler with `CTAB` uniform reflection and register mapping (`c0`–`c255`, `s0`–`s7`).
 
 ### 4.5 `gm_audio` — Unified Software Audio Engine
 - `miniaudio` output + `dr_wav`/`dr_mp3`/`dr_flac` + `libogg`/`libvorbis` (sample-accurate loop points) + `libopenmpt` (`.mod`/`.s3m`/`.xm`/`.it`) + `TinySoundFont` (SF2 MIDI).
@@ -144,8 +144,8 @@ gmrunner/
 | **Phase 0** | Repo foundation, CMake presets, submodules (`SDL3`, `zlib`, `glad`), `gm_base`, `gm_platform`, `gm_graphics` RHI, `gm_app` skeleton | Empty OpenGL 3.3 Core window + CLI `--help` on Windows x64 (**Complete**) |
 | **Phase 1** | `gm_loader`: PE overlay scanner, GM 8.0 / 8.1 / 8.2 decryptors, all 16 asset parsers, GM 8.2 event table, GEX unpacker, `--inspect` CLI | `--inspect` cleanly parses all 7 sample EXEs (8.0, 8.1, 8.2) (**Complete**) |
 | **Phase 2** | `gm_gml`: GM8 lexer, symbol resolver, parser, D&D action lowerer, constant folder, bytecode compiler, VM, `--compile-check` CLI | `--compile-check` compiles all scripts/events/GEX GML across all 7 samples (**Complete**) |
-| **Phase 3** | `gm_runtime` core simulation (17-stage step loop, `TMask` collisions, `solid`, `ds_*`, particles, core built-ins), 2D renderer, vanilla audio | `GM80_yuuutu` playable end-to-end |
-| **Phase 4** | External DLL interception, full `gm_audio` mixer/trackers/DSP, shims for `GMFMODSimple`, `SuperSound`, `MaizeMusic`, `CleanMem`, full GM 8.1 built-ins | `GM80_parasoko`, `GM81_nikaple`, `GM81_kamilia` playable |
-| **Phase 5** | Fixed-function 3D `d3d_*` + `C3D_Model`, GM 8.2 runner behaviors, shims for `gm82core`, `gm82buf`, `gm82snd`, `gm82joy`, `gm82drag`, `gm82test` | `GM82_guy`, `GM82_renex` (3D `.g3z` via virtual pipe + `.mod`/`.s3m` music) playable |
-| **Phase 6** | `gm82dx9` extended graphics shim + in-house D3D9 SM2/SM3 bytecode & HLSL-SM3 -> GLSL transpiler | `GM82_MKFusion` (`.hlsl`/`.ps3` shaders, 5,400+ external assets, `ds_list_write` saves) playable |
+| **Phase 3** | `gm_runtime` core simulation (17-stage step loop, `TMask` collisions, `solid`, `ds_*`, particles, core built-ins), 2D renderer, vanilla audio | `GM80_yuuutu` playable end-to-end (**Complete**) |
+| **Phase 4** | External DLL interception, full `gm_audio` mixer/trackers/DSP, shims for `GMFMODSimple`, `SuperSound`, `MaizeMusic`, `CleanMem`, full GM 8.1 built-ins | `GM80_parasoko`, `GM81_nikaple`, `GM81_kamilia` playable (**Complete**) |
+| **Phase 5** | Fixed-function 3D `d3d_*` + `C3D_Model`, GM 8.2 runner behaviors, shims for `gm82core`, `gm82buf`, `gm82snd`, `gm82joy`, `gm82drag`, `gm82test` | `GM82_guy`, `GM82_renex` (3D `.g3z` via virtual pipe + `.mod`/`.s3m` music) playable (**Complete**) |
+| **Phase 6** | `gm82dx9` extended graphics shim + in-house D3D9 SM1/SM2/SM3 bytecode -> GLSL transpiler | `GM82_MKFusion` (compiled shaders, 5,400+ external assets, `ds_list_write` saves) & `GM82_renex` (base64 shaders + custom VBO/IBO) playable (**Complete**) |
 | **Phase 7** | Linux, macOS, WebAssembly (Emscripten + WebGL 2 + OPFS/IDBFS + JSPI/Asyncify), Android (NDK + GLES 3 + touch overlay), performance polish | All 7 sample games verified across all 5 platforms |

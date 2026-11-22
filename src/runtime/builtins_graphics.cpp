@@ -85,6 +85,10 @@ ActiveTile* find_tile(Runner& r, i32 id) noexcept {
     return nullptr;
 }
 
+bool tile_contains(const ActiveTile& t, f64 x, f64 y) noexcept {
+    return x >= t.x && x < t.x + t.w * t.xscale && y >= t.y && y < t.y + t.h * t.yscale;
+}
+
 } // namespace
 
 void Runner::register_builtins_graphics() {
@@ -606,23 +610,19 @@ void Runner::register_builtins_graphics() {
         const i32 pid = arg_i32(a, 0, -1);
         if (pid < 0 || static_cast<usize>(pid) >= r.game().paths.size() || !r.game().paths[static_cast<usize>(pid)].exists) return RValue(0.0);
         const auto& p = r.game().paths[static_cast<usize>(pid)];
-        if (p.points.size() < 2) return RValue(0.0);
-        const f64 ox = arg_bool(a, 3, false) ? 0.0 : (arg_real(a, 1) - p.points[0].x);
-        const f64 oy = arg_bool(a, 3, false) ? 0.0 : (arg_real(a, 2) - p.points[0].y);
+        const i64 steps = delphi_round(p.length() / 4.0);
+        if (steps <= 0) return RValue(0.0);
+        PathPoint prev = p.sample(0.0);
+        const f64 ox = arg_bool(a, 3) ? 0.0 : arg_real(a, 1) - prev.x;
+        const f64 oy = arg_bool(a, 3) ? 0.0 : arg_real(a, 2) - prev.y;
         const u32 col = r.renderer().color();
         const f32 alpha = r.renderer().alpha();
-        const usize n = p.points.size();
-        for (usize i = 0; i + 1 < n; ++i) {
+        for (i64 i = 1; i <= steps; ++i) {
+            const auto next = p.sample(static_cast<f64>(i) / static_cast<f64>(steps));
             r.renderer().draw_line_color(
-                static_cast<f32>(p.points[i].x + ox), static_cast<f32>(p.points[i].y + oy),
-                static_cast<f32>(p.points[i + 1].x + ox), static_cast<f32>(p.points[i + 1].y + oy),
-                col, col, alpha);
-        }
-        if (p.closed && n > 2) {
-            r.renderer().draw_line_color(
-                static_cast<f32>(p.points.back().x + ox), static_cast<f32>(p.points.back().y + oy),
-                static_cast<f32>(p.points.front().x + ox), static_cast<f32>(p.points.front().y + oy),
-                col, col, alpha);
+                static_cast<f32>(prev.x + ox), static_cast<f32>(prev.y + oy),
+                static_cast<f32>(next.x + ox), static_cast<f32>(next.y + oy), col, col, alpha);
+            prev = next;
         }
         return RValue(0.0);
     });
@@ -647,7 +647,8 @@ void Runner::register_builtins_graphics() {
         return RValue(0.0);
     });
     register_builtin("draw_primitive_begin_texture", [](Runner& r, i32, i32, std::span<const RValue> a) {
-        r.renderer().primitive_begin(arg_i32(a, 0, 4), TextureHandle{static_cast<u32>(arg_i32(a, 1, 0))});
+        const i32 tid = arg_i32(a, 1, -1);
+        r.renderer().primitive_begin(arg_i32(a, 0, 4), tid > 0 ? TextureHandle{static_cast<u32>(tid)} : TextureHandle{});
         return RValue(0.0);
     });
     register_builtin("draw_vertex", [](Runner& r, i32, i32, std::span<const RValue> a) {
@@ -810,14 +811,17 @@ void Runner::register_builtins_graphics() {
         return RValue(static_cast<u32>(r.renderer().background_texture(arg_i32(a, 0, -1)).id));
     });
     register_builtin("texture_exists", [](Runner& r, i32, i32, std::span<const RValue> a) {
-        return RValue(r.renderer().texture_exists(TextureHandle{static_cast<u32>(arg_i32(a, 0, 0))}));
+        const i32 tid = arg_i32(a, 0, -1);
+        return RValue(tid > 0 && r.renderer().texture_exists(TextureHandle{static_cast<u32>(tid)}));
     });
     register_builtin("texture_get_width", [](Runner& r, i32, i32, std::span<const RValue> a) {
-        const i32 w = r.renderer().texture_width(TextureHandle{static_cast<u32>(arg_i32(a, 0, 0))});
+        const i32 tid = arg_i32(a, 0, -1);
+        const i32 w = tid > 0 ? r.renderer().texture_width(TextureHandle{static_cast<u32>(tid)}) : 0;
         return RValue(w > 0 ? 1.0 : 0.0); // GM8 texture_get_width returns UV ratio (1.0 for NPOT textures)
     });
     register_builtin("texture_get_height", [](Runner& r, i32, i32, std::span<const RValue> a) {
-        const i32 h = r.renderer().texture_height(TextureHandle{static_cast<u32>(arg_i32(a, 0, 0))});
+        const i32 tid = arg_i32(a, 0, -1);
+        const i32 h = tid > 0 ? r.renderer().texture_height(TextureHandle{static_cast<u32>(tid)}) : 0;
         return RValue(h > 0 ? 1.0 : 0.0);
     });
     register_builtin("texture_set_priority", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
@@ -829,7 +833,10 @@ void Runner::register_builtins_graphics() {
         r.renderer().set_texture_repeat(arg_bool(a, 0));
         return RValue(0.0);
     });
-    register_builtin("texture_set_blending", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
+    register_builtin("texture_set_blending", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        r.renderer().set_texture_blending(arg_bool(a, 0, true));
+        return RValue(0.0);
+    });
     register_builtin("texture_preload", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
 
     // -----------------------------------------------------------------------
@@ -901,26 +908,30 @@ void Runner::register_builtins_graphics() {
     register_builtin("tile_layer_find", [](Runner& r, i32, i32, std::span<const RValue> a) {
         const f64 d = arg_real(a, 0), px = arg_real(a, 1), py = arg_real(a, 2);
         for (const auto& t : r.tiles()) {
-            if (gml_equals(t.depth, d) && px >= t.x && px < t.x + t.w * t.xscale && py >= t.y && py < t.y + t.h * t.yscale) {
+            if (t.depth == d && tile_contains(t, px, py)) {
                 return RValue(t.id);
             }
         }
         return RValue(-1);
     });
     register_builtin("tile_find", [](Runner& r, i32, i32, std::span<const RValue> a) {
-        const f64 px = arg_real(a, 0), py = arg_real(a, 1), d = arg_real(a, 2);
+        const i32 px = arg_i32(a, 0), py = arg_i32(a, 1);
+        const bool foreground = arg_bool(a, 2);
         for (const auto& t : r.tiles()) {
-            if (gml_equals(t.depth, d) && px >= t.x && px < t.x + t.w * t.xscale && py >= t.y && py < t.y + t.h * t.yscale) {
+            if ((t.depth < 0.0) == foreground && tile_contains(t, px, py)) {
                 return RValue(t.id);
             }
         }
         return RValue(-1);
     });
     register_builtin("tile_delete_at", [](Runner& r, i32, i32, std::span<const RValue> a) {
-        const f64 px = arg_real(a, 0), py = arg_real(a, 1);
+        const i32 px = arg_i32(a, 0), py = arg_i32(a, 1);
+        const bool foreground = arg_bool(a, 2);
         auto& vec = r.tiles();
         vec.erase(std::remove_if(vec.begin(), vec.end(), [&](const ActiveTile& t) {
-            return px >= t.x && px < t.x + t.w * t.xscale && py >= t.y && py < t.y + t.h * t.yscale;
+            // GM includes both far edges and accepts depth zero for either group when deleting.
+            return (foreground ? t.depth <= 0.0 : t.depth >= 0.0) &&
+                   px >= t.x && px <= t.x + t.w * t.xscale && py >= t.y && py <= t.y + t.h * t.yscale;
         }), vec.end());
         return RValue(0.0);
     });
@@ -928,7 +939,7 @@ void Runner::register_builtins_graphics() {
         const f64 d = arg_real(a, 0), px = arg_real(a, 1), py = arg_real(a, 2);
         auto& vec = r.tiles();
         vec.erase(std::remove_if(vec.begin(), vec.end(), [&](const ActiveTile& t) {
-            return gml_equals(t.depth, d) && px >= t.x && px < t.x + t.w * t.xscale && py >= t.y && py < t.y + t.h * t.yscale;
+            return t.depth == d && tile_contains(t, px, py);
         }), vec.end());
         return RValue(0.0);
     });
@@ -978,7 +989,7 @@ void Runner::register_builtins_graphics() {
     });
     register_builtin("window_get_fullscreen", [](Runner& r, i32, i32, std::span<const RValue>) { return RValue(r.window().is_fullscreen()); });
     register_builtin("window_set_size", [](Runner& r, i32, i32, std::span<const RValue> a) {
-        r.window().set_size(std::max(1, arg_i32(a, 0, 640)), std::max(1, arg_i32(a, 1, 480)));
+        r.set_window_size(std::max(1, arg_i32(a, 0, 640)), std::max(1, arg_i32(a, 1, 480)));
         return RValue(0.0);
     });
     register_builtin("window_get_width", [](Runner& r, i32, i32, std::span<const RValue>) { return RValue(r.window().width()); });
@@ -991,7 +1002,7 @@ void Runner::register_builtins_graphics() {
     register_builtin("window_get_y", [](Runner& r, i32, i32, std::span<const RValue>) { return RValue(r.window().y()); });
     register_builtin("window_set_rectangle", [](Runner& r, i32, i32, std::span<const RValue> a) {
         r.window().set_position(arg_i32(a, 0), arg_i32(a, 1));
-        r.window().set_size(std::max(1, arg_i32(a, 2, 640)), std::max(1, arg_i32(a, 3, 480)));
+        r.set_window_size(std::max(1, arg_i32(a, 2, 640)), std::max(1, arg_i32(a, 3, 480)));
         return RValue(0.0);
     });
     register_builtin("window_center", [](Runner& r, i32, i32, std::span<const RValue>) {
@@ -999,8 +1010,7 @@ void Runner::register_builtins_graphics() {
         return RValue(0.0);
     });
     register_builtin("window_default", [](Runner& r, i32, i32, std::span<const RValue>) {
-        r.window().set_size(std::max(1, r.room_width_), std::max(1, r.room_height_));
-        r.window().center();
+        r.window_default();
         return RValue(0.0);
     });
     register_builtin("window_set_cursor", [](Runner& r, i32, i32, std::span<const RValue> a) {
@@ -1089,15 +1099,16 @@ void Runner::register_builtins_graphics() {
     register_builtin("window_get_sizeable", [](Runner& r, i32, i32, std::span<const RValue>) { return RValue(r.window().is_resizable()); });
     register_builtin("window_set_region_scale", [](Runner& r, i32, i32, std::span<const RValue> a) {
         r.window_region_scale_ = arg_real(a, 0, -1.0);
+        r.adapt_window_to_region(arg_bool(a, 1));
         return RValue(0.0);
     });
     register_builtin("window_get_region_scale", [](Runner& r, i32, i32, std::span<const RValue>) { return RValue(r.window_region_scale_); });
     register_builtin("window_set_region_size", [](Runner& r, i32, i32, std::span<const RValue> a) {
-        const i32 w = std::max(1, arg_i32(a, 0, r.room_width_));
-        const i32 h = std::max(1, arg_i32(a, 1, r.room_height_));
-        r.window_region_w_ = w;
-        r.window_region_h_ = h;
-        if (arg_bool(a, 2, false)) r.window().set_size(w, h);
+        const i32 w = arg_i32(a, 0);
+        const i32 h = arg_i32(a, 1);
+        if (w > 0) r.window_region_w_ = w;
+        if (h > 0) r.window_region_h_ = h;
+        r.adapt_window_to_region(arg_bool(a, 2));
         return RValue(0.0);
     });
     register_builtin("window_get_region_width", [](Runner& r, i32, i32, std::span<const RValue>) {
@@ -1125,11 +1136,11 @@ void Runner::register_builtins_graphics() {
 
     register_builtin("screen_redraw", [](Runner& r, i32, i32, std::span<const RValue>) {
         r.render_current_frame();
+        r.present_current_frame();
         return RValue(0.0);
     });
     register_builtin("screen_refresh", [](Runner& r, i32, i32, std::span<const RValue>) {
-        r.renderer().flush();
-        r.window().swap_buffers();
+        r.present_current_frame();
         return RValue(0.0);
     });
     register_builtin("screen_wait_vsync", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });

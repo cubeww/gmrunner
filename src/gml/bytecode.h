@@ -108,7 +108,7 @@ enum class OpCode : u8 {
     CallScript,         // operand = script_id, aux = argc
     CallExtGml,         // operand = ext_gml_id, aux = argc
     CallExtDll,         // operand = ext_dll_id, aux = argc
-    RunCodeAction,      // operand = index into this event's code_actions
+    CallCodeAction,     // operand = index into this event's code_actions, aux = argc
     JumpIfRoomChange,   // at a D&D action boundary, jump to the event epilogue
     Return,             // pops return value and returns
     Exit,               // returns 0.0 immediately

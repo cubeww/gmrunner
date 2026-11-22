@@ -31,7 +31,7 @@ public:
     // Textures
     [[nodiscard]] virtual Result<TextureHandle> create_texture(const TextureDesc& desc, std::span<const u8> initial_pixels = {}) = 0;
     virtual void update_texture(TextureHandle tex, i32 x, i32 y, i32 w, i32 h, TextureFormat format, std::span<const u8> pixels) = 0;
-    virtual void set_texture_sampler(TextureHandle tex, TextureFilter filter, TextureWrap wrap_u, TextureWrap wrap_v) = 0;
+    virtual void set_texture_sampler(u32 slot, TextureFilter filter, TextureWrap wrap_u, TextureWrap wrap_v) = 0;
     virtual void bind_texture(u32 slot, TextureHandle tex) = 0;
     virtual void destroy_texture(TextureHandle tex) = 0;
 

@@ -727,10 +727,13 @@ Result<RValue> GmlVm::execute(
                 break;
             }
 
-            case OpCode::RunCodeAction: {
+            case OpCode::CallCodeAction: {
                 const auto action = chunk.code_actions[ins.operand];
-                auto result = execute(*action, cur_self, cur_other);
+                const usize base = stack.size() - ins.aux;
+                auto result = execute(*action, cur_self, cur_other, std::span<const RValue>(stack).subspan(base));
                 if (!result) return result.error();
+                stack.resize(base);
+                stack.push_back(std::move(result.value()));
                 break;
             }
             case OpCode::JumpIfRoomChange:

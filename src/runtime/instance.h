@@ -65,7 +65,6 @@ struct Instance {
     i32 path_endaction = 0;
     f64 path_xstart = 0.0;
     f64 path_ystart = 0.0;
-    bool path_absolute = false;
 
     // Timeline state
     i32 timeline_index = -1;

@@ -3,11 +3,16 @@
 #include "base/log.h"
 #include "graphics/gl_headers.h"
 
+#include <cstring>
 #include <vector>
 
 namespace gm {
 
 namespace {
+
+// Core in desktop GL and GLES 3.2; also provided by EXT/OES_texture_border_clamp.
+constexpr GLenum kClampToBorder = 0x812D;
+constexpr GLenum kTextureBorderColor = 0x1004;
 
 GLenum to_gl_blend_factor(BlendFactor f) noexcept {
     switch (f) {
@@ -149,6 +154,25 @@ Result<void> GlGraphicsDevice::init(GlProcLoader proc_loader) {
 
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glGenSamplers(static_cast<GLsizei>(sampler_ids_.size()), sampler_ids_.data());
+#if !GMRUNNER_USE_GLES3
+    glProvokingVertex(GL_FIRST_VERTEX_CONVENTION);
+    border_clamp_supported_ = true;
+#else
+    GLint major = 0, minor = 0, extension_count = 0;
+    glGetIntegerv(GL_MAJOR_VERSION, &major);
+    glGetIntegerv(GL_MINOR_VERSION, &minor);
+    border_clamp_supported_ = major > 3 || (major == 3 && minor >= 2);
+    glGetIntegerv(GL_NUM_EXTENSIONS, &extension_count);
+    for (GLint i = 0; i < extension_count && !border_clamp_supported_; ++i) {
+        const auto* name = reinterpret_cast<const char*>(glGetStringi(GL_EXTENSIONS, static_cast<GLuint>(i)));
+        if (name) {
+            const std::string_view ext(name);
+            border_clamp_supported_ = ext == "GL_EXT_texture_border_clamp" || ext == "GL_OES_texture_border_clamp";
+        }
+    }
+#endif
+    set_polygon_mode(2);
 
     // Create 1x1 opaque white fallback texture (mirrors gm82dx9 SetNullTexture behavior).
     constexpr u8 kWhitePixel[4] = {255, 255, 255, 255};
@@ -191,6 +215,11 @@ void GlGraphicsDevice::shutdown() noexcept {
         glDeleteTextures(1, &tex);
     }
     textures_.clear();
+    glDeleteSamplers(static_cast<GLsizei>(sampler_ids_.size()), sampler_ids_.data());
+    sampler_ids_.fill(0);
+    if (flat_index_buffer_) glDeleteBuffers(1, &flat_index_buffer_);
+    flat_index_buffer_ = 0;
+    flat_indices_.clear();
 
     if (white_texture_id_ != 0) {
         glDeleteTextures(1, &white_texture_id_);
@@ -219,7 +248,12 @@ void GlGraphicsDevice::clear(bool color, bool depth, bool stencil, f32 r, f32 g,
         glClearColor(r, g, b, a);
         mask |= GL_COLOR_BUFFER_BIT;
     }
+    bool restore_depth_mask = false;
     if (depth) {
+        if (!depth_write_enabled_) {
+            glDepthMask(GL_TRUE);
+            restore_depth_mask = true;
+        }
         glClearDepthf(depth_val);
         mask |= GL_DEPTH_BUFFER_BIT;
     }
@@ -229,6 +263,9 @@ void GlGraphicsDevice::clear(bool color, bool depth, bool stencil, f32 r, f32 g,
     }
     if (mask != 0) {
         glClear(mask);
+    }
+    if (restore_depth_mask) {
+        glDepthMask(GL_FALSE);
     }
 }
 
@@ -253,6 +290,7 @@ void GlGraphicsDevice::set_depth_state(const DepthState& state) {
     } else {
         glDisable(GL_DEPTH_TEST);
     }
+    depth_write_enabled_ = state.write_enabled;
     glDepthMask(state.write_enabled ? GL_TRUE : GL_FALSE);
 }
 
@@ -267,6 +305,85 @@ void GlGraphicsDevice::set_cull_mode(CullMode mode) {
 
 void GlGraphicsDevice::set_color_mask(bool r, bool g, bool b, bool a) {
     glColorMask(r ? GL_TRUE : GL_FALSE, g ? GL_TRUE : GL_FALSE, b ? GL_TRUE : GL_FALSE, a ? GL_TRUE : GL_FALSE);
+}
+
+void GlGraphicsDevice::set_polygon_mode(i32 mode) {
+    polygon_mode_ = mode;
+#if !GMRUNNER_USE_GLES3
+    GLenum gl_mode = GL_FILL;
+    if (mode <= 0) gl_mode = GL_POINT;
+    else if (mode == 1) gl_mode = GL_LINE;
+    glPolygonMode(GL_FRONT_AND_BACK, gl_mode);
+#else
+    (void)mode;
+#endif
+}
+
+void GlGraphicsDevice::draw_primitives(PrimitiveTopology topo, i32 count, bool flat, u32 instances,
+                                       u32 index_size, std::span<const u8> index_bytes) {
+    if (count <= 0 || instances == 0 || (index_size != 0 && index_size != 2 && index_size != 4)) return;
+    constexpr GLenum gl_modes[]{GL_POINTS, GL_LINES, GL_LINE_STRIP, GL_TRIANGLES, GL_TRIANGLE_STRIP, GL_TRIANGLE_FAN};
+    GLenum mode = gl_modes[static_cast<usize>(topo)];
+    const bool reorder = caps_.is_gles && flat && topo != PrimitiveTopology::Points;
+    if (reorder) {
+        // ES 3.0/WebGL 2 always shade from the last vertex. Rotate each triangle
+        // without changing its winding and move each line's first endpoint to the end.
+        if (index_size && static_cast<usize>(count) > index_bytes.size() / index_size) return;
+        auto emit = [&](i32 vertex) {
+            u32 index = static_cast<u32>(vertex);
+            if (index_size) {
+                index = 0;
+                std::memcpy(&index, index_bytes.data() + static_cast<usize>(vertex) * index_size, index_size);
+            }
+            flat_indices_.push_back(index);
+        };
+        flat_indices_.clear();
+        if (topo == PrimitiveTopology::Lines || topo == PrimitiveTopology::LineStrip) {
+            mode = GL_LINES;
+            const i32 step = topo == PrimitiveTopology::Lines ? 2 : 1;
+            for (i32 i = 0; i < count - 1; i += step) {
+                emit(i + 1); emit(i);
+            }
+        } else {
+            mode = GL_TRIANGLES;
+            const i32 step = topo == PrimitiveTopology::Triangles ? 3 : 1;
+            for (i32 i = 0; i < count - 2; i += step) {
+                if (topo == PrimitiveTopology::TriangleFan) {
+                    emit(i + 2); emit(0); emit(i + 1);
+                } else if (topo == PrimitiveTopology::TriangleStrip && (i & 1)) {
+                    emit(i + 2); emit(i + 1); emit(i);
+                } else {
+                    emit(i + 1); emit(i + 2); emit(i);
+                }
+            }
+        }
+        if (flat_indices_.empty()) return;
+        if (!flat_index_buffer_) glGenBuffers(1, &flat_index_buffer_);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, flat_index_buffer_);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr>(flat_indices_.size() * sizeof(u32)),
+                     flat_indices_.data(), GL_STREAM_DRAW);
+        index_size = sizeof(u32);
+        count = static_cast<i32>(flat_indices_.size());
+    }
+    if (index_size) {
+        const GLenum type = index_size == 4 ? GL_UNSIGNED_INT : GL_UNSIGNED_SHORT;
+        if (instances == 1) glDrawElements(mode, count, type, nullptr);
+        else glDrawElementsInstanced(mode, count, type, nullptr, static_cast<GLsizei>(instances));
+    } else {
+        if (instances == 1) glDrawArrays(mode, 0, count);
+        else glDrawArraysInstanced(mode, 0, count, static_cast<GLsizei>(instances));
+    }
+    if (reorder) glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+}
+
+void GlGraphicsDevice::set_depth_bias(f32 bias) {
+    if (bias != 0.0f) {
+        glEnable(GL_POLYGON_OFFSET_FILL);
+        glPolygonOffset(0.0f, bias * 65536.0f);
+    } else {
+        glDisable(GL_POLYGON_OFFSET_FILL);
+        glPolygonOffset(0.0f, 0.0f);
+    }
 }
 
 Result<TextureHandle> GlGraphicsDevice::create_texture(const TextureDesc& desc, std::span<const u8> initial_pixels) {
@@ -340,17 +457,46 @@ void GlGraphicsDevice::update_texture(TextureHandle tex, i32 x, i32 y, i32 w, i3
     glBindTexture(GL_TEXTURE_2D, 0);
 }
 
-void GlGraphicsDevice::set_texture_sampler(TextureHandle tex, TextureFilter filter, TextureWrap wrap_u, TextureWrap wrap_v) {
-    if (!tex.valid()) {
+void GlGraphicsDevice::set_texture_sampler(u32 slot, TextureFilter filter, TextureWrap wrap_u, TextureWrap wrap_v) {
+    auto d3d_wrap = [](TextureWrap w) {
+        switch (w) {
+            case TextureWrap::Repeat: return 1;
+            case TextureWrap::MirroredRepeat: return 2;
+            default: return 3;
+        }
+    };
+    set_texture_sampler_ext(slot, filter, d3d_wrap(wrap_u), d3d_wrap(wrap_v), 0);
+}
+
+void GlGraphicsDevice::set_texture_sampler_ext(u32 slot, TextureFilter filter, i32 d3d_wrap_u, i32 d3d_wrap_v, u32 border_bgr) {
+    if (slot >= sampler_ids_.size()) {
         return;
     }
+    auto d3d_to_gl_wrap = [this](i32 mode) noexcept -> GLenum {
+        switch (mode) {
+            case 1: return GL_REPEAT;          // D3DTADDRESS_WRAP
+            case 2: return GL_MIRRORED_REPEAT; // D3DTADDRESS_MIRROR
+            case 3: return GL_CLAMP_TO_EDGE;   // D3DTADDRESS_CLAMP
+            case 4: return border_clamp_supported_ ? kClampToBorder : GL_CLAMP_TO_EDGE;
+            default: return GL_CLAMP_TO_EDGE;
+        }
+    };
     const GLint gl_filter = (filter == TextureFilter::Linear) ? GL_LINEAR : GL_NEAREST;
-    glBindTexture(GL_TEXTURE_2D, tex.id);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, gl_filter);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, gl_filter);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, to_gl_wrap(wrap_u));
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, to_gl_wrap(wrap_v));
-    glBindTexture(GL_TEXTURE_2D, 0);
+    const GLuint sampler = sampler_ids_[slot];
+    glSamplerParameteri(sampler, GL_TEXTURE_MIN_FILTER, gl_filter);
+    glSamplerParameteri(sampler, GL_TEXTURE_MAG_FILTER, gl_filter);
+    glSamplerParameteri(sampler, GL_TEXTURE_WRAP_S, static_cast<GLint>(d3d_to_gl_wrap(d3d_wrap_u)));
+    glSamplerParameteri(sampler, GL_TEXTURE_WRAP_T, static_cast<GLint>(d3d_to_gl_wrap(d3d_wrap_v)));
+    if (border_clamp_supported_ && (d3d_wrap_u == 4 || d3d_wrap_v == 4)) {
+        const f32 bc[4] = {
+            static_cast<f32>(border_bgr & 0xFFu) / 255.0f,
+            static_cast<f32>((border_bgr >> 8u) & 0xFFu) / 255.0f,
+            static_cast<f32>((border_bgr >> 16u) & 0xFFu) / 255.0f,
+            1.0f,
+        };
+        glSamplerParameterfv(sampler, kTextureBorderColor, bc);
+    }
+    glBindSampler(slot, sampler);
 }
 
 void GlGraphicsDevice::bind_texture(u32 slot, TextureHandle tex) {
@@ -409,12 +555,63 @@ Result<FramebufferHandle> GlGraphicsDevice::create_framebuffer(std::span<const T
         return Error{"GlGraphicsDevice::create_framebuffer incomplete framebuffer"};
     }
 
-    framebuffers_[fbo] = FramebufferEntry{fbo, depth_rbo, static_cast<u32>(color_targets.size())};
+    const u32 init_mask = (color_targets.size() >= 32) ? 0xFFFFFFFFu : ((1u << color_targets.size()) - 1u);
+    framebuffers_[fbo] = FramebufferEntry{fbo, depth_rbo, static_cast<u32>(color_targets.size()), init_mask};
     return FramebufferHandle{fbo};
 }
 
 void GlGraphicsDevice::bind_framebuffer(FramebufferHandle fbo) {
     glBindFramebuffer(GL_FRAMEBUFFER, fbo.valid() ? fbo.id : 0u);
+}
+
+void GlGraphicsDevice::set_framebuffer_mrt_target(FramebufferHandle fbo, u32 slot, TextureHandle tex) {
+    if (!fbo.valid() || slot < 1 || slot > 3) return;
+    auto it = framebuffers_.find(fbo.id);
+    if (it == framebuffers_.end()) return;
+
+    GLint prev_fbo = 0;
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prev_fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo.id);
+
+    const GLenum attachment = static_cast<GLenum>(GL_COLOR_ATTACHMENT0 + slot);
+    if (tex.valid()) {
+        glFramebufferTexture2D(GL_FRAMEBUFFER, attachment, GL_TEXTURE_2D, tex.id, 0);
+        it->second.mrt_mask |= (1u << slot);
+    } else {
+        glFramebufferTexture2D(GL_FRAMEBUFFER, attachment, GL_TEXTURE_2D, 0, 0);
+        it->second.mrt_mask &= ~(1u << slot);
+    }
+
+    GLenum bufs[4] = {
+        GL_COLOR_ATTACHMENT0,
+        static_cast<GLenum>((it->second.mrt_mask & 2u) ? GL_COLOR_ATTACHMENT1 : GL_NONE),
+        static_cast<GLenum>((it->second.mrt_mask & 4u) ? GL_COLOR_ATTACHMENT2 : GL_NONE),
+        static_cast<GLenum>((it->second.mrt_mask & 8u) ? GL_COLOR_ATTACHMENT3 : GL_NONE),
+    };
+    const GLsizei count = (it->second.mrt_mask > 1u) ? 4 : 1;
+    glDrawBuffers(count, bufs);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(prev_fbo));
+}
+
+bool GlGraphicsDevice::set_framebuffer_depth_from(FramebufferHandle dst_fbo, FramebufferHandle src_fbo) {
+    if (!dst_fbo.valid() || !src_fbo.valid()) return false;
+    auto dst_it = framebuffers_.find(dst_fbo.id);
+    auto src_it = framebuffers_.find(src_fbo.id);
+    if (dst_it == framebuffers_.end() || src_it == framebuffers_.end() || src_it->second.depth_rbo == 0) {
+        return false;
+    }
+
+    GLint prev_fbo = 0;
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prev_fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, dst_fbo.id);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, src_it->second.depth_rbo);
+    const bool ok = (glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
+    if (!ok && dst_it->second.depth_rbo != 0) {
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, dst_it->second.depth_rbo);
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(prev_fbo));
+    return ok;
 }
 
 void GlGraphicsDevice::destroy_framebuffer(FramebufferHandle fbo) {

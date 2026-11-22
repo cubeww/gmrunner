@@ -35,6 +35,7 @@ public:
     bool matches_dll(std::string_view normalized_dll) const noexcept override {
         return normalized_dll == "gmfmodsimple" ||
                normalized_dll == "gmfmodsimplegrix" ||
+               normalized_dll == "gm82snd" ||
                normalized_dll == "fmodex" ||
                normalized_dll == "fmod";
     }
@@ -64,9 +65,23 @@ public:
         // -------------------------------------------------------------------
         // System lifecycle, errors & password
         // -------------------------------------------------------------------
+        if (fn == "FMOD_Debug_GetLevel") {
+            return RValue(0.0);
+        }
+        if (fn == "FMODGetLastError") {
+            return RValue(static_cast<f64>(last_error_));
+        }
+        if (fn == "FMODGetErrorString") {
+            const i32 err = shim_i32(args, 0, static_cast<i32>(last_error_));
+            return RValue(std::string(err == 0 ? "No errors." : "FMOD error"));
+        }
+
+        // Clear last_error_ before every operational call so gm82snd's
+        // __gm82snd_call() wrapper never observes a stale error code.
+        last_error_ = kFmodOk;
+
         if (fn == "FMODinit") {
             inited_ = true;
-            last_error_ = kFmodOk;
             return RValue(1.0);
         }
         if (fn == "FMODfree") {
@@ -76,16 +91,8 @@ public:
         if (fn == "FMODUpdate" || fn == "FMODUpdateTakeOverWhileLocked" || fn == "FMODUpdateTakeOverDone") {
             return RValue(inited_ ? 1.0 : 0.0);
         }
-        if (fn == "FMODGetLastError") {
-            return RValue(static_cast<f64>(last_error_));
-        }
-        if (fn == "FMODGetErrorString") {
-            const i32 err = shim_i32(args, 0, static_cast<i32>(last_error_));
-            return RValue(std::string(err == 0 ? "No errors." : "FMOD error"));
-        }
         if (fn == "FMODSetPassword") {
             password_ = shim_str(args, 0);
-            last_error_ = kFmodOk;
             return RValue(1.0);
         }
         if (fn == "FMODSetResampler") {
@@ -122,7 +129,8 @@ public:
         if (fn == "FMODSoundAdd" || fn == "FMODSoundAddAsyncStream") {
             const std::string path = shim_str(args, 0);
             const bool is_3d = shim_bool(args, 1, false);
-            const bool streamed = (fn == "FMODSoundAddAsyncStream") ? true : shim_bool(args, 2, false);
+            // gm82snd passes mode=2 for FMOD_CREATECOMPRESSEDSAMPLE (in-memory); only mode=1 is streamed.
+            const bool streamed = (fn == "FMODSoundAddAsyncStream") ? true : (shim_i32(args, 2, 0) == 1);
 
             auto raw_res = host.ext_vfs().read_all_bytes(path);
             if (!raw_res) {
