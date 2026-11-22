@@ -22,7 +22,6 @@ namespace gm {
 namespace {
 
 constexpr usize kMaxBatchVertices = 16384;
-constexpr usize kVboRingVertices = 65536;
 
 // Minimal 8x8 ASCII 32..127 bitmap font for GM8 default font (-1).
 // Compact 8-byte-per-glyph table covering space through '~'.
@@ -544,9 +543,6 @@ void main() {
     glGenBuffers(1, &vbo_);
     glBindVertexArray(vao_);
     glBindBuffer(GL_ARRAY_BUFFER, vbo_);
-    vbo_capacity_verts_ = kVboRingVertices;
-    vbo_write_offset_ = 0;
-    glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(vbo_capacity_verts_ * sizeof(Vertex3D)), nullptr, GL_STREAM_DRAW);
 
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex3D), reinterpret_cast<const void*>(offsetof(Vertex3D, x)));
@@ -579,8 +575,6 @@ Result<void> Renderer2D::reload_gpu_resources(const GameData& game) {
     // Clear stale GPU IDs without calling glDelete* on a lost GL context.
     vao_ = 0;
     vbo_ = 0;
-    vbo_capacity_verts_ = 0;
-    vbo_write_offset_ = 0;
     shader_ = {};
     builtin_font_tex_ = {};
     screen_fbo_ = {};
@@ -1294,28 +1288,9 @@ void Renderer2D::flush() {
     glBindBuffer(GL_ARRAY_BUFFER, vbo_);
     const usize count = vertices_.size();
     const auto bytes = static_cast<GLsizeiptr>(count * sizeof(Vertex3D));
-    i32 first_vertex = 0;
-    if (count > vbo_capacity_verts_) {
-        // An immediate strip or fan larger than the ring must grow the buffer once.
-        vbo_capacity_verts_ = count;
-        vbo_write_offset_ = 0;
-        glBufferData(GL_ARRAY_BUFFER, bytes, vertices_.data(), GL_STREAM_DRAW);
-    } else {
-        if (vbo_write_offset_ + count > vbo_capacity_verts_) {
-            // Orphan the streaming VBO to avoid synchronizing against in-flight GPU draws.
-            glBufferData(GL_ARRAY_BUFFER,
-                         static_cast<GLsizeiptr>(vbo_capacity_verts_ * sizeof(Vertex3D)),
-                         nullptr,
-                         GL_STREAM_DRAW);
-            vbo_write_offset_ = 0;
-        }
-        first_vertex = static_cast<i32>(vbo_write_offset_);
-        const auto byte_offset = static_cast<GLintptr>(vbo_write_offset_ * sizeof(Vertex3D));
-        glBufferSubData(GL_ARRAY_BUFFER, byte_offset, bytes, vertices_.data());
-        vbo_write_offset_ += count;
-    }
-    device_->draw_primitives(batch_topo_, static_cast<i32>(count), d3d_flat_shading_ && !used_custom_shader,
-                             1, 0, {}, first_vertex);
+    // Give each batch a fresh data store so earlier draws can finish independently.
+    glBufferData(GL_ARRAY_BUFFER, bytes, vertices_.data(), GL_STREAM_DRAW);
+    device_->draw_primitives(batch_topo_, static_cast<i32>(count), d3d_flat_shading_ && !used_custom_shader);
     glBindVertexArray(0);
 
     vertices_.clear();

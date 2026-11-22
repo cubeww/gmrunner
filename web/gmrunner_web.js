@@ -545,6 +545,14 @@
         const folderInput = document.getElementById("input-folder");
         const fileInput = document.getElementById("input-file");
         const dropZone = document.getElementById("drop-zone");
+        const canvas = Module.canvas;
+
+        // SDL handles canvas touches via pointer events. Let Chrome skip its
+        // default tap handling, which can delay game frames while a finger is down.
+        canvas.addEventListener("touchstart", (ev) => {
+            if (ev.cancelable) ev.preventDefault();
+            if (document.activeElement !== canvas) canvas.focus({ preventScroll: true });
+        }, { passive: false });
 
         const openFolder = () => folderInput && folderInput.click();
         const openFile = () => fileInput && fileInput.click();
@@ -590,7 +598,6 @@
         });
 
         document.getElementById("btn-fullscreen")?.addEventListener("click", () => {
-            const canvas = document.getElementById("canvas");
             if (!document.fullscreenElement) {
                 (canvas?.requestFullscreen || dropZone?.requestFullscreen)?.call(canvas || dropZone);
             } else {

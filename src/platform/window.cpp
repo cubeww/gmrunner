@@ -477,6 +477,10 @@ std::string_view PlatformWindow::title() const noexcept {
 
 void PlatformWindow::set_size(i32 width, i32 height) {
     if (!window_) return;
+#if defined(__EMSCRIPTEN__)
+    // CSS owns the mobile drawable size. Game window sizes apply to its logical region.
+    if (is_mobile_touch_platform()) return;
+#endif
     if (fullscreen_ || pending_windowed_size_) {
         pending_windowed_size_.emplace(width, height);
         return;
@@ -888,6 +892,11 @@ void PlatformWindow::set_text_input(bool enabled) {
 bool PlatformWindow::is_mobile_touch_platform() noexcept {
 #if defined(__ANDROID__)
     return true;
+#elif defined(__EMSCRIPTEN__)
+    static const bool mobile = EM_ASM_INT({
+        return window.matchMedia("(pointer: coarse)").matches;
+    }) != 0;
+    return mobile;
 #else
     return false;
 #endif

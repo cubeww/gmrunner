@@ -381,8 +381,6 @@ private:
 
     u32 vao_ = 0;
     u32 vbo_ = 0;
-    usize vbo_capacity_verts_ = 0;
-    usize vbo_write_offset_ = 0;
     ShaderHandle shader_;
     struct FfUniformCache {
         bool valid = false;

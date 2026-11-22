@@ -1142,8 +1142,9 @@ void Runner::register_builtins_gameplay() {
     register_builtin("keyboard_check_released", [](Runner& r, i32, i32, std::span<const RValue> a) {
         return RValue(check_key_array(r.window().input().key_released, arg_i32(a, 0)));
     });
-    register_builtin("keyboard_check_direct", [](Runner&, i32, i32, std::span<const RValue> a) {
-        return RValue(PlatformWindow::keyboard_check_direct(arg_i32(a, 0)));
+    register_builtin("keyboard_check_direct", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        const i32 key = arg_i32(a, 0);
+        return RValue(PlatformWindow::keyboard_check_direct(key) || r.touch_overlay_.key_down(key));
     });
     register_builtin("keyboard_clear", [](Runner& r, i32, i32, std::span<const RValue> a) {
         const i32 k = arg_i32(a, 0);

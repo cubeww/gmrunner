@@ -25,6 +25,9 @@ public:
 
     void set_enabled(bool enabled) noexcept;
     [[nodiscard]] bool is_enabled() const noexcept { return enabled_; }
+    [[nodiscard]] bool key_down(i32 key) const noexcept {
+        return enabled_ && key > 0 && key < static_cast<i32>(active_vkeys_.size()) && active_vkeys_[key];
+    }
     void set_controls_visible(bool visible) noexcept { controls_visible_ = visible; }
     [[nodiscard]] bool controls_visible() const noexcept { return controls_visible_; }
 

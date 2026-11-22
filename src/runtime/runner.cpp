@@ -530,8 +530,12 @@ void Runner::start_room(i32 room_id, bool is_game_start) {
     // GM8 sets the room's screen region before instance creation code, including on re-entry.
     i32 vx, vy, vw, vh, cw, ch;
     room_canvas_size(cw, ch);
-    cw = std::min(cw, window_.display_width());
-    ch = std::min(ch, window_.display_height());
+    // On phones the logical game region can be larger than the display in either axis.
+    // Keep its dimensions intact and fit it when presenting to the drawable.
+    if (!PlatformWindow::is_mobile_touch_platform()) {
+        cw = std::min(cw, window_.display_width());
+        ch = std::min(ch, window_.display_height());
+    }
     if (!window_fixed_ && (cw != window_region_w_ || ch != window_region_h_)) {
         window_region_w_ = cw;
         window_region_h_ = ch;
@@ -1356,7 +1360,7 @@ void Runner::compute_canvas_viewport(i32& out_vx, i32& out_vy, i32& out_vw, i32&
     const i32 dh = std::max(1, window_.drawable_height());
 
     i32 vw = dw, vh = dh;
-    if (window_region_scale_ < 0.0) {
+    if (PlatformWindow::is_mobile_touch_platform() || window_region_scale_ < 0.0) {
         const f64 scale = std::min(static_cast<f64>(dw) / cw, static_cast<f64>(dh) / ch);
         vw = scaled_extent(cw, scale);
         vh = scaled_extent(ch, scale);
