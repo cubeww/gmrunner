@@ -5,6 +5,7 @@
 #include "graphics/renderer2d.h"
 #include "loader/game_data.h"
 
+#include <array>
 #include <unordered_map>
 #include <vector>
 
@@ -45,6 +46,7 @@ struct LiveParticle {
     u32 color = 0xFFFFFFu;
     f64 alpha = 1.0;
     i32 age = 0, life = 60;
+    i32 phase = 0;
     f64 subimg = 0.0;
     bool alive = true;
 };
@@ -169,7 +171,8 @@ public:
     void changer_types(i32 ps, i32 ch, i32 pt1, i32 pt2);
 
     // Simple GM8 effect_create_below / effect_create_above / effect_clear
-    void effect_create(bool above, i32 kind, f64 x, f64 y, i32 size, u32 color);
+    void effect_create(bool above, i32 kind, f64 x, f64 y, i32 size, u32 color,
+                       f64 speed_factor, i32 room_width, i32 room_height);
     void effect_clear();
 
     void update_all();
@@ -189,7 +192,7 @@ private:
     i32 next_type_id_ = 0;
     i32 effect_sys_below_ = -1;
     i32 effect_sys_above_ = -1;
-    i32 effect_type_ = -1;
+    i32 effect_type_base_ = -1;
     GmlRandom& rng_;
 };
 

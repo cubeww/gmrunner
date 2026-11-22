@@ -16,6 +16,7 @@ const char* opcode_name(OpCode op) noexcept {
         case OpCode::Swap:                 return "SWAP";
         case OpCode::DupN:                 return "DUP_N";
         case OpCode::Pop:                  return "POP";
+        case OpCode::SaveResult:           return "SAVE_RESULT";
         case OpCode::LoadTemp:             return "LOAD_TEMP";
         case OpCode::StoreTemp:            return "STORE_TEMP";
         case OpCode::DeclareGlobal:        return "DECLARE_GLOBAL";

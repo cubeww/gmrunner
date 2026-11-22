@@ -46,6 +46,7 @@ struct Dx9DclSemantic {
     u8 usage_index = 0; // 0..15
     u16 reg_num = 0;    // vN or oN
     u8 write_mask = 0xF;
+    i32 attrib_location = -1;
 };
 
 struct Dx9ParsedShader {

@@ -127,6 +127,11 @@ public:
     [[nodiscard]] u64 target_frame_us() const noexcept {
         return static_cast<u64>(1000000.0 / static_cast<f64>(room_speed()));
     }
+    [[nodiscard]] f64 effect_speed_factor() const noexcept {
+        const i32 speed = room_speed();
+        if (speed <= 30 || fps_ <= 30) return 1.0;
+        return 30.0 / (static_cast<f64>(speed) / fps_ < 1.2 ? speed : fps_);
+    }
 
     // Executes one full GM8 frame (events, physics, collisions, render, swap).
     void tick_frame();

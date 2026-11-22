@@ -852,6 +852,30 @@ i32 parse_d3d9_shader(
         return -3;
     }
 
+    if (expected_stage == Dx9ShaderStage::Vertex) {
+        std::array<bool, 16> occupied{};
+        for (auto& input : out_shader.inputs) {
+            const i32 loc = dx9_semantic_to_attrib_location(input.usage, input.usage_index);
+            if (loc >= 0 && !occupied[loc]) {
+                input.attrib_location = loc;
+                occupied[loc] = true;
+            }
+        }
+        // Additional semantics (e.g. POSITION1 for instancing) share the
+        // remaining locations with the corresponding vertex declaration.
+        for (auto& input : out_shader.inputs) {
+            if (input.attrib_location >= 0) continue;
+            auto slot = std::find(occupied.begin() + 4, occupied.end(), false);
+            if (slot == occupied.end()) slot = std::find(occupied.begin(), occupied.end(), false);
+            if (slot == occupied.end()) {
+                if (out_error) *out_error = "Too many vertex inputs";
+                return -3;
+            }
+            input.attrib_location = static_cast<i32>(slot - occupied.begin());
+            *slot = true;
+        }
+    }
+
     // Clamp max constant counts to D3D9 hardware limits.
     const u32 max_c_cap = (expected_stage == Dx9ShaderStage::Vertex) ? 256u : 224u;
     if (out_shader.max_const_f > max_c_cap) out_shader.max_const_f = max_c_cap;
@@ -876,7 +900,7 @@ Result<std::string> transpile_d3d9_to_glsl(
     for (const auto& d : sh.inputs) {
         const std::string sem = dx9_semantic_name(d.usage, d.usage_index);
         if (is_vs) {
-            const i32 loc = dx9_semantic_to_attrib_location(d.usage, d.usage_index);
+            const i32 loc = d.attrib_location;
             if (loc >= 0) {
                 const std::string var = "a_v" + std::to_string(d.reg_num);
                 io_ss << "layout(location = " << loc << ") in vec4 " << var << ";\n";
@@ -1346,7 +1370,8 @@ Result<std::string> transpile_d3d9_to_glsl(
 
     // Runtime uniforms
     if (is_vs) {
-        out << "uniform float u_gm_yflip;\n";
+        out << "uniform float u_gm_yflip;\n"
+            << "uniform vec2 u_pixel_center_offset;\n";
     } else {
         out << "uniform float u_gm_yflip;\n"
             << "uniform vec4 u_gm_viewport;\n"
@@ -1418,8 +1443,9 @@ Result<std::string> transpile_d3d9_to_glsl(
 
     if (is_vs) {
         // Renderer2D projection matrices already map Z into OpenGL [-w, +w] clip space;
-        // apply only FBO Y-flip so D3D matrices stay unflipped for shader math and queries.
-        out << "    gl_Position = vec4(o_pos.x, o_pos.y * u_gm_yflip, o_pos.z, o_pos.w);\n";
+        // Keep rasterization adjustments separate from the D3D matrices visible to shaders.
+        out << "    gl_Position = vec4(o_pos.x, o_pos.y * u_gm_yflip, o_pos.z, o_pos.w);\n"
+            << "    gl_Position.xy += u_pixel_center_offset * gl_Position.w;\n";
     } else {
         if (sh.major_version == 1) out << "    o_col0 = r0;\n";
         // D3D9 alpha test still runs after pixel shaders when D3DRS_ALPHATESTENABLE is set.
@@ -1486,6 +1512,7 @@ uniform mat4 u_view;
 uniform mat4 u_proj;
 uniform vec4 u_model_tint;
 uniform float u_gm_yflip;
+uniform vec2 u_pixel_center_offset;
 
 out vec4 v_TEXCOORD0;
 out vec4 v_COLOR0;
@@ -1497,6 +1524,7 @@ void main() {
     vec4 vp = u_view * wp;
     vec4 cp = u_proj * vp;
     gl_Position = vec4(cp.x, cp.y * u_gm_yflip, cp.z, cp.w);
+    gl_Position.xy += u_pixel_center_offset * gl_Position.w;
     v_TEXCOORD0 = ff_texcoord(a_uv.xy, vp.xyz, a_norm.xyz);
     v_COLOR0 = a_col * u_model_tint;
     v_NORMAL0 = vec4(a_norm.xyz, 0.0);

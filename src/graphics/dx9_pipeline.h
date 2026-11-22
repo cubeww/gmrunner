@@ -21,6 +21,7 @@ struct Dx9DrawContext {
     const f32* model_tint = nullptr; // vec4 RGBA
     bool rendering_to_fbo = false;
     ViewportRect viewport{};
+    std::array<f32, 2> pixel_center_offset{};
     bool tex_blending = true;
     i32 texcoord_mode = 0;
     bool alpha_test_enabled = false;
@@ -153,6 +154,7 @@ private:
 
         // Cached uniform locations
         i32 loc_yflip = -1;
+        i32 loc_pixel_center_offset = -1;
         i32 loc_viewport = -1;
         i32 loc_vc = -1;
         i32 loc_vi = -1;

@@ -105,6 +105,8 @@ Result<void> PlatformWindow::create(const WindowConfig& config) {
 }
 
 void PlatformWindow::destroy() noexcept {
+    pending_windowed_size_.reset();
+    pending_windowed_position_.reset();
     if (gl_context_) {
         SDL_GL_DestroyContext(gl_context_);
         gl_context_ = nullptr;
@@ -362,28 +364,45 @@ std::string_view PlatformWindow::title() const noexcept {
 }
 
 void PlatformWindow::set_size(i32 width, i32 height) {
-    if (window_) {
-        SDL_SetWindowSize(window_, width, height);
+    if (!window_) return;
+    if (fullscreen_ || pending_windowed_size_) {
+        pending_windowed_size_.emplace(width, height);
+        return;
     }
+    SDL_SetWindowSize(window_, width, height);
 }
 
 void PlatformWindow::set_position(i32 x, i32 y) {
-    if (window_) {
-        SDL_SetWindowPosition(window_, x, y);
+    if (!window_) return;
+    if (!fullscreen_ && pending_windowed_size_) {
+        pending_windowed_position_.emplace(x, y);
+        return;
     }
+    SDL_SetWindowPosition(window_, x, y);
 }
 
 void PlatformWindow::center() {
-    if (window_) {
-        SDL_SetWindowPosition(window_, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
-    }
+    set_position(SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
 }
 
 void PlatformWindow::set_fullscreen(bool fullscreen) {
     if (window_ && fullscreen_ != fullscreen) {
         if (SDL_SetWindowFullscreen(window_, fullscreen)) {
             fullscreen_ = fullscreen;
+            apply_pending_windowed_size();
         }
+    }
+}
+
+void PlatformWindow::apply_pending_windowed_size() {
+    // SDL defers a hidden window's fullscreen transition until it is shown again.
+    if (fullscreen_ || !visible_ || !pending_windowed_size_) return;
+    SDL_SyncWindow(window_);
+    SDL_SetWindowSize(window_, pending_windowed_size_->first, pending_windowed_size_->second);
+    pending_windowed_size_.reset();
+    if (pending_windowed_position_) {
+        set_position(pending_windowed_position_->first, pending_windowed_position_->second);
+        pending_windowed_position_.reset();
     }
 }
 
@@ -428,8 +447,12 @@ void PlatformWindow::set_resizable(bool resizable) {
 void PlatformWindow::set_visible(bool visible) {
     visible_ = visible;
     if (window_) {
-        if (visible) SDL_ShowWindow(window_);
-        else SDL_HideWindow(window_);
+        if (visible) {
+            SDL_ShowWindow(window_);
+            apply_pending_windowed_size();
+        } else {
+            SDL_HideWindow(window_);
+        }
     }
 }
 

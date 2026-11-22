@@ -75,7 +75,7 @@ void ParticleManager::clear_all() {
     next_type_id_ = 0;
     effect_sys_below_ = -1;
     effect_sys_above_ = -1;
-    effect_type_ = -1;
+    effect_type_base_ = -1;
 }
 
 i32 ParticleManager::system_create() {
@@ -148,7 +148,7 @@ void ParticleManager::particles_create(i32 ps, f64 x, f64 y, i32 pt, i32 count, 
         p.y = y;
         p.speed = rand_range(t.speed_min, t.speed_max);
         p.dir = rand_range(t.dir_min, t.dir_max);
-        p.angle = rand_range(t.ang_min, t.ang_max) + (t.ang_relative ? p.dir : 0.0);
+        p.angle = rand_range(t.ang_min, t.ang_max);
         p.life = std::max(1, static_cast<i32>(delphi_round(rand_range(t.life_min, t.life_max))));
         if (t.col_mode == 3) {
             p.color = lerp_bgr(t.col1, t.col2, rand_range(0.0, 1.0));
@@ -169,7 +169,7 @@ void ParticleManager::particles_create(i32 ps, f64 x, f64 y, i32 pt, i32 count, 
         p.alpha = t.alpha1;
         p.size = rand_range(t.size_min, t.size_max);
         if (t.sprite_random) p.subimg = rng_.below(10000);
-        (void)rng_.below(100000); // GM assigns a random wiggle phase even when every wiggle is zero.
+        p.phase = static_cast<i32>(rng_.below(100000));
         sit->second.particles.push_back(p);
     }
 }
@@ -370,7 +370,8 @@ void ParticleManager::changer_types(i32 ps, i32 ch, i32 pt1, i32 pt2) {
         }
 }
 
-void ParticleManager::effect_create(bool above, i32, f64 x, f64 y, i32 size, u32 color) {
+void ParticleManager::effect_create(bool above, i32 kind, f64 x, f64 y, i32 size, u32 color,
+                                    f64 speed_factor, i32 room_width, i32 room_height) {
     if (effect_sys_below_ < 0 || !systems_.contains(effect_sys_below_)) {
         effect_sys_below_ = system_create();
         system_depth(effect_sys_below_, 100000.0);
@@ -379,17 +380,154 @@ void ParticleManager::effect_create(bool above, i32, f64 x, f64 y, i32 size, u32
         effect_sys_above_ = system_create();
         system_depth(effect_sys_above_, -100000.0);
     }
-    if (effect_type_ < 0 || !types_.contains(effect_type_)) {
-        effect_type_ = type_create();
-        auto* t = get_type(effect_type_);
-        t->speed_min = 1.0; t->speed_max = 4.0;
-        t->dir_min = 0.0; t->dir_max = 360.0;
-        t->life_min = 15; t->life_max = 35;
-        t->alpha1 = 1.0; t->alpha2 = 0.0; t->alpha3 = 0.0;
+    // GM allocates all 35 effect types together on the first call. Explosion has
+    // two layers per size, rain and snow one type each, and the others three.
+    if (effect_type_base_ < 0) {
+        effect_type_base_ = type_create();
+        for (int i = 1; i < 35; ++i) type_create();
     }
+    if (kind < 0 || kind > 11) return;
     const i32 ps = above ? effect_sys_above_ : effect_sys_below_;
-    const i32 count = (size == 0) ? 10 : (size == 1 ? 20 : 32);
-    particles_create(ps, x, y, effect_type_, count, true, color);
+    const i32 tier = size == 0 ? 0 : (size == 2 ? 2 : 1);
+    auto pick = [tier](auto small, auto medium, auto large) {
+        return tier == 0 ? small : (tier == 2 ? large : medium);
+    };
+    // Slots within the native effect type block, in ef_* order. The black
+    // explosion layer immediately follows its colored layer. All firework
+    // sizes share the same type, so changing its gravity affects live sparks.
+    static constexpr i32 type_slots[][3] = {
+        {0, 2, 4}, {6, 7, 8}, {9, 10, 11}, {13, 13, 13},
+        {15, 16, 17}, {18, 19, 20}, {21, 22, 23}, {24, 25, 26},
+        {27, 28, 29}, {30, 31, 32}, {33, 33, 33}, {34, 34, 34},
+    };
+    const i32 pt = effect_type_base_ + type_slots[kind][tier];
+    ParticleType preset;
+    auto life = [&](f64 min, f64 max) {
+        preset.life_min = static_cast<i32>(delphi_round(min / speed_factor));
+        preset.life_max = static_cast<i32>(delphi_round(max / speed_factor));
+    };
+    auto fade = [&](f64 from, f64 to) {
+        preset.alpha1 = from;
+        preset.alpha2 = (from + to) * 0.5;
+        preset.alpha3 = to;
+    };
+    auto emit = [&](i32 type, f64 px, f64 py, i32 count, u32 tint) {
+        if (auto* t = get_type(type)) {
+            *t = preset;
+            particles_create(ps, px, py, type, count, true, tint);
+        }
+    };
+
+    switch (kind) {
+        case 0: { // ef_explosion
+            preset.shape = 10;
+            preset.ang_max = preset.dir_max = 360.0;
+            preset.size_min = preset.size_max = pick(0.1, 0.3, 0.4);
+            preset.size_incr = pick(0.05, 0.1, 0.2) * speed_factor;
+            preset.speed_min = preset.speed_max = pick(2.0, 4.0, 7.0) * speed_factor;
+            preset.speed_incr = pick(-0.1, -0.18, -0.2) * speed_factor;
+            const i32 end = pick(15, 17, 20);
+            life(pick(10, 12, 15), end);
+            fade(0.6, 0.0);
+            emit(pt, x, y, 20, color);
+            preset.dir_max = preset.speed_min = preset.speed_max = preset.speed_incr = 0.0;
+            preset.size_incr *= 2.0;
+            life(end, end);
+            fade(0.8, 0.0);
+            emit(pt + 1, x, y, 1, 0);
+            break;
+        }
+        case 1: // ef_ring
+        case 2: // ef_ellipse
+            preset.shape = 6;
+            preset.yscale = kind == 1 ? 1.0 : 0.5;
+            preset.size_min = preset.size_max = 0.0;
+            preset.size_incr = (kind == 1 ? pick(0.15, 0.25, 0.4) : pick(0.2, 0.35, 0.6)) * speed_factor;
+            life(pick(10, 13, 18), pick(12, 15, 20));
+            fade(1.0, 0.0);
+            emit(pt, x, y, 1, color);
+            break;
+        case 3: // ef_firework
+            preset.shape = 8;
+            preset.size_min = 0.1;
+            preset.size_max = 0.2;
+            preset.speed_min = 0.5 * speed_factor;
+            preset.speed_max = pick(3.0, 6.0, 8.0) * speed_factor;
+            preset.dir_max = 360.0;
+            preset.grav_amount = pick(0.10, 0.15, 0.17) * speed_factor;
+            life(pick(15, 20, 30), pick(25, 30, 40));
+            fade(1.0, 0.4);
+            emit(pt, x, y, pick(75, 150, 250), color);
+            break;
+        case 4: // ef_smoke
+        case 5: { // ef_smokeup
+            preset.shape = 10;
+            preset.size_min = pick(0.2, 0.4, 0.4);
+            preset.size_max = pick(0.4, 0.7, 1.0);
+            preset.size_incr = -0.01 * speed_factor;
+            if (kind == 5) {
+                preset.speed_min = pick(3.0, 5.0, 6.0) * speed_factor;
+                preset.speed_max = pick(4.0, 6.0, 7.0) * speed_factor;
+                preset.dir_min = preset.dir_max = 90.0;
+            }
+            const i32 duration = pick(25, 30, 50);
+            life(duration, duration);
+            fade(0.4, 0.0);
+            const i32 spread = pick(5, 15, 30);
+            const u32 span = static_cast<u32>(spread * 2);
+            for (i32 i = 0; i < pick(6, 11, 16); ++i) {
+                const f64 px = x - spread + rng_.below(span);
+                const f64 py = y - spread + rng_.below(span);
+                emit(pt, px, py, 1, color);
+            }
+            break;
+        }
+        case 6: // ef_star
+        case 7: // ef_spark
+        case 8: { // ef_flare
+            preset.shape = kind == 6 ? 4 : (kind == 7 ? 9 : 8);
+            preset.size_min = preset.size_max = pick(0.4, 0.75, 1.2);
+            preset.size_incr = pick(-0.02, -0.03, -0.04) * speed_factor;
+            preset.ang_max = 360.0;
+            const i32 duration = pick(20, 25, 30);
+            life(duration, duration);
+            emit(pt, x, y, 1, color);
+            break;
+        }
+        case 9: // ef_cloud
+            preset.shape = 10;
+            preset.size_min = preset.size_max = pick(2.0, 4.0, 8.0);
+            preset.yscale = 0.5;
+            preset.alpha1 = preset.alpha3 = 0.0;
+            preset.alpha2 = 0.3;
+            life(100, 100);
+            emit(pt, x, y, 1, color);
+            break;
+        case 10: // ef_rain
+        case 11: { // ef_snow
+            const bool rain = kind == 10;
+            preset.shape = rain ? 3 : 13;
+            preset.size_min = rain ? 0.2 : 0.1;
+            preset.size_max = rain ? 0.3 : 0.25;
+            preset.ang_relative = rain;
+            preset.ang_max = rain ? 0.0 : 360.0;
+            preset.speed_min = (rain ? 7.0 : 2.5) * speed_factor;
+            preset.speed_max = (rain ? 7.0 : 3.0) * speed_factor;
+            preset.dir_min = rain ? 260.0 : 240.0;
+            preset.dir_max = rain ? 260.0 : 300.0;
+            preset.dir_wiggle = rain ? 0.0 : 20.0;
+            preset.alpha1 = preset.alpha2 = preset.alpha3 = rain ? 0.4 : 0.6;
+            const f64 duration = (rain ? 0.2 : 0.5) * room_height;
+            life(duration, duration);
+            const i32 count = rain ? pick(2, 5, 9) : pick(1, 3, 7);
+            for (i32 i = 0; i < count; ++i) {
+                const f64 px = rand_range(0.0, 1.2 * room_width) - (rain ? 0.0 : 60.0);
+                const f64 py = -30.0 + rng_.below(20);
+                emit(pt, px, py, 1, color);
+            }
+            break;
+        }
+    }
 }
 
 void ParticleManager::effect_clear() {
@@ -422,7 +560,7 @@ void ParticleManager::update_system(i32 ps) {
         const auto tit = types_.find(p.type_id);
         if (tit == types_.end()) continue;
         const auto& t = tit->second;
-        p.speed += t.speed_incr;
+        p.speed = std::max(0.0, p.speed + t.speed_incr);
         p.dir += t.dir_incr;
         p.size = std::max(0.0, p.size + t.size_incr);
         p.angle += t.ang_incr;
@@ -464,6 +602,14 @@ void ParticleManager::update_system(i32 ps) {
 
         p.speed = std::hypot(vx, vy);
         p.dir = rad_to_deg(std::atan2(-vy, vx));
+        if (t.dir_wiggle != 0.0 || t.speed_wiggle != 0.0) {
+            const f64 dir_phase = ((3 * p.phase + p.age) % 24) / 6.0;
+            const f64 speed_phase = ((4 * p.phase + p.age) % 20) / 5.0;
+            const f64 direction = deg_to_rad(p.dir + (1.0 - std::abs(dir_phase - 2.0)) * t.dir_wiggle);
+            const f64 speed = p.speed + (1.0 - std::abs(speed_phase - 2.0)) * t.speed_wiggle;
+            vx = speed * std::cos(direction);
+            vy = -speed * std::sin(direction);
+        }
         p.x += vx;
         p.y += vy;
 
@@ -523,6 +669,8 @@ void ParticleManager::draw_system(i32 ps, Renderer2D& renderer, const GameData& 
     if (sit == systems_.end()) return;
     const auto& sys = sit->second;
 
+    const bool previous_filter = renderer.interpolation();
+    renderer.set_interpolation(true);
     const usize n = sys.particles.size();
     for (usize idx = 0; idx < n; ++idx) {
         const auto& p = sys.particles[sys.old_to_new ? idx : (n - 1u - idx)];
@@ -534,18 +682,21 @@ void ParticleManager::draw_system(i32 ps, Renderer2D& renderer, const GameData& 
 
         const f32 px = static_cast<f32>(sys.x + p.x);
         const f32 py = static_cast<f32>(sys.y + p.y);
+        const f32 angle = static_cast<f32>(p.angle + (t.ang_relative ? p.dir : 0.0));
         if (t.sprite_index >= 0) {
             renderer.draw_sprite_ext(
                 game, t.sprite_index, static_cast<i32>(p.subimg),
                 px, py,
                 static_cast<f32>(p.size * t.xscale), static_cast<f32>(p.size * t.yscale),
-                static_cast<f32>(p.angle), p.color, static_cast<f32>(p.alpha));
+                angle, p.color, static_cast<f32>(p.alpha));
         } else {
-            const f32 r = std::max(1.0f, static_cast<f32>(p.size * 4.0));
-            renderer.draw_circle_color(px, py, r, p.color, p.color, false, static_cast<f32>(p.alpha));
+            renderer.draw_particle_shape(t.shape, px, py,
+                static_cast<f32>(p.size * t.xscale), static_cast<f32>(p.size * t.yscale),
+                angle, p.color, static_cast<f32>(p.alpha));
         }
         if (t.additive) renderer.set_blend_mode(0);
     }
+    renderer.set_interpolation(previous_filter);
 }
 
 std::vector<std::pair<i32, f64>> ParticleManager::auto_draw_systems() const {

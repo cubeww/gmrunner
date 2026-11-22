@@ -374,6 +374,7 @@ layout(location = 3) in vec4 a_col;
 uniform mat4 u_world;
 uniform mat4 u_view;
 uniform mat4 u_proj;
+uniform vec2 u_pixel_center_offset;
 uniform mat3 u_normal_mat;
 uniform vec4 u_model_tint;
 
@@ -444,6 +445,7 @@ void main() {
     v_col_smooth = lit_col;
     v_col_flat = lit_col;
     gl_Position = u_proj * view_pos;
+    gl_Position.xy += u_pixel_center_offset * gl_Position.w;
 }
 )";
 
@@ -506,6 +508,7 @@ void main() {
     loc_world_ = glGetUniformLocation(shader_.id, "u_world");
     loc_view_ = glGetUniformLocation(shader_.id, "u_view");
     loc_proj_ = glGetUniformLocation(shader_.id, "u_proj");
+    loc_pixel_center_offset_ = glGetUniformLocation(shader_.id, "u_pixel_center_offset");
     loc_normal_mat_ = glGetUniformLocation(shader_.id, "u_normal_mat");
     loc_model_tint_ = glGetUniformLocation(shader_.id, "u_model_tint");
     loc_tex_ = glGetUniformLocation(shader_.id, "u_tex");
@@ -583,6 +586,8 @@ void Renderer2D::shutdown() noexcept {
         for (auto t : sp.subimages) device_->destroy_texture(t);
     }
     sprites_.clear();
+    for (auto tex : particle_shapes_) device_->destroy_texture(tex);
+    particle_shapes_.fill({});
 
     for (auto t : backgrounds_) device_->destroy_texture(t);
     backgrounds_.clear();
@@ -648,6 +653,17 @@ void Renderer2D::create_builtin_font_texture() {
 
 void Renderer2D::upload_game_assets(const GameData& game) {
     recorded_d3d_ = game.meta.detected_version == VersionMode::GM81 || game.meta.detected_version == VersionMode::GM82;
+    for (usize i = 0; i < game.particle_shapes.size(); ++i) {
+        auto& tex = particle_shapes_[i];
+        device_->destroy_texture(tex);
+        tex = {};
+        const auto& shape = game.particle_shapes[i];
+        if (shape.bgra.empty()) continue;
+        TextureDesc desc{};
+        desc.width = shape.width;
+        desc.height = shape.height;
+        if (auto res = device_->create_texture(desc, shape.bgra); res) tex = res.value();
+    }
     sprites_.resize(game.sprites.size());
     for (usize i = 0; i < game.sprites.size(); ++i) {
         if (game.sprites[i].exists) {
@@ -991,6 +1007,16 @@ void Renderer2D::present_screen(u32 border_color_bgr) {
 }
 
 void Renderer2D::set_screen_region(i32 backbuffer_w, i32 backbuffer_h, i32 width, i32 height, const ViewportRect& viewport) {
+    // Room creation code can draw and present before the next screen pass.
+    if (using_screen_fbo_ && (screen_fbo_w_ != width || screen_fbo_h_ != height)) {
+        flush();
+        using_screen_fbo_ = ensure_screen_fbo(width, height);
+        bind_active_target_fbo();
+        if (active_surface_id_ < 0) {
+            active_fbo_has_ext_mrt_ = false;
+            active_fbo_has_custom_depth_ = false;
+        }
+    }
     backbuffer_w_ = std::max(1, backbuffer_w);
     backbuffer_h_ = std::max(1, backbuffer_h);
     screen_w_ = width;
@@ -1047,6 +1073,7 @@ void Renderer2D::upload_shader_uniforms(const f32 tint_rgba[4]) {
     glUniformMatrix4fv(loc_world_, 1, GL_FALSE, world_matrix_);
     glUniformMatrix4fv(loc_view_, 1, GL_FALSE, view_matrix_);
     glUniformMatrix4fv(loc_proj_, 1, GL_FALSE, gl_proj);
+    glUniform2fv(loc_pixel_center_offset_, 1, pixel_center_offset_.data());
     glUniformMatrix3fv(loc_normal_mat_, 1, GL_FALSE, normal_mat);
     glUniform4fv(loc_model_tint_, 1, tint_rgba);
     glUniform1i(loc_tex_, 0);
@@ -1117,6 +1144,7 @@ Dx9DrawContext Renderer2D::make_dx9_draw_context(const f32 tint_rgba[4]) const n
     ctx.model_tint = tint_rgba;
     ctx.rendering_to_fbo = rendering_to_fbo();
     ctx.viewport = active_viewport_;
+    ctx.pixel_center_offset = pixel_center_offset_;
     ctx.tex_blending = tex_blending_;
     ctx.texcoord_mode = texcoord_mode_;
     ctx.alpha_test_enabled = alpha_test_explicit_ || (d3d_active_ && d3d_hidden_);
@@ -1389,6 +1417,14 @@ void Renderer2D::push_quad(
     f32 x1, f32 y1, f32 u1, f32 v1, ColorRGBA c1,
     f32 x2, f32 y2, f32 u2, f32 v2, ColorRGBA c2,
     f32 x3, f32 y3, f32 u3, f32 v3, ColorRGBA c3) {
+    // GM's textured 2D quads set ADDRESSU/V to CLAMP on the device without changing the GML repeat flag.
+    if (tex.valid() && tex != screen_fbo_tex_) {
+        const auto& sampler = dx9_.ps_sampler(0);
+        if (sampler.has_explicit_wrap ? (sampler.wrap_u != 3 || sampler.wrap_v != 3) : tex_repeat_) {
+            flush();
+            dx9_.set_ps_sampler_wrap(0, 3, 3, sampler.border_bgr);
+        }
+    }
     ensure_batch(PrimitiveTopology::Triangles, tex);
     vertices_.push_back(Vertex3D{x0, y0, current_draw_z_, 0.0f, 0.0f, 0.0f, u0, v0, c0.r, c0.g, c0.b, c0.a});
     vertices_.push_back(Vertex3D{x1, y1, current_draw_z_, 0.0f, 0.0f, 0.0f, u1, v1, c1.r, c1.g, c1.b, c1.a});
@@ -1845,6 +1881,18 @@ TextureHandle Renderer2D::surface_texture(i32 surf_id) const noexcept {
     return it != surfaces_.end() ? it->second.texture : TextureHandle{};
 }
 
+void Renderer2D::draw_particle_shape(i32 shape, f32 x, f32 y, f32 xscale, f32 yscale, f32 rot_deg,
+                                     u32 color_bgr, f32 alpha) {
+    if (shape < 0 || static_cast<usize>(shape) >= particle_shapes_.size()) return;
+    const auto tex = particle_shapes_[static_cast<usize>(shape)];
+    if (!tex.valid()) {
+        draw_circle_color(x, y, std::max(1.0f, xscale * 4.0f), color_bgr, color_bgr, false, alpha);
+        return;
+    }
+    const f32 hw = 32.0f * xscale, hh = 32.0f * yscale;
+    draw_texture_ext(tex, x, y, -hw, -hh, hw, hh, rot_deg, color_bgr, alpha);
+}
+
 void Renderer2D::draw_sprite_ext(
     const GameData& game, i32 sprite_id, i32 subimg,
     f32 x, f32 y, f32 xscale, f32 yscale, f32 rot_deg, u32 color_bgr, f32 alpha) {
@@ -1859,6 +1907,11 @@ void Renderer2D::draw_sprite_ext(
     const f32 lx1 = static_cast<f32>(sp.width - sp.origin_x) * xscale;
     const f32 ly1 = static_cast<f32>(sp.height - sp.origin_y) * yscale;
 
+    draw_texture_ext(tex, x, y, lx0, ly0, lx1, ly1, rot_deg, color_bgr, alpha);
+}
+
+void Renderer2D::draw_texture_ext(TextureHandle tex, f32 x, f32 y, f32 lx0, f32 ly0, f32 lx1, f32 ly1,
+                                  f32 rot_deg, u32 color_bgr, f32 alpha) {
     const ColorRGBA col = make_vertex_color(color_bgr, alpha);
     if (std::fabs(rot_deg) < 1e-5f) {
         push_quad(tex,
@@ -1873,8 +1926,9 @@ void Renderer2D::draw_sprite_ext(
     const f32 c = std::cos(rad);
     const f32 s = std::sin(rad);
     auto xf = [&](f32 lx, f32 ly, f32& ox, f32& oy) {
-        ox = x + lx * c + ly * s;
-        oy = y - lx * s + ly * c;
+        // GM offsets sprite vertices by half a pixel before rotating them.
+        ox = x + 0.5f + (lx - 0.5f) * c + (ly - 0.5f) * s;
+        oy = y + 0.5f - (lx - 0.5f) * s + (ly - 0.5f) * c;
     };
 
     f32 x0, y0, x1, y1, x2, y2, x3, y3;
@@ -2083,6 +2137,13 @@ f32 Renderer2D::current_font_line_height(const GameData& game) const {
     return 12.0f;
 }
 
+u32 Renderer2D::font_codepage(const GameData& game) const noexcept {
+    const u32 ansi = system_ansi_codepage();
+    if (draw_font_ < 0 || static_cast<usize>(draw_font_) >= game.fonts.size() || using_sprite_font()) return ansi;
+    const auto& font = game.fonts[static_cast<usize>(draw_font_)];
+    return font.exists ? gdi_charset_to_codepage(font.charset, ansi) : ansi;
+}
+
 f32 Renderer2D::measure_single_line_width(const GameData& game, std::string_view line) const {
     f32 width = 0.0f;
     if (draw_font_ >= 0 && static_cast<usize>(draw_font_) < fonts_.size()) {
@@ -2125,6 +2186,18 @@ std::vector<std::string> Renderer2D::split_gm_lines(const GameData& game, std::s
         }
     }
     hard_lines.push_back(std::move(cur));
+
+    // GM8.1+ converts each Unicode line to the selected font's byte-indexed glyphs.
+    if (game.meta.encoding == EncodingMode::Utf8) {
+        const u32 codepage = font_codepage(game);
+        for (auto& line : hard_lines) {
+            const auto nul = line.find('\0');
+            if (nul != std::string::npos) line.resize(nul);
+            if (std::ranges::any_of(line, [](char ch) { return static_cast<u8>(ch) >= 0x80; })) {
+                line = utf8_to_codepage(line, codepage);
+            }
+        }
+    }
 
     if (max_w < 0.0f) {
         return hard_lines;
@@ -3062,9 +3135,14 @@ void Renderer2D::d3d_model_draw(i32 id, f32 x, f32 y, f32 z, TextureHandle tex) 
         mat4_mul(world_matrix_, saved_world, trans);
     }
 
+    // Model vertices use D3D's integer pixel centers. Shift by half a viewport
+    // pixel after projection so scaling and perspective do not change the offset.
+    pixel_center_offset_ = {1.0f / active_viewport_.width,
+                            (rendering_to_fbo() ? 1.0f : -1.0f) / active_viewport_.height};
     draw_model_bucket(model->triangles, PrimitiveTopology::Triangles, tex);
     draw_model_bucket(model->lines, PrimitiveTopology::Lines, tex);
     draw_model_bucket(model->points, PrimitiveTopology::Points, tex);
+    pixel_center_offset_ = {};
 
     std::memcpy(world_matrix_, saved_world, sizeof(saved_world));
 }

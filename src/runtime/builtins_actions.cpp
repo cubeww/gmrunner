@@ -655,7 +655,7 @@ void Runner::register_builtins_actions() {
         const auto* self = r.find_instance(self_id);
         const f64 bx = (r.action_relative_ && self) ? self->x : 0.0;
         const f64 by = (r.action_relative_ && self) ? self->y : 0.0;
-        r.particles().effect_create(arg_i32(a, 5, 1) != 0, arg_i32(a, 0), bx + arg_real(a, 1), by + arg_real(a, 2), arg_i32(a, 3, 1), static_cast<u32>(arg_i32(a, 4)) & 0xFFFFFFu);
+        r.particles().effect_create(arg_i32(a, 5, 1) != 0, arg_i32(a, 0), bx + arg_real(a, 1), by + arg_real(a, 2), arg_i32(a, 3, 1), static_cast<u32>(arg_i32(a, 4)) & 0xFFFFFFu, r.effect_speed_factor(), r.room_width_, r.room_height_);
         return RValue(0.0);
     });
     register_builtin("action_set_cursor", [](Runner& r, i32, i32, std::span<const RValue> a) {

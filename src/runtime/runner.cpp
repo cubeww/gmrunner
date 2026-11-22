@@ -1291,7 +1291,9 @@ void Runner::set_window_size(i32 width, i32 height) {
         width = std::max(width, scaled_extent(window_region_w_, window_region_scale_));
         height = std::max(height, scaled_extent(window_region_h_, window_region_scale_));
     }
-    if (width != window_.width() || height != window_.height()) window_.set_size(width, height);
+    if (window_.is_fullscreen() || width != window_.width() || height != window_.height()) {
+        window_.set_size(width, height);
+    }
 }
 
 void Runner::adapt_window_to_region(bool adapt) {
@@ -1578,7 +1580,8 @@ void Runner::render_view(i32 /*view_idx*/, f32 vx, f32 vy, f32 vw, f32 vh, f32 a
 
     std::stable_sort(items.begin(), items.end(), [](const RenderItem& a, const RenderItem& b) {
         if (a.depth != b.depth) return a.depth > b.depth;
-        if (a.kind != b.kind) return a.kind < b.kind;
+        // At equal depth GM draws particle systems, then instances, then tiles.
+        if (a.kind != b.kind) return a.kind > b.kind;
         return a.order < b.order;
     });
 

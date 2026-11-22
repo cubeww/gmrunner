@@ -7,12 +7,154 @@
 #include "loader/crypto.h"
 
 #include <algorithm>
+#include <charconv>
 #include <cstdio>
 #include <cstring>
 
 namespace gm {
 
 namespace {
+
+void read_particle_mask(std::span<const u8> data, Bitmap32& shape) {
+    // Delphi TBitmap class/length, followed by a bottom-up, 24-bit BMP.
+    constexpr usize side = 64;
+    constexpr usize pixels = 12 + 54;
+    if (data.size() != pixels + side * side * 3 || std::memcmp(data.data(), "\x07TBitmap", 8) != 0 ||
+        std::memcmp(data.data() + 12, "BM", 2) != 0) return;
+    BinaryReader bmp(data.subspan(12 + 10));
+    if (bmp.read_u32().value() != 54 || bmp.read_u32().value() != 40 ||
+        bmp.read_i32().value() != side || bmp.read_i32().value() != side ||
+        bmp.read_u16().value() != 1 || bmp.read_u16().value() != 24 || bmp.read_u32().value() != 0) return;
+    shape.width = shape.height = side;
+    shape.bgra.assign(side * side * 4, 255);
+    for (usize y = 0; y < side; ++y) {
+        for (usize x = 0; x < side; ++x) {
+            shape.bgra[(y * side + x) * 4 + 3] = data[pixels + ((side - 1 - y) * side + x) * 3];
+        }
+    }
+}
+
+// GM8.0's TLMDImageList stores the particle strip as independently compressed blocks.
+bool unpack_particle_block(std::span<const u8> block, std::vector<u8>& out, usize max_size) {
+    if (block.empty()) return false;
+    if (block.front() == 0x80) {
+        block = block.subspan(1);
+        if (block.size() > max_size - out.size()) return false;
+        out.insert(out.end(), block.begin(), block.end());
+        return true;
+    }
+    const usize start = out.size();
+    usize pos = 1;
+    while (pos < block.size()) {
+        if (block.size() - pos < 2) return false;
+        const u16 flags = (block[pos] << 8) | block[pos + 1];
+        pos += 2;
+        for (u16 bit = 0x8000; bit && pos < block.size(); bit >>= 1) {
+            if ((flags & bit) == 0) {
+                if (out.size() == max_size) return false;
+                out.push_back(block[pos++]);
+                continue;
+            }
+            if (block.size() - pos < 2) return false;
+            const usize distance = (block[pos] << 4) | (block[pos + 1] >> 4);
+            if (distance) {
+                const usize count = (block[pos + 1] & 15) + 3;
+                if (distance > out.size() - start || count > max_size - out.size()) return false;
+                for (usize i = 0; i < count; ++i) out.push_back(out[out.size() - distance]);
+                pos += 2;
+            } else {
+                if (block.size() - pos < 4) return false;
+                const usize count = (block[pos + 1] << 8) + block[pos + 2] + 16;
+                if (count > max_size - out.size()) return false;
+                out.insert(out.end(), count, block[pos + 3]);
+                pos += 4;
+            }
+        }
+    }
+    return true;
+}
+
+void read_particle_strip(std::span<const u8> property, GameData& game) {
+    constexpr usize side = 64, frames = 15, width = side * frames;
+    constexpr usize bmp_size = 54 + width * side * 4;
+    BinaryReader reader(property);
+    auto data = reader.read_length_prefixed_span();
+    if (!data || data.value().size() < 22) return;
+    BinaryReader list(data.value());
+    if (list.read_u8().value() != 1 || list.read_u32().value() != side || list.read_u32().value() != side ||
+        list.read_u32().value() != 4 || list.read_u8().value() != 0 || list.read_u32().value() != frames) return;
+    auto stream = list.read_length_prefixed_span();
+    if (!stream) return;
+    BinaryReader blocks(stream.value());
+    std::vector<u8> bmp;
+    bmp.reserve(bmp_size);
+    while (!blocks.eof()) {
+        auto block = blocks.read_length_prefixed_span();
+        if (!block || !unpack_particle_block(block.value(), bmp, bmp_size)) return;
+    }
+    if (bmp.size() != bmp_size || std::memcmp(bmp.data(), "BM", 2) != 0) return;
+    BinaryReader header(std::span<const u8>(bmp).subspan(10));
+    if (header.read_u32().value() != 54 || header.read_u32().value() != 40 ||
+        header.read_i32().value() != width || header.read_i32().value() != side ||
+        header.read_u16().value() != 1 || header.read_u16().value() != 32 || header.read_u32().value() != 0) return;
+    for (usize i = 0; i < game.particle_shapes.size(); ++i) {
+        auto& shape = game.particle_shapes[i];
+        shape.width = shape.height = side;
+        shape.bgra.assign(side * side * 4, 255);
+        for (usize y = 0; y < side; ++y) {
+            const usize row = (side - 1 - y) * width + (i + 1) * side;
+            for (usize x = 0; x < side; ++x) shape.bgra[(y * side + x) * 4 + 3] = bmp[54 + (row + x) * 4];
+        }
+    }
+}
+
+void read_particle_shapes(std::span<const u8> runner, GameData& game) {
+    // GM8.1/8.2 store pt_shape_* as 64x64 grayscale bitmaps in the Delphi particle form.
+    std::string_view bytes(reinterpret_cast<const char*>(runner.data()), runner.size());
+    const usize form = bytes.find("TPF0\rTParticleForm\fParticleForm");
+    if (form == bytes.npos) return;
+    bytes.remove_prefix(form);
+    constexpr std::string_view list_name = "\rTLMDImageList\x0bPartImages2";
+    if (bytes.substr(0, 1024).find(list_name) != bytes.npos) {
+        constexpr std::string_view property = "\x08Internal\x0a";
+        const usize pos = bytes.substr(0, 1024).find(property);
+        if (pos != bytes.npos) read_particle_strip(runner.subspan(form + pos + property.size()), game);
+        return;
+    }
+    constexpr std::string_view image = "\x06TImage";
+    usize pos = bytes.substr(0, 1024).find(image);
+    if (pos == bytes.npos) return;
+    bytes.remove_prefix(pos);
+    while (bytes.starts_with(image)) {
+        bytes.remove_prefix(image.size());
+        if (bytes.empty()) return;
+        const usize len = static_cast<u8>(bytes.front());
+        bytes.remove_prefix(1);
+        if (bytes.size() < len) return;
+        auto name = bytes.substr(0, len);
+        bytes.remove_prefix(len);
+        constexpr std::string_view prefix = "ParticleBMP";
+        if (!name.starts_with(prefix)) return;
+        name.remove_prefix(prefix.size());
+        i32 number = 0;
+        const auto [end, ec] = std::from_chars(name.data(), name.data() + name.size(), number);
+        if (ec != std::errc{} || end != name.data() + name.size() || number < 2 || number > 15) return;
+
+        constexpr std::string_view picture = "\x0cPicture.Data\x0a";
+        pos = bytes.substr(0, 128).find(picture);
+        if (pos == bytes.npos) return;
+        bytes.remove_prefix(pos + picture.size());
+        BinaryReader property({reinterpret_cast<const u8*>(bytes.data()), bytes.size()});
+        auto data = property.read_length_prefixed_span();
+        if (!data) return;
+        bytes.remove_prefix(property.position());
+        // The two zeroes terminate the component's properties and children.
+        if (!bytes.starts_with(std::string_view("\0\0", 2))) return;
+        bytes.remove_prefix(2);
+
+        read_particle_mask(data.value(), game.particle_shapes[static_cast<usize>(number - 2)]);
+    }
+}
 
 Result<std::vector<u8>> read_optional_bitmap(BinaryReader& r) {
     auto exists_res = r.read_bool32();
@@ -708,8 +850,7 @@ Result<FontData> parse_font_entry(BinaryReader& r, i32) {
 
     const u32 fp = first_packed.value();
     f.first = static_cast<i32>(fp & 0xFFFFu);
-    const u8 charset = static_cast<u8>((fp >> 16u) & 0xFFu);
-    if (charset != 0) f.charset = charset; // A zero packed byte leaves DEFAULT_CHARSET in effect.
+    f.charset = static_cast<u8>((fp >> 16u) & 0xFFu);
     const u8 aa_raw = static_cast<u8>((fp >> 24u) & 0xFFu);
     f.antialias = (aa_raw != 0u) ? static_cast<u8>(aa_raw - 1u) : 3u;
     f.last = last.value();
@@ -1227,6 +1368,9 @@ Result<GameData> ExeLoader::load_from_bytes(std::vector<u8> exe_bytes, const Loa
     GameData game{};
     game.meta.exe_size = exe_bytes.size();
     game.meta.pe_overlay_offset = find_pe_overlay_offset(exe_bytes);
+    if (game.meta.pe_overlay_offset > 0) {
+        read_particle_shapes(std::span<const u8>(exe_bytes).first(game.meta.pe_overlay_offset), game);
+    }
 
     bool is_gm81_family = false;
     usize header_pos = 0;
@@ -1412,6 +1556,13 @@ Result<GameData> ExeLoader::load_from_bytes(std::vector<u8> exe_bytes, const Loa
         game.meta.encoding = (options.version_override == VersionMode::GM80)
                                  ? EncodingMode::LegacyAnsi
                                  : EncodingMode::Utf8;
+    }
+
+    // Only GM8.2 honors an explicitly packed ANSI_CHARSET (zero).
+    if (game.meta.detected_version != VersionMode::GM82) {
+        for (auto& font : game.fonts) {
+            if (font.charset == 0) font.charset = 1;
+        }
     }
 
     // Tag backgrounds referenced by room tiles.

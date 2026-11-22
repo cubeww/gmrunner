@@ -3,6 +3,7 @@
 #include "base/types.h"
 
 #include <array>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -137,6 +138,7 @@ public:
     static void clipboard_set_text(std::string_view text);
 
 private:
+    void apply_pending_windowed_size();
     WindowEvents poll_events_impl(bool clear_edges);
     static u8 sdl_scancode_to_gm_vk(i32 scancode) noexcept;
     static u8 sdl_mouse_button_to_gm(u8 button) noexcept;
@@ -144,6 +146,8 @@ private:
     SDL_Window* window_ = nullptr;
     SDL_GLContextState* gl_context_ = nullptr;
     bool fullscreen_ = false;
+    std::optional<std::pair<i32, i32>> pending_windowed_size_;
+    std::optional<std::pair<i32, i32>> pending_windowed_position_;
     bool borderless_ = false;
     bool stay_on_top_ = false;
     bool resizable_ = true;

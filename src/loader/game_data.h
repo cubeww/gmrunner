@@ -401,6 +401,7 @@ struct Gm82EventTables {
 struct GameData {
     GameMetadata meta;
     GameOptions options;
+    std::array<Bitmap32, 14> particle_shapes;
 
     std::vector<ExtensionData> extensions;
     std::vector<TriggerData> triggers;

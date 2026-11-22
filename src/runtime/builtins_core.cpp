@@ -379,17 +379,9 @@ void Runner::register_builtins_core() {
         const f64 rounded = delphi_round_f64(arg_real(a, 0));
         if (!(rounded >= -0x1p63 && rounded < 0x1p63)) return Error{"Invalid floating point operation."};
         const u8 byte = static_cast<u8>(static_cast<i64>(rounded));
-        u32 codepage = system_ansi_codepage();
-        const i32 id = r.renderer().font();
-        const auto& fonts = r.game().fonts;
-        if (id >= 0 && static_cast<usize>(id) < fonts.size() && fonts[static_cast<usize>(id)].exists) {
-            if (r.renderer().using_sprite_font()) {
-                // Delphi's sprite-font conversion drops NUL on legacy ANSI codepages.
-                if (byte == 0 && codepage != 65001) return RValue(std::string{});
-            } else {
-                codepage = gdi_charset_to_codepage(fonts[static_cast<usize>(id)].charset, codepage);
-            }
-        }
+        const u32 codepage = r.renderer().font_codepage(r.game());
+        // Delphi's sprite-font conversion drops NUL on legacy ANSI codepages.
+        if (r.renderer().using_sprite_font() && byte == 0 && codepage != 65001) return RValue(std::string{});
         return RValue(codepage_byte_to_utf8(byte, codepage));
     });
     register_builtin("ansi_char", [](Runner&, i32, i32, std::span<const RValue> a) {

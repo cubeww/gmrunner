@@ -281,6 +281,7 @@ Result<RValue> GmlVm::execute(
     };
 
     const auto& code = chunk.code;
+    RValue statement_result(0.0);
     usize ip = 0;
 
     while (ip < code.size()) {
@@ -325,6 +326,10 @@ Result<RValue> GmlVm::execute(
 
             case OpCode::Pop:
                 stack.pop_back();
+                break;
+
+            case OpCode::SaveResult:
+                statement_result = stack.back();
                 break;
 
             case OpCode::LoadTemp:
@@ -744,11 +749,11 @@ Result<RValue> GmlVm::execute(
                 return pop();
 
             case OpCode::Exit:
-                return RValue(0.0);
+                return statement_result;
         }
     }
 
-    return RValue(0.0);
+    return statement_result;
 }
 
 } // namespace gm

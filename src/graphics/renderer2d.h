@@ -119,6 +119,7 @@ public:
     [[nodiscard]] f32 alpha() const noexcept { return draw_alpha_; }
     void set_font(i32 font_id) noexcept { draw_font_ = font_id; }
     [[nodiscard]] i32 font() const noexcept { return draw_font_; }
+    [[nodiscard]] u32 font_codepage(const GameData& game) const noexcept;
     [[nodiscard]] bool using_sprite_font() const noexcept {
         return draw_font_ >= 0 && static_cast<usize>(draw_font_) < fonts_.size() &&
                fonts_[static_cast<usize>(draw_font_)].sprite_index >= 0;
@@ -181,6 +182,7 @@ public:
     [[nodiscard]] static bool save_bitmap_bgra(const Bitmap32& bmp, std::string_view host_path);
 
     // Sprites, Backgrounds & Tiles
+    void draw_particle_shape(i32 shape, f32 x, f32 y, f32 xscale, f32 yscale, f32 rot_deg, u32 color_bgr, f32 alpha);
     void draw_sprite_ext(
         const GameData& game, i32 sprite_id, i32 subimg,
         f32 x, f32 y, f32 xscale, f32 yscale, f32 rot_deg, u32 color_bgr, f32 alpha);
@@ -348,6 +350,8 @@ public:
     [[nodiscard]] static Result<Bitmap32> decode_image_to_bgra(std::span<const u8> encoded_bytes);
 
 private:
+    void draw_texture_ext(TextureHandle tex, f32 x, f32 y, f32 lx0, f32 ly0, f32 lx1, f32 ly1,
+                          f32 rot_deg, u32 color_bgr, f32 alpha);
     void ensure_batch(PrimitiveTopology topo, TextureHandle tex);
     bool ensure_screen_fbo(i32 width, i32 height);
     void bind_active_target_fbo();
@@ -380,6 +384,7 @@ private:
     i32 loc_world_ = -1;
     i32 loc_view_ = -1;
     i32 loc_proj_ = -1;
+    i32 loc_pixel_center_offset_ = -1;
     i32 loc_normal_mat_ = -1;
     i32 loc_model_tint_ = -1;
     i32 loc_tex_ = -1;
@@ -446,6 +451,7 @@ private:
     i32 screen_h_ = 608;
     ViewportRect screen_viewport_{0, 0, 800, 608};
     ViewportRect active_viewport_{0, 0, 800, 608};
+    std::array<f32, 2> pixel_center_offset_{};
 
     // Persistent logical-resolution screen FBO (for crisp screen captures & transitions)
     TextureHandle screen_fbo_tex_{};
@@ -467,6 +473,7 @@ private:
     std::vector<Vertex3D> prim_verts_;
 
     std::vector<SpriteGpu> sprites_;
+    std::array<TextureHandle, 14> particle_shapes_{};
     std::vector<TextureHandle> backgrounds_;
     std::vector<FontGpu> fonts_;
 

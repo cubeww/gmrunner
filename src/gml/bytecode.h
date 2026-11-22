@@ -20,6 +20,7 @@ enum class OpCode : u8 {
     Swap,               // exchange top two values
     DupN,               // duplicate aux values, skipping operand values at the top
     Pop,                // discard top
+    SaveResult,         // copy top to this call's implicit return value
 
     // Temporary slots used by control flow
     LoadTemp,
@@ -111,7 +112,7 @@ enum class OpCode : u8 {
     CallCodeAction,     // operand = index into this event's code_actions, aux = argc
     JumpIfRoomChange,   // at a D&D action boundary, jump to the event epilogue
     Return,             // pops return value and returns
-    Exit,               // returns 0.0 immediately
+    Exit,               // return the last statement result
 };
 
 struct Instruction {

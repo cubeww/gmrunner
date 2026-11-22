@@ -1451,11 +1451,11 @@ void Runner::register_builtins_gameplay() {
     // Particles & Simple Effects
     // -----------------------------------------------------------------------
     register_builtin("effect_create_below", [](Runner& r, i32, i32, std::span<const RValue> a) {
-        r.particles().effect_create(false, arg_i32(a, 0), arg_real(a, 1), arg_real(a, 2), arg_i32(a, 3), static_cast<u32>(arg_i32(a, 4)) & 0xFFFFFFu);
+        r.particles().effect_create(false, arg_i32(a, 0), arg_real(a, 1), arg_real(a, 2), arg_i32(a, 3), static_cast<u32>(arg_i32(a, 4)) & 0xFFFFFFu, r.effect_speed_factor(), r.room_width_, r.room_height_);
         return RValue(0.0);
     });
     register_builtin("effect_create_above", [](Runner& r, i32, i32, std::span<const RValue> a) {
-        r.particles().effect_create(true, arg_i32(a, 0), arg_real(a, 1), arg_real(a, 2), arg_i32(a, 3), static_cast<u32>(arg_i32(a, 4)) & 0xFFFFFFu);
+        r.particles().effect_create(true, arg_i32(a, 0), arg_real(a, 1), arg_real(a, 2), arg_i32(a, 3), static_cast<u32>(arg_i32(a, 4)) & 0xFFFFFFu, r.effect_speed_factor(), r.room_width_, r.room_height_);
         return RValue(0.0);
     });
     register_builtin("effect_clear", [](Runner& r, i32, i32, std::span<const RValue>) {

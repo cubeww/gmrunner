@@ -218,6 +218,7 @@ private:
     }
 
     void emit_lvalue_store(const PendingLValue& lv) {
+        chunk_.emit(OpCode::SaveResult, 0, 0, lv.line);
         switch (lv.kind) {
             case LValueKind::Local:
                 if (lv.arr_dims == 0) chunk_.emit(OpCode::StoreLocal, lv.id, 0, lv.line);
@@ -351,6 +352,7 @@ private:
             // Tolerate optional initializer `var x = expr` if encountered.
             if (match(TokenKind::Assign)) {
                 if (auto e = parse_expression(); !e) return e.error();
+                chunk_.emit(OpCode::SaveResult, 0, 0, static_cast<u16>(tok.line));
                 chunk_.emit(OpCode::StoreLocal, var_id, 0, static_cast<u16>(tok.line));
             }
             if (!match(TokenKind::Comma)) {
@@ -848,6 +850,7 @@ private:
         // If no assignment operator follows, it must be a standalone call statement.
         if (!is_assign_op(peek().kind)) {
             if (produced_value) {
+                chunk_.emit(OpCode::SaveResult, 0, 0, line);
                 chunk_.emit(OpCode::Pop, 0, 0, line);
                 match(TokenKind::Semicolon);
                 return Result<void>::success();

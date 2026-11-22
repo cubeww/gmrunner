@@ -381,6 +381,7 @@ Dx9Pipeline::LinkedProgram* Dx9Pipeline::get_or_link_program(i32 vs_id, i32 ps_i
     const GLuint pid = lp.shader.id;
 
     lp.loc_yflip = glGetUniformLocation(pid, "u_gm_yflip");
+    lp.loc_pixel_center_offset = glGetUniformLocation(pid, "u_pixel_center_offset");
     lp.loc_viewport = glGetUniformLocation(pid, "u_gm_viewport");
     lp.loc_vc = glGetUniformLocation(pid, "u_vc");
     lp.loc_vi = glGetUniformLocation(pid, "u_vi");
@@ -437,6 +438,7 @@ bool Dx9Pipeline::bind_and_upload(const Dx9DrawContext& ctx, TextureHandle stage
 
     const f32 yflip = ctx.rendering_to_fbo ? -1.0f : 1.0f;
     if (lp->loc_yflip >= 0) glUniform1f(lp->loc_yflip, yflip);
+    if (lp->loc_pixel_center_offset >= 0) glUniform2fv(lp->loc_pixel_center_offset, 1, ctx.pixel_center_offset.data());
     if (lp->loc_viewport >= 0) {
         glUniform4f(lp->loc_viewport,
                     static_cast<f32>(ctx.viewport.x), static_cast<f32>(ctx.viewport.y),
@@ -684,8 +686,16 @@ bool Dx9Pipeline::draw_vertex_buffer(
     // Default color attribute to white if format omits COLOR0.
     glVertexAttrib4f(3, 1.0f, 1.0f, 1.0f, 1.0f);
 
+    const auto vs = vertex_shaders_.find(active_vs_);
     for (const auto& el : fit->second.elements) {
-        const i32 loc = dx9_semantic_to_attrib_location(el.usage, el.usage_index);
+        i32 loc = dx9_semantic_to_attrib_location(el.usage, el.usage_index);
+        if (vs != vertex_shaders_.end()) {
+            const auto input = std::ranges::find_if(vs->second.inputs, [&](const Dx9DclSemantic& d) {
+                return d.usage == el.usage && d.usage_index == el.usage_index;
+            });
+            if (input == vs->second.inputs.end()) continue;
+            loc = input->attrib_location;
+        }
         if (loc < 0 || loc >= 16 || el.stream >= 16) continue;
 
         const i32 stream_vbuf_id = bound_streams_[el.stream];
