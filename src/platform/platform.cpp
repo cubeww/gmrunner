@@ -142,7 +142,7 @@ Result<void> Platform::init() {
         [](std::string_view utf8, u32 cp, std::string& out) { return convert_codepage(utf8, cp, false, out); });
 #endif
 
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__EMSCRIPTEN__)
     // Prevent SDL3 from synthesizing mouse clicks from finger touches so the virtual
     // touch overlay can arbitrate control buttons vs. direct touch-to-mouse cleanly.
     SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");

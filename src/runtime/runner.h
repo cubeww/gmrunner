@@ -119,7 +119,14 @@ public:
         CompiledProgram program,
         std::vector<std::string> cmd_args = {});
     void shutdown() noexcept;
-    void set_touch_overlay_enabled(bool enabled) noexcept { touch_overlay_.set_enabled(enabled); }
+    void set_touch_overlay_enabled(bool enabled) { touch_overlay_.set_enabled(enabled, &window_.input_mut()); }
+    void set_touch_overlay_editing(bool editing) { touch_overlay_.set_editing(editing, &window_.input_mut()); }
+    [[nodiscard]] bool is_touch_overlay_editing() const noexcept { return touch_overlay_.is_editing(); }
+    void set_touch_layout_path(const std::filesystem::path& path) {
+        touch_overlay_.set_config_path(path, [this]() { vfs_.notify_persist_write(); });
+    }
+    [[nodiscard]] std::string export_touch_layout() const { return touch_overlay_.export_layout_text(); }
+    bool import_touch_layout(std::string_view text) { return touch_overlay_.import_layout_text(text, true); }
     void set_audio_muted(bool muted) noexcept { audio_.set_output_muted(muted); }
     [[nodiscard]] bool is_paused_in_background() const noexcept { return paused_in_background_; }
     [[nodiscard]] i32 current_fps() const noexcept { return fps_; }

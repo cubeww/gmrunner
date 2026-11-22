@@ -59,6 +59,8 @@ void InputState::clear_all() {
     mouse_released.fill(false);
     mouse_wheel_up = false;
     mouse_wheel_down = false;
+    mouse_is_touch = false;
+    physical_left_down = false;
     last_key = 0;
     current_key = 0;
     last_char.clear();
@@ -364,13 +366,16 @@ WindowEvents PlatformWindow::poll_events_impl(bool clear_edges) {
                 break;
 
             case SDL_EVENT_MOUSE_MOTION:
+                input_.mouse_is_touch = (ev.motion.which == SDL_TOUCH_MOUSEID);
                 input_.mouse_x = ev.motion.x;
                 input_.mouse_y = ev.motion.y;
                 break;
 
             case SDL_EVENT_MOUSE_BUTTON_DOWN: {
                 out.any_user_gesture = true;
+                input_.mouse_is_touch = (ev.button.which == SDL_TOUCH_MOUSEID);
                 const u8 btn = sdl_mouse_button_to_gm(ev.button.button);
+                if (btn == 1 && !input_.mouse_is_touch) input_.physical_left_down = true;
                 if (btn > 0 && btn < input_.mouse_down.size()) {
                     if (!input_.mouse_down[btn]) {
                         input_.mouse_pressed[btn] = true;
@@ -383,7 +388,9 @@ WindowEvents PlatformWindow::poll_events_impl(bool clear_edges) {
             }
 
             case SDL_EVENT_MOUSE_BUTTON_UP: {
+                input_.mouse_is_touch = (ev.button.which == SDL_TOUCH_MOUSEID);
                 const u8 btn = sdl_mouse_button_to_gm(ev.button.button);
+                if (btn == 1 && !input_.mouse_is_touch) input_.physical_left_down = false;
                 if (btn > 0 && btn < input_.mouse_down.size()) {
                     if (input_.mouse_down[btn]) {
                         input_.mouse_released[btn] = true;
@@ -409,8 +416,7 @@ WindowEvents PlatformWindow::poll_events_impl(bool clear_edges) {
                 auto it = std::find_if(input_.touches.begin(), input_.touches.end(),
                                        [fid](const TouchFinger& f) { return f.finger_id == fid; });
                 if (it != input_.touches.end()) {
-                    it->x = tx;
-                    it->y = ty;
+                    *it = TouchFinger{fid, tx, ty};
                 } else {
                     input_.touches.push_back(TouchFinger{fid, tx, ty});
                 }

@@ -60,7 +60,7 @@ if(EMSCRIPTEN)
         "-sMAXIMUM_MEMORY=2147483648"
         "-sFORCE_FILESYSTEM=1"
         "-lidbfs.js"
-        "-sEXPORTED_FUNCTIONS=_main,_gmrunner_web_launch,_gmrunner_web_stop,_gmrunner_web_set_touch_overlay,_gmrunner_web_set_muted"
+        "-sEXPORTED_FUNCTIONS=_main,_gmrunner_web_launch,_gmrunner_web_stop,_gmrunner_web_set_touch_overlay,_gmrunner_web_set_touch_edit_mode,_gmrunner_web_is_touch_editing,_gmrunner_web_set_muted"
         "-sEXPORTED_RUNTIME_METHODS=FS,IDBFS,ccall,cwrap,UTF8ToString,stringToNewUTF8,HEAPU8"
         "--shell-file" "${CMAKE_SOURCE_DIR}/web/shell.html"
     )

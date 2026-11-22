@@ -12,6 +12,7 @@ add_library(gm_graphics STATIC
     model3d.cpp
     renderer2d.h
     renderer2d.cpp
+    builtin_font.h
     touch_overlay.h
     touch_overlay.cpp
 )

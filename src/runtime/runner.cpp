@@ -760,7 +760,18 @@ void Runner::tick_frame() {
         return;
     }
 
-    touch_overlay_.update(window_);
+    if (touch_overlay_.update(window_)) {
+        if (ev.resized) {
+            i32 vx = 0, vy = 0, vw = 1, vh = 1, cw = 1, ch = 1;
+            compute_canvas_viewport(vx, vy, vw, vh, cw, ch);
+            const i32 bw = requested_backbuffer_w_ > 0 ? requested_backbuffer_w_ : cw;
+            const i32 bh = requested_backbuffer_h_ > 0 ? requested_backbuffer_h_ : ch;
+            renderer_.set_screen_region(window_.drawable_width(), window_.drawable_height(),
+                                        bw, bh, ViewportRect{vx, vy, vw, vh});
+        }
+        present_current_frame();
+        return;
+    }
     const InputState& inp = window_.input();
 
     // Standard GM8 default hotkeys (respecting GameOptions).
@@ -3010,13 +3021,17 @@ bool Runner::wait_for_key() {
     inp.key_released.fill(false);
     while (true) {
         const WindowEvents ev = window_.poll_events_accumulate();
-        touch_overlay_.update(window_);
-        update_mouse_room_coords();
         if (ev.quit_requested) {
             running_ = false;
             pending_action_ = PendingRoomAction::EndGame;
             return false;
         }
+        if (touch_overlay_.update(window_)) {
+            present_current_frame();
+            Clock::sleep_until_us(Clock::now_us() + 16000u);
+            continue;
+        }
+        update_mouse_room_coords();
         for (usize k = 1; k < 256; ++k) {
             if (window_.input().key_pressed[k]) return true;
         }
@@ -3030,13 +3045,17 @@ bool Runner::wait_for_mouse() {
     inp.mouse_released.fill(false);
     while (true) {
         const WindowEvents ev = window_.poll_events_accumulate();
-        touch_overlay_.update(window_);
-        update_mouse_room_coords();
         if (ev.quit_requested) {
             running_ = false;
             pending_action_ = PendingRoomAction::EndGame;
             return false;
         }
+        if (touch_overlay_.update(window_)) {
+            present_current_frame();
+            Clock::sleep_until_us(Clock::now_us() + 16000u);
+            continue;
+        }
+        update_mouse_room_coords();
         if (window_.input().mouse_pressed[1] ||
             window_.input().mouse_pressed[2] ||
             window_.input().mouse_pressed[3]) {

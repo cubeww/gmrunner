@@ -39,11 +39,6 @@
             .replace(/\/+$/, "");
     }
 
-    function sanitizeKey(name) {
-        const clean = String(name || "game").replace(/[^a-zA-Z0-9_-]+/g, "_").replace(/^_+|_+$/g, "");
-        return clean || "game";
-    }
-
     // -----------------------------------------------------------------------
     // Persistent storage manager (OPFS primary + Emscripten IDBFS fallback)
     // -----------------------------------------------------------------------
@@ -120,15 +115,14 @@
     }
 
     async function mountPersist(gameKey) {
-        activeGameKey = sanitizeKey(gameKey);
+        activeGameKey = gameKey;
         const persistPath = "/persist/" + activeGameKey;
         const badge = document.getElementById("storage-badge");
 
         // 1. Prefer Origin Private File System (OPFS).
         if (navigator.storage && typeof navigator.storage.getDirectory === "function") {
             try {
-                const dir = await opfsGetGameDir(activeGameKey, true);
-                ensureMemfsDir(persistPath);
+                const dir = await opfsGetGameDir(gameKey, true);
                 await copyOpfsDirToMemfs(dir, persistPath);
                 persistBackend = "OPFS";
                 if (badge) badge.textContent = "Storage: OPFS";
@@ -430,8 +424,10 @@
     function setLauncherVisible(visible) {
         const overlay = document.getElementById("launcher-overlay");
         const stopBtn = document.getElementById("btn-stop");
+        const editTouchBtn = document.getElementById("btn-touch-edit");
         if (overlay) overlay.classList.toggle("hidden", !visible);
         if (stopBtn) stopBtn.disabled = visible;
+        if (editTouchBtn) editTouchBtn.disabled = visible;
     }
 
     async function launchWasmGame(mode, pathArg, gameKey) {
@@ -445,7 +441,7 @@
             "gmrunner_web_launch",
             "number",
             ["string", "string", "string"],
-            [mode, pathArg || "", sanitizeKey(gameKey)],
+            [mode, pathArg || "", gameKey],
             { async: true }
         );
         if (rc !== 0) {
@@ -587,6 +583,18 @@
             if (runtimeReady && touchState !== 0) {
                 Module._gmrunner_web_set_touch_overlay(touchState === 1 ? 1 : 0);
             }
+        });
+
+        document.getElementById("btn-touch-edit")?.addEventListener("click", () => {
+            if (!runtimeReady || !Module._gmrunner_web_set_touch_edit_mode) return;
+            const isEditing = Module._gmrunner_web_is_touch_editing && Module._gmrunner_web_is_touch_editing() !== 0;
+            if (!isEditing && touchState === 2) {
+                touchState = 1;
+                const touchBtn = document.getElementById("btn-touch");
+                if (touchBtn) touchBtn.textContent = "Touch: On";
+            }
+            Module._gmrunner_web_set_touch_edit_mode(isEditing ? 0 : 1);
+            if (canvas) canvas.focus();
         });
 
         document.getElementById("btn-mute")?.addEventListener("click", (ev) => {

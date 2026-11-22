@@ -28,6 +28,7 @@ struct TouchFinger {
     i64 finger_id = 0;
     f32 x = 0.0f; // Normalized [0, 1] window coordinates
     f32 y = 0.0f;
+    bool consumed_by_editor = false;
 };
 
 struct InputState {
@@ -46,6 +47,8 @@ struct InputState {
     std::array<bool, 8> mouse_released{};
     bool mouse_wheel_up = false;
     bool mouse_wheel_down = false;
+    bool mouse_is_touch = false;
+    bool physical_left_down = false;
 
     std::vector<TouchFinger> touches;
     bool touch_seen = false;

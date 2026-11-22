@@ -49,15 +49,29 @@ struct AppState {
     gm::u64 target_frame_us = 16667; // 60 FPS default for idle mode
 };
 
-std::string sanitize_game_key(std::string_view raw) {
-    std::string out;
-    out.reserve(raw.size());
-    for (char c : raw) {
-        const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                        (c >= '0' && c <= '9') || c == '_' || c == '-';
-        out.push_back(ok ? c : '_');
+std::string game_storage_key(std::string_view name) {
+    std::string key;
+    constexpr char hex[] = "0123456789abcdef";
+    for (unsigned char c : name) {
+        if (c >= 128 || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+            (c >= '0' && c <= '9') || c == '-' || c == '_') {
+            key.push_back(static_cast<char>(c));
+        } else {
+            key += '~';
+            key += hex[c >> 4];
+            key += hex[c & 15];
+        }
     }
-    return out.empty() ? std::string("default") : out;
+    // Leave room for the layout file extension even for full-length archive names.
+    if (key.size() > 240) {
+        gm::u64 hash = 14695981039346656037ull;
+        for (unsigned char c : name) hash = (hash ^ c) * 1099511628211ull;
+        size_t end = 214;
+        while ((static_cast<unsigned char>(key[end]) & 0xc0) == 0x80) --end;
+        key.resize(end);
+        key += "~h" + std::to_string(hash);
+    }
+    return key.empty() ? "default" : key;
 }
 
 bool is_ignorable_exe(std::string_view lower_name) noexcept {
@@ -113,16 +127,33 @@ void compute_initial_window_size(const gm::GameData& game, gm::i32& out_w, gm::i
     out_h = std::max(1, h);
 }
 
-std::filesystem::path default_user_save_dir(std::string_view game_key) {
+std::filesystem::path user_save_root() {
+#if defined(__ANDROID__)
+    if (const char* path = SDL_GetAndroidInternalStoragePath()) return gm::Vfs::path_from_utf8(path) / "saves";
+#endif
     if (char* pref = SDL_GetPrefPath("gmrunner", "saves")) {
-        auto dir = gm::Vfs::path_from_utf8(pref) / gm::Vfs::path_from_utf8(sanitize_game_key(game_key));
+        auto dir = gm::Vfs::path_from_utf8(pref);
         SDL_free(pref);
         return dir;
     }
     return {};
 }
 
-gm::Result<std::string> mount_native_game_target(
+std::filesystem::path default_touch_layout_path(std::string_view game_key) {
+    if (char* pref = SDL_GetPrefPath("gmrunner", "config")) {
+        auto root = gm::Vfs::path_from_utf8(pref) / "touch_layouts";
+        SDL_free(pref);
+        return root / gm::Vfs::path_from_utf8(game_storage_key(game_key) + ".cfg");
+    }
+    return {};
+}
+
+struct MountedTarget {
+    std::string exe_lookup_path;
+    std::string game_key;
+};
+
+gm::Result<MountedTarget> mount_native_game_target(
     gm::Vfs& vfs,
     const std::string& target_path,
     const std::string& save_dir_override,
@@ -175,10 +206,15 @@ gm::Result<std::string> mount_native_game_target(
     std::filesystem::path save_root;
     if (!save_dir_override.empty()) {
         save_root = gm::Vfs::path_from_utf8(save_dir_override);
+#if !defined(__ANDROID__)
     } else if (!vfs.has_virtual_root() && gm::Vfs::is_directory_writable(game_root)) {
         save_root = game_root;
+#endif
     } else if (allow_sdl_pref_fallback) {
-        save_root = default_user_save_dir(game_key);
+        const auto root = user_save_root();
+        if (!root.empty()) {
+            save_root = root / gm::Vfs::path_from_utf8(game_storage_key(game_key));
+        }
     }
 
     if (!save_root.empty()) {
@@ -186,7 +222,7 @@ gm::Result<std::string> mount_native_game_target(
             GM_LOG_WARN("app", "%s", res.error_message().c_str());
         }
     }
-    return exe_lookup_path;
+    return MountedTarget{std::move(exe_lookup_path), std::move(game_key)};
 }
 
 void tick_idle_frame(AppState& app) {
@@ -329,6 +365,21 @@ void gmrunner_web_set_touch_overlay(int enabled) {
 }
 
 EMSCRIPTEN_KEEPALIVE
+void gmrunner_web_set_touch_edit_mode(int editing) {
+    if (g_web_app && g_web_app->runner) {
+        if (editing != 0) {
+            g_web_app->runner->set_touch_overlay_enabled(true);
+        }
+        g_web_app->runner->set_touch_overlay_editing(editing != 0);
+    }
+}
+
+EMSCRIPTEN_KEEPALIVE
+int gmrunner_web_is_touch_editing() {
+    return (g_web_app && g_web_app->runner && g_web_app->runner->is_touch_overlay_editing()) ? 1 : 0;
+}
+
+EMSCRIPTEN_KEEPALIVE
 void gmrunner_web_set_muted(int muted) {
     if (g_web_app && g_web_app->runner) {
         g_web_app->runner->set_audio_muted(muted != 0);
@@ -342,7 +393,8 @@ int gmrunner_web_launch(const char* mode_cstr, const char* path_cstr, const char
 
     const std::string mode = mode_cstr ? mode_cstr : "memfs";
     const std::string path_arg = path_cstr ? path_cstr : "";
-    const std::string game_key = sanitize_game_key(game_key_cstr && game_key_cstr[0] ? game_key_cstr : "web_game");
+    const std::string_view name = game_key_cstr && game_key_cstr[0] ? game_key_cstr : "web_game";
+    const auto game_key = game_storage_key(name);
 
     gm::web_report_status("Mounting persistent storage...");
     std::string persist_dir = "/persist/" + game_key;
@@ -384,7 +436,7 @@ int gmrunner_web_launch(const char* mode_cstr, const char* path_cstr, const char
             gm::web_report_status("Error: " + m_res.error_message());
             return 4;
         }
-        exe_lookup_path = m_res.value();
+        exe_lookup_path = m_res.value().exe_lookup_path;
     }
 
     if (exe_lookup_path.empty()) {
@@ -429,6 +481,7 @@ int gmrunner_web_launch(const char* mode_cstr, const char* path_cstr, const char
         gm::web_report_status("Init failed: " + res.error_message());
         return 7;
     }
+    app.runner->set_touch_layout_path(gm::Vfs::path_from_utf8(persist_dir + "/registry/touch_layout.cfg"));
 
     app.running = true;
     app.start_us = gm::Clock::now_us();
@@ -527,7 +580,8 @@ int main(int argc, char** argv) {
         if (!headless_cli) gm::Platform::shutdown();
         return 1;
     }
-    const std::string exe_lookup_path = mount_res.value();
+    const std::string exe_lookup_path = mount_res.value().exe_lookup_path;
+    const std::string game_key = mount_res.value().game_key;
 
     // Load game executable if provided.
     std::optional<gm::GameData> loaded_game;
@@ -640,6 +694,12 @@ int main(int argc, char** argv) {
             app.vfs.cleanup_temp_dir();
             gm::Platform::shutdown();
             return 1;
+        }
+        const std::filesystem::path layout_path = !opts.touch_layout_path.empty()
+            ? gm::Vfs::path_from_utf8(opts.touch_layout_path)
+            : default_touch_layout_path(game_key);
+        if (!layout_path.empty()) {
+            app.runner->set_touch_layout_path(layout_path);
         }
         if (opts.touch_overlay) {
             app.runner->set_touch_overlay_enabled(true);

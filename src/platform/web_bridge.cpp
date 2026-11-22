@@ -317,19 +317,11 @@ Result<std::unique_ptr<IVfsReadSource>> create_web_lazy_zip_source() {
     return std::unique_ptr<IVfsReadSource>(std::move(zip_res.value()));
 }
 
-Result<std::string> web_mount_persistent_storage(std::string_view game_key) {
-    std::string clean_key;
-    clean_key.reserve(game_key.size());
-    for (char c : game_key) {
-        const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                        (c >= '0' && c <= '9') || c == '_' || c == '-';
-        clean_key.push_back(ok ? c : '_');
-    }
-    if (clean_key.empty()) clean_key = "default";
-    if (js_web_mount_persist(clean_key.c_str()) == 0) {
+Result<std::string> web_mount_persistent_storage(const std::string& game_key) {
+    if (js_web_mount_persist(game_key.c_str()) == 0) {
         return Error{"Failed to mount browser persistent storage"};
     }
-    return "/persist/" + clean_key;
+    return "/persist/" + game_key;
 }
 
 void web_request_persist_sync() {

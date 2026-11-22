@@ -19,6 +19,7 @@ struct CliOptions {
     bool fullscreen = false;
     bool vsync = true;
     bool touch_overlay = false;
+    std::string touch_layout_path;
     i32 window_width = 800;
     i32 window_height = 608;
     TraceFlags trace{};

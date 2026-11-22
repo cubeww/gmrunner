@@ -21,7 +21,7 @@ namespace gm {
 
 // Mounts persistent save storage at /persist/<game_key> using OPFS when available,
 // falling back automatically to Emscripten IDBFS (IndexedDB).
-[[nodiscard]] Result<std::string> web_mount_persistent_storage(std::string_view game_key);
+[[nodiscard]] Result<std::string> web_mount_persistent_storage(const std::string& game_key);
 
 // Schedules a debounced asynchronous flush of /persist back to OPFS / IndexedDB.
 void web_request_persist_sync();

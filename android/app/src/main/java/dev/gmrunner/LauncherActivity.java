@@ -108,14 +108,6 @@ public class LauncherActivity extends Activity {
         return games;
     }
 
-    private File getSavesDirectory(String gameKey) {
-        String clean = gameKey.replaceAll("[^a-zA-Z0-9_-]+", "_");
-        if (clean.isEmpty()) clean = "default";
-        File saves = new File(new File(getFilesDir(), "saves"), clean);
-        if (!saves.exists()) saves.mkdirs();
-        return saves;
-    }
-
     private void refreshGameList() {
         discoveredGames.clear();
         listAdapter.clear();
@@ -229,14 +221,8 @@ public class LauncherActivity extends Activity {
     }
 
     private void launchGame(File target) {
-        String baseName = target.getName();
-        int dot = baseName.lastIndexOf('.');
-        if (dot > 0) baseName = baseName.substring(0, dot);
-        File saveDir = getSavesDirectory(baseName);
-
         Intent intent = new Intent(this, GmRunnerActivity.class);
         intent.putExtra(GmRunnerActivity.EXTRA_GAME_PATH, target.getAbsolutePath());
-        intent.putExtra(GmRunnerActivity.EXTRA_SAVE_DIR, saveDir.getAbsolutePath());
         startActivity(intent);
     }
 }

@@ -25,6 +25,7 @@ void print_cli_help() {
         "  --fullscreen           Start in fullscreen mode\n"
         "  --vsync / --no-vsync   Enable or disable vertical sync (default: enabled)\n"
         "  --touch-overlay        Enable on-screen virtual touch controller\n"
+        "  --touch-layout <path>  Load/save custom virtual touch layout from file\n"
         "  --verbose              Enable debug-level logging\n"
         "  --trace-events         Trace runtime event dispatch\n"
         "  --trace-dll            Trace external DLL / extension shim calls\n"
@@ -59,6 +60,10 @@ Result<CliOptions> parse_cli(int argc, char** argv) {
             opts.vsync = false;
         } else if (arg == "--touch-overlay") {
             opts.touch_overlay = true;
+        } else if (arg == "--touch-layout") {
+            auto val = require_value(arg);
+            if (!val) return val.error();
+            opts.touch_layout_path = std::string(val.value());
         } else if (arg == "--trace-events") {
             opts.trace.events = true;
         } else if (arg == "--trace-dll") {
