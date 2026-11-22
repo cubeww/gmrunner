@@ -4,8 +4,13 @@ add_library(gm_platform STATIC
     platform.h
     platform.cpp
     registry.cpp
+    vfs_source.h
     vfs.h
     vfs.cpp
+    zip_archive.h
+    zip_archive.cpp
+    web_bridge.h
+    web_bridge.cpp
     window.h
     window.cpp
 )
@@ -13,7 +18,7 @@ add_library(gm_platform STATIC
 target_include_directories(gm_platform PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(gm_platform
     PUBLIC gm_base
-    PRIVATE SDL3::SDL3-static
+    PRIVATE SDL3::SDL3
 )
 
 if(WIN32)

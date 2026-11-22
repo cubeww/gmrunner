@@ -11,18 +11,20 @@ void print_cli_help() {
         "gmrunner - Cross-platform GameMaker 8.0 / 8.1 / 8.2 Runner\n"
         "\n"
         "Usage:\n"
-        "  gmrunner [options] [game.exe]\n"
+        "  gmrunner [options] [game.exe | game.zip | game_dir]\n"
         "\n"
         "Options:\n"
         "  -h, --help             Show this help message\n"
         "  --inspect              Parse game executable and print asset/extension summary\n"
         "  --compile-check        Compile all GML/D&D scripts and exit\n"
+        "  --save-dir <path>      Override writable save overlay directory\n"
         "  --version <80|81|82>   Override auto-detected GameMaker version profile\n"
         "  --codepage <id>        Windows codepage for GM 8.0 strings (default: 1252)\n"
         "  --width <px>           Initial window width (default: 800)\n"
         "  --height <px>          Initial window height (default: 608)\n"
         "  --fullscreen           Start in fullscreen mode\n"
         "  --vsync / --no-vsync   Enable or disable vertical sync (default: enabled)\n"
+        "  --touch-overlay        Enable on-screen virtual touch controller\n"
         "  --verbose              Enable debug-level logging\n"
         "  --trace-events         Trace runtime event dispatch\n"
         "  --trace-dll            Trace external DLL / extension shim calls\n"
@@ -55,12 +57,18 @@ Result<CliOptions> parse_cli(int argc, char** argv) {
             opts.vsync = true;
         } else if (arg == "--no-vsync") {
             opts.vsync = false;
+        } else if (arg == "--touch-overlay") {
+            opts.touch_overlay = true;
         } else if (arg == "--trace-events") {
             opts.trace.events = true;
         } else if (arg == "--trace-dll") {
             opts.trace.dll_calls = true;
         } else if (arg == "--trace-vfs") {
             opts.trace.vfs = true;
+        } else if (arg == "--save-dir") {
+            auto val = require_value(arg);
+            if (!val) return val.error();
+            opts.save_dir = std::string(val.value());
         } else if (arg == "--version") {
             auto val = require_value(arg);
             if (!val) return val.error();

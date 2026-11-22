@@ -36,7 +36,7 @@ target_link_libraries(gm_extensions
         gm_audio
     PRIVATE
         zlibstatic
-        SDL3::SDL3-static
+        SDL3::SDL3
 )
 
 if(WIN32)

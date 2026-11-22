@@ -11,6 +11,7 @@
 #include <tsf.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <complex>
 #include <cstdlib>
@@ -31,6 +32,9 @@ void ma_data_callback(ma_device* device, void* output, const void* input, ma_uin
     auto* out = static_cast<f32*>(output);
     if (engine) {
         engine->mix_frames(out, frame_count);
+        if (engine->is_output_muted()) {
+            std::memset(out, 0, static_cast<usize>(frame_count) * 2u * sizeof(f32));
+        }
     } else {
         std::memset(out, 0, static_cast<usize>(frame_count) * 2u * sizeof(f32));
     }
@@ -167,8 +171,8 @@ struct AudioChannel {
     f64 loop_end_ms = 0.0;
 
     // Backing media handles (safe shared ownership so sound free can't dangle)
+    std::shared_ptr<const std::vector<f32>> owned_pcm;
     const std::vector<f32>* pcm_ref = nullptr;
-    std::vector<f32> owned_pcm;
     std::shared_ptr<std::vector<u8>> stream_raw;
     stb_vorbis* ogg_decoder = nullptr;
     ma_decoder ma_dec{};
@@ -255,10 +259,10 @@ struct AudioChannel {
 
         switch (asset.source_kind) {
             case AudioSourceKind::PcmStereo:
-                if (asset.pcm_stereo.empty()) return false;
+                if (!asset.pcm_stereo || asset.pcm_stereo->empty()) return false;
                 owned_pcm = asset.pcm_stereo;
-                pcm_ref = &owned_pcm;
-                total_frames = owned_pcm.size() / 2u;
+                pcm_ref = owned_pcm.get();
+                total_frames = owned_pcm->size() / 2u;
                 return true;
 
             case AudioSourceKind::OggStream: {
@@ -622,7 +626,9 @@ struct AudioChannel {
 
 struct AudioEngine::Impl {
     ma_device device{};
+    bool device_initialized = false;
     bool device_started = false;
+    std::atomic<bool> output_muted{false};
 };
 
 AudioEngine::AudioEngine() : impl_(std::make_unique<Impl>()) {
@@ -645,6 +651,10 @@ Result<void> AudioEngine::init() {
     cfg.playback.format = ma_format_f32;
     cfg.playback.channels = 2;
     cfg.sampleRate = kOutputSampleRate;
+#if defined(__EMSCRIPTEN__)
+    // WebAudio mixes on the browser's main thread. Allow about one 50 Hz game frame per callback.
+    cfg.periodSizeInFrames = 1024;
+#endif
     cfg.dataCallback = &ma_data_callback;
     cfg.pUserData = this;
 
@@ -653,12 +663,21 @@ Result<void> AudioEngine::init() {
         initialized_ = true;
         return Result<void>::success();
     }
+    impl_->device_initialized = true;
 
     if (ma_device_start(&impl_->device) != MA_SUCCESS) {
+#if defined(__EMSCRIPTEN__)
+        // Browsers suspend WebAudio until the first user gesture; resume() will start it.
+        GM_LOG_INFO("audio", "Audio device waiting for browser user gesture to resume");
+        initialized_ = true;
+        return Result<void>::success();
+#else
         ma_device_uninit(&impl_->device);
+        impl_->device_initialized = false;
         GM_LOG_WARN("audio", "Failed to start miniaudio device; continuing in silent mode");
         initialized_ = true;
         return Result<void>::success();
+#endif
     }
 
     impl_->device_started = true;
@@ -667,11 +686,38 @@ Result<void> AudioEngine::init() {
     return Result<void>::success();
 }
 
+void AudioEngine::suspend() noexcept {
+    if (!initialized_ || !impl_ || !impl_->device_initialized || !impl_->device_started) return;
+    if (ma_device_stop(&impl_->device) == MA_SUCCESS) {
+        impl_->device_started = false;
+    }
+}
+
+void AudioEngine::resume() noexcept {
+    if (!initialized_ || !impl_ || !impl_->device_initialized) return;
+    if (!impl_->device_started) {
+        if (ma_device_start(&impl_->device) == MA_SUCCESS) {
+            impl_->device_started = true;
+        }
+    }
+}
+
+void AudioEngine::set_output_muted(bool muted) noexcept {
+    if (impl_) {
+        impl_->output_muted.store(muted, std::memory_order_relaxed);
+    }
+}
+
+bool AudioEngine::is_output_muted() const noexcept {
+    return impl_ && impl_->output_muted.load(std::memory_order_relaxed);
+}
+
 void AudioEngine::shutdown() noexcept {
     if (!initialized_) return;
-    if (impl_ && impl_->device_started) {
+    if (impl_ && impl_->device_initialized) {
         ma_device_uninit(&impl_->device);
         impl_->device_started = false;
+        impl_->device_initialized = false;
     }
     std::scoped_lock lock(mutex_);
     channels_.clear();
@@ -760,10 +806,12 @@ bool AudioEngine::decode_asset_from_memory(
         stb_vorbis_close(vorb);
         if (raw_stereo.empty()) return false;
 
-        resample_stereo_linear(raw_stereo.data(), raw_stereo.size() / 2u, out_asset.orig_sample_rate, out_asset.pcm_stereo, kOutputSampleRate);
+        auto pcm = std::make_shared<std::vector<f32>>();
+        resample_stereo_linear(raw_stereo.data(), raw_stereo.size() / 2u, out_asset.orig_sample_rate, *pcm, kOutputSampleRate);
         out_asset.source_kind = AudioSourceKind::PcmStereo;
-        out_asset.total_frames = out_asset.pcm_stereo.size() / 2u;
-        out_asset.loaded = !out_asset.pcm_stereo.empty();
+        out_asset.total_frames = pcm->size() / 2u;
+        out_asset.loaded = !pcm->empty();
+        out_asset.pcm_stereo = std::move(pcm);
         return out_asset.loaded;
     }
 
@@ -824,27 +872,29 @@ bool AudioEngine::decode_asset_from_memory(
 
     dec_cfg = ma_decoder_config_init(ma_format_f32, 2, kOutputSampleRate);
     if (ma_decoder_init_memory(encoded.data(), encoded.size(), &dec_cfg, &decoder) != MA_SUCCESS) return false;
+    auto pcm = std::make_shared<std::vector<f32>>();
     constexpr usize kChunkFrames = 4096;
     std::vector<f32> chunk(kChunkFrames * 2u);
     for (;;) {
         ma_uint64 frames_read = 0;
         const ma_result res = ma_decoder_read_pcm_frames(&decoder, chunk.data(), kChunkFrames, &frames_read);
         if (frames_read > 0) {
-            out_asset.pcm_stereo.insert(out_asset.pcm_stereo.end(),
-                                        chunk.begin(),
-                                        chunk.begin() + static_cast<std::ptrdiff_t>(frames_read * 2u));
+            pcm->insert(pcm->end(),
+                        chunk.begin(),
+                        chunk.begin() + static_cast<std::ptrdiff_t>(frames_read * 2u));
         }
         if (res != MA_SUCCESS || frames_read < kChunkFrames) break;
     }
     ma_decoder_uninit(&decoder);
 
     out_asset.source_kind = AudioSourceKind::PcmStereo;
-    out_asset.total_frames = out_asset.pcm_stereo.size() / 2u;
+    out_asset.total_frames = pcm->size() / 2u;
     if (len_frames == 0) {
         out_asset.source_frames = static_cast<u64>(std::llround(static_cast<f64>(out_asset.total_frames) * orig_sr / kOutputSampleRate));
         out_asset.length_ms = static_cast<f64>(out_asset.total_frames) * 1000.0 / kOutputSampleRate;
     }
-    out_asset.loaded = !out_asset.pcm_stereo.empty();
+    out_asset.loaded = !pcm->empty();
+    out_asset.pcm_stereo = std::move(pcm);
     return out_asset.loaded;
 }
 

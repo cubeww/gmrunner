@@ -15,10 +15,14 @@ public:
 
     [[nodiscard]] Result<void> init(GlProcLoader proc_loader) override;
     void shutdown() noexcept override;
+    void reset_cached_state() noexcept;
+    [[nodiscard]] Result<void> reinit_after_context_loss(GlProcLoader proc_loader);
     [[nodiscard]] const GraphicsCaps& caps() const noexcept override { return caps_; }
 
     void set_viewport(const ViewportRect& rect) override;
     void set_scissor(bool enabled, const ViewportRect& rect = {}) override;
+    [[nodiscard]] bool scissor_enabled() const noexcept { return cache_.scissor_valid && cache_.scissor_enabled; }
+    [[nodiscard]] const ViewportRect& scissor_rect() const noexcept { return cache_.scissor_rect; }
     void clear(bool color, bool depth, bool stencil, f32 r, f32 g, f32 b, f32 a, f32 depth_val = 1.0f, i32 stencil_val = 0) override;
     void set_blend_state(const BlendState& state) override;
     void set_depth_state(const DepthState& state) override;
@@ -51,7 +55,8 @@ public:
     // A nonzero index size uses the element buffer of the bound VAO. GLES needs its
     // CPU indices only when translating D3D flat shading to last-vertex convention.
     void draw_primitives(PrimitiveTopology topology, i32 count, bool flat, u32 instances = 1,
-                         u32 index_size = 0, std::span<const u8> index_bytes = {});
+                         u32 index_size = 0, std::span<const u8> index_bytes = {},
+                         i32 first_vertex = 0);
 
     void read_pixels_rgba8(i32 x, i32 y, i32 w, i32 h, std::span<u8> out_rgba) override;
 
@@ -80,6 +85,38 @@ private:
         i32 height = 0;
     };
 
+    struct CachedSampler {
+        bool valid = false;
+        TextureFilter filter = TextureFilter::Nearest;
+        i32 wrap_u = 3;
+        i32 wrap_v = 3;
+        u32 border_bgr = 0;
+    };
+
+    struct CachedState {
+        bool viewport_valid = false;
+        ViewportRect viewport{};
+        bool scissor_valid = false;
+        bool scissor_enabled = false;
+        ViewportRect scissor_rect{};
+        bool blend_valid = false;
+        BlendState blend{};
+        bool depth_valid = false;
+        DepthState depth{};
+        bool cull_valid = false;
+        CullMode cull = CullMode::None;
+        bool color_mask_valid = false;
+        std::array<bool, 4> color_mask{true, true, true, true};
+        bool program_valid = false;
+        u32 program = 0;
+        bool fbo_valid = false;
+        u32 fbo = 0;
+        u32 active_unit = 0;
+        std::array<u32, 12> bound_tex{};
+        std::array<bool, 12> bound_tex_valid{};
+        std::array<CachedSampler, 12> samplers{};
+    };
+
     bool initialized_ = false;
     bool depth_write_enabled_ = true;
     i32 polygon_mode_ = 2;
@@ -89,6 +126,7 @@ private:
     std::vector<u32> flat_indices_;
     GraphicsCaps caps_{};
     u32 white_texture_id_ = 0; // 1x1 white fallback texture (gm82dx9 SetNullTexture parity)
+    CachedState cache_{};
 
     std::unordered_map<u32, TextureMeta> textures_;
     std::unordered_map<u32, FramebufferEntry> framebuffers_;

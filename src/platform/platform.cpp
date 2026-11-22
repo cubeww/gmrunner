@@ -142,6 +142,13 @@ Result<void> Platform::init() {
         [](std::string_view utf8, u32 cp, std::string& out) { return convert_codepage(utf8, cp, false, out); });
 #endif
 
+#if defined(__ANDROID__)
+    // Prevent SDL3 from synthesizing mouse clicks from finger touches so the virtual
+    // touch overlay can arbitrate control buttons vs. direct touch-to-mouse cleanly.
+    SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");
+    SDL_SetHint(SDL_HINT_MOUSE_TOUCH_EVENTS, "0");
+#endif
+
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_GAMEPAD | SDL_INIT_JOYSTICK)) {
         Clock::shutdown();
         return Error{std::string("SDL_Init failed: ") + SDL_GetError()};

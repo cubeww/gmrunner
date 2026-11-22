@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=gmrunner
+Comment=Cross-platform GameMaker 8.0 / 8.1 / 8.2 Runtime
+Exec=gmrunner %f
+Terminal=false
+Categories=Game;Emulator;
+MimeType=application/x-ms-dos-executable;application/zip;

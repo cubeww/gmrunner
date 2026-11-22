@@ -56,13 +56,48 @@
       }
     },
     {
+      "name": "macos-bundle-release",
+      "displayName": "macOS .app Bundle Release (Ninja)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/macos-bundle-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "GMRUNNER_MACOS_BUNDLE": "ON"
+      }
+    },
+    {
       "name": "wasm-release",
-      "displayName": "WebAssembly Release (Emscripten + Ninja)",
+      "displayName": "WebAssembly Release - Asyncify (Emscripten + Ninja)",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/wasm-release",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "CMAKE_TOOLCHAIN_FILE": "$env{EMSDK}/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake"
+        "CMAKE_TOOLCHAIN_FILE": "$env{EMSDK}/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake",
+        "GMRUNNER_WASM_ASYNC_MODE": "ASYNCIFY"
+      }
+    },
+    {
+      "name": "wasm-jspi-release",
+      "displayName": "WebAssembly Release - JSPI (Emscripten + Ninja)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/wasm-jspi-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_TOOLCHAIN_FILE": "$env{EMSDK}/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake",
+        "GMRUNNER_WASM_ASYNC_MODE": "JSPI"
+      }
+    },
+    {
+      "name": "android-arm64-debug",
+      "displayName": "Android arm64-v8a Debug (NDK + Ninja)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/android-arm64-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_TOOLCHAIN_FILE": "$env{ANDROID_NDK_HOME}/build/cmake/android.toolchain.cmake",
+        "ANDROID_ABI": "arm64-v8a",
+        "ANDROID_PLATFORM": "android-26",
+        "ANDROID_STL": "c++_shared"
       }
     },
     {
@@ -74,7 +109,8 @@
         "CMAKE_BUILD_TYPE": "Release",
         "CMAKE_TOOLCHAIN_FILE": "$env{ANDROID_NDK_HOME}/build/cmake/android.toolchain.cmake",
         "ANDROID_ABI": "arm64-v8a",
-        "ANDROID_PLATFORM": "android-26"
+        "ANDROID_PLATFORM": "android-26",
+        "ANDROID_STL": "c++_shared"
       }
     }
   ],
@@ -100,8 +136,20 @@
       "configurePreset": "macos-release"
     },
     {
+      "name": "macos-bundle-release",
+      "configurePreset": "macos-bundle-release"
+    },
+    {
       "name": "wasm-release",
       "configurePreset": "wasm-release"
+    },
+    {
+      "name": "wasm-jspi-release",
+      "configurePreset": "wasm-jspi-release"
+    },
+    {
+      "name": "android-arm64-debug",
+      "configurePreset": "android-arm64-debug"
     },
     {
       "name": "android-arm64-release",

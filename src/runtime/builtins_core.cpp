@@ -1522,11 +1522,17 @@ void Runner::register_builtins_core() {
     register_builtin("message_caption", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
     register_builtin("message_position", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
     register_builtin("message_size", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
-    register_builtin("get_string", [](Runner&, i32, i32, std::span<const RValue> a) {
-        return RValue(std::string(arg_str(a, 1)));
+    register_builtin("get_string", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        return RValue(r.window().prompt_string(arg_str(a, 0), arg_str(a, 1)));
     });
-    register_builtin("get_integer", [](Runner&, i32, i32, std::span<const RValue> a) {
-        return RValue(arg_real(a, 1));
+    register_builtin("get_integer", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        const f64 def_val = arg_real(a, 1);
+        const std::string def_str = std::to_string(static_cast<i64>(delphi_round(def_val)));
+        const std::string input = r.window().prompt_string(arg_str(a, 0), def_str);
+        if (input == def_str) return RValue(def_val);
+        char* end = nullptr;
+        const f64 parsed = std::strtod(input.c_str(), &end);
+        return RValue((end && end != input.c_str()) ? parsed : def_val);
     });
     register_builtin("sleep", [](Runner& r, i32, i32, std::span<const RValue> a) -> Result<RValue> {
         const f64 ms = std::max(0.0, arg_real(a, 0));

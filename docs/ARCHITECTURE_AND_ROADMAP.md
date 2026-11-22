@@ -83,17 +83,20 @@ gmrunner/
 ├── README.md
 ├── docs/
 │   └── ARCHITECTURE_AND_ROADMAP.md
-├── third_party/                   # Git submodules: SDL, zlib, glad, (+ stb, miniaudio, ogg, vorbis, libopenmpt, TinySoundFont)
+├── web/                           # Emscripten HTML5 shell, lazy folder/ZIP JS bridge, OPFS/IDBFS persistence
+├── android/                       # Gradle + NDK Android project (LauncherActivity + GmRunnerActivity)
+├── packaging/                     # Linux desktop/tarball & macOS .app/.dmg packaging scripts
+├── third_party/                   # Git submodules: SDL, zlib, glad, miniaudio, stb, TinySoundFont
 └── src/
-    ├── base/                      # gm_base: types, math, encoding, hash, zlib_util, binary_reader, log
-    ├── platform/                  # gm_platform: clock, platform, vfs (case-insensitive + virtual pipes + registry), window
+    ├── base/                      # gm_base: types, math, encoding, hash, zlib_util, binary_reader, log (logcat on Android)
+    ├── platform/                  # gm_platform: clock, platform, vfs (+ dir cache, streaming ZIP32/64, web lazy bridge, pipes, registry), window (+ touch)
     ├── loader/                    # gm_loader: PE scanner, GM80/81/82 decryptors, asset parsers, GameData IR
-    ├── gml/                       # gm_gml: lexer, parser, D&D lowerer, bytecode compiler, VM, RValue
-    ├── graphics/                  # gm_graphics: IGraphicsDevice, GlGraphicsDevice, 2D/3D renderers, surfaces, SM1/2/3 bytecode transpiler
-    ├── audio/                     # gm_audio: software mixer, decoders, DSP, 3D, .wasd, FMODSIMPLEPW crypto
-    ├── runtime/                   # gm_runtime: StepLoop, Room/Instance/Object, TMask collisions, mp_*, particles, ds_*, 1281 built-ins
+    ├── gml/                       # gm_gml: lexer, parser, D&D lowerer, bytecode compiler, zero-alloc frame-sliced VM, flat VariableTable, RValue
+    ├── graphics/                  # gm_graphics: IGraphicsDevice, cached GlGraphicsDevice, 2D/3D renderers, surfaces, SM1/2/3 transpiler, TouchOverlay
+    ├── audio/                     # gm_audio: software mixer (shared PCM), decoders, DSP, 3D, .wasd, FMODSIMPLEPW crypto
+    ├── runtime/                   # gm_runtime: StepLoop, Room/Instance/Object, TMask collisions, mp_*, particles, ds_*, 1282 built-ins
     ├── extensions/                # gm_extensions: GEX loader, external_call dispatcher, native C++ shims
-    └── app/                       # gmrunner executable: CLI + reentrant frame loop entrypoint
+    └── app/                       # gmrunner executable (Desktop/WASM) / libmain.so (Android): CLI + reentrant frame loop entrypoint
 ```
 
 ---
@@ -148,4 +151,4 @@ gmrunner/
 | **Phase 4** | External DLL interception, full `gm_audio` mixer/trackers/DSP, shims for `GMFMODSimple`, `SuperSound`, `MaizeMusic`, `CleanMem`, full GM 8.1 built-ins | `GM80_parasoko`, `GM81_nikaple`, `GM81_kamilia` playable (**Complete**) |
 | **Phase 5** | Fixed-function 3D `d3d_*` + `C3D_Model`, GM 8.2 runner behaviors, shims for `gm82core`, `gm82buf`, `gm82snd`, `gm82joy`, `gm82drag`, `gm82test` | `GM82_guy`, `GM82_renex` (3D `.g3z` via virtual pipe + `.mod`/`.s3m` music) playable (**Complete**) |
 | **Phase 6** | `gm82dx9` extended graphics shim + in-house D3D9 SM1/SM2/SM3 bytecode -> GLSL transpiler | `GM82_MKFusion` (compiled shaders, 5,400+ external assets, `ds_list_write` saves) & `GM82_renex` (base64 shaders + custom VBO/IBO) playable (**Complete**) |
-| **Phase 7** | Linux, macOS, WebAssembly (Emscripten + WebGL 2 + OPFS/IDBFS + JSPI/Asyncify), Android (NDK + GLES 3 + touch overlay), performance polish | All 7 sample games verified across all 5 platforms |
+| **Phase 7** | Linux, macOS, WebAssembly (Emscripten + WebGL 2 + OPFS/IDBFS + JSPI/Asyncify + lazy folder/ZIP VFS), Android (NDK + GLES 3 + touch overlay), performance polish | All 5 platform targets & packaging complete; Windows, Linux, WebAssembly (Asyncify & JSPI), and Android arm64-v8a verified (**Complete**) |

@@ -1446,6 +1446,9 @@ Result<std::string> transpile_d3d9_to_glsl(
         // Keep rasterization adjustments separate from the D3D matrices visible to shaders.
         out << "    gl_Position = vec4(o_pos.x, o_pos.y * u_gm_yflip, o_pos.z, o_pos.w);\n"
             << "    gl_Position.xy += u_pixel_center_offset * gl_Position.w;\n";
+        if (gles3 && body_ss.str().find("gl_PointSize") == std::string::npos) {
+            out << "    gl_PointSize = 1.0;\n";
+        }
     } else {
         if (sh.major_version == 1) out << "    o_col0 = r0;\n";
         // D3D9 alpha test still runs after pixel shaders when D3DRS_ALPHATESTENABLE is set.
@@ -1525,6 +1528,7 @@ void main() {
     vec4 cp = u_proj * vp;
     gl_Position = vec4(cp.x, cp.y * u_gm_yflip, cp.z, cp.w);
     gl_Position.xy += u_pixel_center_offset * gl_Position.w;
+    gl_PointSize = 1.0;
     v_TEXCOORD0 = ff_texcoord(a_uv.xy, vp.xyz, a_norm.xyz);
     v_COLOR0 = a_col * u_model_tint;
     v_NORMAL0 = vec4(a_norm.xyz, 0.0);

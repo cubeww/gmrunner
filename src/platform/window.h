@@ -24,6 +24,12 @@ struct WindowConfig {
     bool show_cursor = true;
 };
 
+struct TouchFinger {
+    i64 finger_id = 0;
+    f32 x = 0.0f; // Normalized [0, 1] window coordinates
+    f32 y = 0.0f;
+};
+
 struct InputState {
     std::array<bool, 256> key_down{};
     std::array<bool, 256> key_pressed{};
@@ -41,6 +47,9 @@ struct InputState {
     bool mouse_wheel_up = false;
     bool mouse_wheel_down = false;
 
+    std::vector<TouchFinger> touches;
+    bool touch_seen = false;
+
     std::vector<std::string> dropped_files;
 
     void begin_frame();
@@ -54,6 +63,8 @@ struct WindowEvents {
     bool focus_lost = false;
     bool entered_background = false;
     bool entered_foreground = false;
+    bool context_lost = false;
+    bool any_user_gesture = false;
     i32 new_width = 0;
     i32 new_height = 0;
 };
@@ -130,9 +141,12 @@ public:
 
     [[nodiscard]] static void* gl_get_proc_address(const char* proc_name) noexcept;
 
-    // Platform dialogs, URL & clipboard utilities.
+    // Platform dialogs, URL, text input & clipboard utilities.
     void show_message(std::string_view title, std::string_view message) const;
     [[nodiscard]] bool show_question(std::string_view title, std::string_view message) const;
+    [[nodiscard]] std::string prompt_string(std::string_view prompt, std::string_view default_val) const;
+    void set_text_input(bool enabled);
+    [[nodiscard]] static bool is_mobile_touch_platform() noexcept;
     [[nodiscard]] static bool open_url(std::string_view url);
     [[nodiscard]] static std::string clipboard_get_text();
     static void clipboard_set_text(std::string_view text);

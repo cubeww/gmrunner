@@ -3,6 +3,10 @@
 #include <chrono>
 #include <thread>
 
+#if defined(__EMSCRIPTEN__)
+#include <emscripten/emscripten.h>
+#endif
+
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -53,8 +57,15 @@ f64 Clock::now_seconds() noexcept {
 
 void Clock::sleep_until_us(u64 target_us, const std::function<void()>& pump) {
 #if defined(__EMSCRIPTEN__)
-    (void)target_us;
-    (void)pump;
+    const u64 now = now_us();
+    if (now < target_us) {
+        const u64 rem_us = target_us - now;
+        const unsigned int sleep_ms = static_cast<unsigned int>((rem_us + 999u) / 1000u);
+        emscripten_sleep(sleep_ms > 0u ? sleep_ms : 1u);
+    }
+    if (pump) {
+        pump();
+    }
 #else
     for (;;) {
         const u64 now = now_us();
@@ -74,6 +85,18 @@ void Clock::sleep_until_us(u64 target_us, const std::function<void()>& pump) {
             }
             std::this_thread::yield();
         }
+    }
+#endif
+}
+
+void Clock::yield_ms(u32 ms) {
+#if defined(__EMSCRIPTEN__)
+    emscripten_sleep(ms > 0u ? ms : 1u);
+#else
+    if (ms > 0u) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+    } else {
+        std::this_thread::yield();
     }
 #endif
 }

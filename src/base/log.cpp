@@ -6,6 +6,10 @@
 #include <mutex>
 #include <vector>
 
+#if defined(__ANDROID__)
+#include <android/log.h>
+#endif
+
 namespace gm {
 
 namespace {
@@ -14,6 +18,7 @@ std::atomic<u8> g_log_level{static_cast<u8>(LogLevel::Info)};
 TraceFlags g_trace_flags{};
 std::mutex g_log_mutex;
 
+#if !defined(__ANDROID__)
 constexpr const char* level_tag(LogLevel level) noexcept {
     switch (level) {
         case LogLevel::Trace: return "TRACE";
@@ -25,6 +30,7 @@ constexpr const char* level_tag(LogLevel level) noexcept {
     }
     return "?????";
 }
+#endif
 
 } // namespace
 
@@ -51,6 +57,25 @@ void Logger::write(LogLevel level, std::string_view category, std::string_view m
     }
 
     std::scoped_lock lock(g_log_mutex);
+#if defined(__ANDROID__)
+    int prio = ANDROID_LOG_INFO;
+    switch (level) {
+        case LogLevel::Trace: prio = ANDROID_LOG_VERBOSE; break;
+        case LogLevel::Debug: prio = ANDROID_LOG_DEBUG; break;
+        case LogLevel::Info:  prio = ANDROID_LOG_INFO; break;
+        case LogLevel::Warn:  prio = ANDROID_LOG_WARN; break;
+        case LogLevel::Error: prio = ANDROID_LOG_ERROR; break;
+        case LogLevel::Fatal: prio = ANDROID_LOG_FATAL; break;
+    }
+    __android_log_print(
+        prio,
+        "gmrunner",
+        "[%.*s] %.*s",
+        static_cast<int>(category.size()),
+        category.data(),
+        static_cast<int>(message.size()),
+        message.data());
+#else
     FILE* out = (level >= LogLevel::Warn) ? stderr : stdout;
     std::fprintf(
         out,
@@ -61,6 +86,7 @@ void Logger::write(LogLevel level, std::string_view category, std::string_view m
         static_cast<int>(message.size()),
         message.data());
     std::fflush(out);
+#endif
 }
 
 void Logger::writef(LogLevel level, std::string_view category, const char* fmt, ...) {

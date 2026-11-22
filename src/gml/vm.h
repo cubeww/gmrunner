@@ -6,9 +6,12 @@
 #include "gml/value.h"
 
 #include <array>
+#include <memory>
 #include <span>
+#include <string>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace gm {
@@ -20,12 +23,48 @@ struct VarSlot {
         u32 length = 0;
         std::unordered_map<u32, RValue> values;
     };
+    struct ArrayData {
+        std::unordered_map<u32, ArrayRow> rows; // unwritten columns within a row's length read as zero
+    };
+
     RValue scalar;
-    std::unordered_map<u32, ArrayRow> rows; // unwritten columns within a row's length read as zero
+    std::unique_ptr<ArrayData> array_data;
+
+    VarSlot() = default;
+    VarSlot(const VarSlot& other)
+        : scalar(other.scalar),
+          array_data(other.array_data ? std::make_unique<ArrayData>(*other.array_data) : nullptr) {}
+    VarSlot& operator=(const VarSlot& other) {
+        if (this != &other) {
+            scalar = other.scalar;
+            array_data = other.array_data ? std::make_unique<ArrayData>(*other.array_data) : nullptr;
+        }
+        return *this;
+    }
+    VarSlot(VarSlot&&) noexcept = default;
+    VarSlot& operator=(VarSlot&&) noexcept = default;
 };
 
+// Compact hybrid variable table: stores small sets (most instances & GML var locals)
+// in a flat cache-local vector and promotes automatically to a hash map for large tables.
 class VariableTable {
 public:
+    static constexpr usize kFlatLimit = 24;
+
+    VariableTable() = default;
+    VariableTable(const VariableTable& other)
+        : flat_(other.flat_),
+          map_(other.map_ ? std::make_unique<std::unordered_map<u32, VarSlot>>(*other.map_) : nullptr) {}
+    VariableTable& operator=(const VariableTable& other) {
+        if (this != &other) {
+            flat_ = other.flat_;
+            map_ = other.map_ ? std::make_unique<std::unordered_map<u32, VarSlot>>(*other.map_) : nullptr;
+        }
+        return *this;
+    }
+    VariableTable(VariableTable&&) noexcept = default;
+    VariableTable& operator=(VariableTable&&) noexcept = default;
+
     [[nodiscard]] bool exists(u32 var_id) const noexcept;
     [[nodiscard]] const RValue* get_scalar(u32 var_id) const noexcept;
     void set_scalar(u32 var_id, RValue value);
@@ -37,10 +76,15 @@ public:
     [[nodiscard]] std::vector<u32> all_var_ids() const;
 
 private:
-    std::unordered_map<u32, VarSlot> slots_;
+    [[nodiscard]] const VarSlot* find_slot(u32 var_id) const noexcept;
+    [[nodiscard]] VarSlot& find_or_create_slot(u32 var_id);
+    void promote_to_map();
+
+    std::vector<std::pair<u32, VarSlot>> flat_;
+    std::unique_ptr<std::unordered_map<u32, VarSlot>> map_;
 };
 
-// Runtime host interface implemented by gm_runtime (Phases 3-6).
+// Runtime host interface implemented by gm_runtime (Phases 3-7).
 // Allows gm_gml VM to run completely decoupled from graphics/audio/rooms.
 enum class TargetUse { With, ReadField, WriteField };
 
@@ -134,6 +178,12 @@ private:
     std::unordered_map<i32, VariableTable> standalone_instances_;
     std::vector<bool> declared_globals_;
     std::vector<RValue> const_slots_;
+
+    // Reusable VM-owned execution stacks sliced per call frame (avoids per-call mallocs).
+    std::vector<RValue> value_stack_;
+    std::vector<RValue> temp_stack_;
+    std::vector<WithFrame> with_stack_;
+    std::unordered_map<std::string, std::shared_ptr<BytecodeChunk>> exec_string_cache_;
 
     std::array<RValue, 16> current_args_{};
     i32 current_argc_ = 0;

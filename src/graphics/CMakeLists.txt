@@ -12,6 +12,8 @@ add_library(gm_graphics STATIC
     model3d.cpp
     renderer2d.h
     renderer2d.cpp
+    touch_overlay.h
+    touch_overlay.cpp
 )
 
 target_include_directories(gm_graphics PUBLIC ${CMAKE_SOURCE_DIR}/src)
@@ -20,6 +22,7 @@ target_link_libraries(gm_graphics
     PUBLIC
         gm_base
         gm_loader
+        gm_platform
 )
 
 if(ANDROID)

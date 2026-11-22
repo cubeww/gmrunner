@@ -5,6 +5,7 @@
 #include "base/math.h"
 #include "gml/builtins_catalog.h"
 #include "platform/clock.h"
+#include "platform/web_bridge.h"
 
 #include <algorithm>
 #include <cmath>
@@ -90,6 +91,12 @@ Result<void> Runner::init(GameData game, CompiledProgram program, std::vector<st
     }
     renderer_.set_interpolation(game_.options.interpolate_pixels);
     renderer_.upload_game_assets(game_);
+    if (auto res = touch_overlay_.init(gfx_); !res) {
+        GM_LOG_WARN("gfx", "Touch overlay init failed: %s", res.error_message().c_str());
+    }
+    if (PlatformWindow::is_mobile_touch_platform()) {
+        touch_overlay_.set_enabled(true);
+    }
 
     // Initialize audio engine (non-fatal if no audio device is available, e.g., headless).
     if (auto res = audio_.init(); !res) {
@@ -313,6 +320,7 @@ void Runner::shutdown() noexcept {
 
     dll_registry_.reset(this);
     audio_.shutdown();
+    touch_overlay_.shutdown();
     renderer_.shutdown();
     vm_.reset();
 }
@@ -708,7 +716,32 @@ void Runner::tick_frame() {
 
     // Stage 1: Poll OS/SDL events & map mouse coordinates to active view.
     const WindowEvents ev = window_.poll_events();
-    const InputState& inp = window_.input();
+
+    if (ev.entered_background) {
+        paused_in_background_ = true;
+        audio_.suspend();
+        vfs_.notify_persist_write();
+        GM_LOG_INFO("runtime", "Entered background; suspended audio and frame simulation");
+    }
+    if (ev.entered_foreground) {
+        paused_in_background_ = false;
+        audio_.resume();
+        GM_LOG_INFO("runtime", "Returned to foreground; resumed audio and frame simulation");
+    }
+    if (ev.context_lost) {
+        GM_LOG_WARN("gfx", "Graphics context lost; reloading GPU resources");
+        if (auto res = gfx_.reinit_after_context_loss(&PlatformWindow::gl_get_proc_address); res) {
+            (void)renderer_.reload_gpu_resources(game_);
+            (void)touch_overlay_.reload_gpu_resources();
+        }
+    }
+#if defined(__EMSCRIPTEN__)
+    if (ev.any_user_gesture && !web_audio_unlocked_) {
+        web_audio_unlocked_ = true;
+        web_unlock_audio();
+        audio_.resume();
+    }
+#endif
 
     if (ev.quit_requested) {
         // Fire ev_close_button (ev_other=7, sub=30) if any object handles it, then quit if close_sec allows.
@@ -718,6 +751,13 @@ void Runner::tick_frame() {
             return;
         }
     }
+
+    if (paused_in_background_) {
+        return;
+    }
+
+    touch_overlay_.update(window_);
+    const InputState& inp = window_.input();
 
     // Standard GM8 default hotkeys (respecting GameOptions).
     if (game_.options.quit_key && inp.key_pressed[27]) { // ESC
@@ -1512,6 +1552,7 @@ void Runner::render_current_frame() {
 
 void Runner::present_current_frame() {
     renderer_.present_screen(window_color_);
+    touch_overlay_.render(window_.drawable_width(), window_.drawable_height());
     window_.swap_buffers();
     renderer_.end_frame();
 }
@@ -1555,13 +1596,9 @@ void Runner::render_view(i32 /*view_idx*/, f32 vx, f32 vy, f32 vw, f32 vh, f32 a
 
     // 2. 3-way depth-descending render list: instances, tiles, auto-draw particle systems.
     // Higher depth draws FIRST (behind); lower depth draws LATER (in front).
-    struct RenderItem {
-        f64 depth = 0.0;
-        u8 kind = 0; // 0 = tile, 1 = instance, 2 = particles
-        usize order = 0;
-        i32 ref_id = 0;
-    };
+    // A Draw event can call screen_redraw() before this traversal finishes.
     std::vector<RenderItem> items;
+    items.swap(render_items_scratch_);
     items.reserve(instances_.size() + tiles_.size() + 8);
 
     for (usize i = 0; i < tiles_.size(); ++i) {
@@ -1610,6 +1647,9 @@ void Runner::render_view(i32 /*view_idx*/, f32 vx, f32 vy, f32 vw, f32 vh, f32 a
             particles_.draw_system(item.ref_id, renderer_, game_);
         }
     }
+
+    items.clear();
+    items.swap(render_items_scratch_);
 
     // 3. Foreground backgrounds (0..7)
     if (renderer_.d3d_active()) renderer_.d3d_set_depth(-12000.0f);
@@ -2966,6 +3006,7 @@ bool Runner::wait_for_key() {
     inp.key_released.fill(false);
     while (true) {
         const WindowEvents ev = window_.poll_events_accumulate();
+        touch_overlay_.update(window_);
         update_mouse_room_coords();
         if (ev.quit_requested) {
             running_ = false;
@@ -2985,6 +3026,7 @@ bool Runner::wait_for_mouse() {
     inp.mouse_released.fill(false);
     while (true) {
         const WindowEvents ev = window_.poll_events_accumulate();
+        touch_overlay_.update(window_);
         update_mouse_room_coords();
         if (ev.quit_requested) {
             running_ = false;

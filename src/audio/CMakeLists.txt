@@ -39,7 +39,15 @@ target_link_libraries(gm_audio
         gm_audio_third_party
 )
 
-if(UNIX AND NOT APPLE AND NOT ANDROID AND NOT EMSCRIPTEN)
+if(APPLE)
+    target_link_libraries(gm_audio PRIVATE
+        "-framework CoreAudio"
+        "-framework AudioToolbox"
+        "-framework CoreFoundation"
+    )
+elseif(ANDROID)
+    target_link_libraries(gm_audio PRIVATE m dl)
+elseif(UNIX AND NOT EMSCRIPTEN)
     target_link_libraries(gm_audio PRIVATE pthread m dl)
 endif()
 

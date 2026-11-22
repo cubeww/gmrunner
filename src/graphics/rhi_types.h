@@ -116,12 +116,14 @@ struct BlendState {
     BlendFactor dst_alpha = BlendFactor::InvSrcAlpha;
     BlendOp op_rgb = BlendOp::Add;
     BlendOp op_alpha = BlendOp::Add;
+    constexpr bool operator==(const BlendState&) const noexcept = default;
 };
 
 struct DepthState {
     bool test_enabled = false;
     bool write_enabled = true;
     CompareFunc func = CompareFunc::LessEqual;
+    constexpr bool operator==(const DepthState&) const noexcept = default;
 };
 
 struct ViewportRect {
@@ -129,6 +131,7 @@ struct ViewportRect {
     i32 y = 0;
     i32 width = 0;
     i32 height = 0;
+    constexpr bool operator==(const ViewportRect&) const noexcept = default;
 };
 
 struct TextureDesc {

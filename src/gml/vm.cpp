@@ -26,21 +26,53 @@ Result<u32> pack_array_index(i32 i0, i32 i1, u8 dims) noexcept {
 
 } // namespace
 
+const VarSlot* VariableTable::find_slot(u32 var_id) const noexcept {
+    if (map_) {
+        const auto it = map_->find(var_id);
+        return it == map_->end() ? nullptr : &it->second;
+    }
+    for (const auto& [id, slot] : flat_) {
+        if (id == var_id) return &slot;
+    }
+    return nullptr;
+}
+
+void VariableTable::promote_to_map() {
+    map_ = std::make_unique<std::unordered_map<u32, VarSlot>>();
+    map_->reserve(flat_.size() * 2 + 8);
+    for (auto& [id, slot] : flat_) {
+        map_->emplace(id, std::move(slot));
+    }
+    flat_.clear();
+    flat_.shrink_to_fit();
+}
+
+VarSlot& VariableTable::find_or_create_slot(u32 var_id) {
+    if (map_) {
+        return (*map_)[var_id];
+    }
+    for (auto& [id, slot] : flat_) {
+        if (id == var_id) return slot;
+    }
+    if (flat_.size() >= kFlatLimit) {
+        promote_to_map();
+        return (*map_)[var_id];
+    }
+    flat_.emplace_back(var_id, VarSlot{});
+    return flat_.back().second;
+}
+
 bool VariableTable::exists(u32 var_id) const noexcept {
-    return slots_.contains(var_id);
+    return find_slot(var_id) != nullptr;
 }
 
 const RValue* VariableTable::get_scalar(u32 var_id) const noexcept {
-    const auto it = slots_.find(var_id);
-    if (it == slots_.end()) {
-        return nullptr;
-    }
-    return &it->second.scalar;
+    const VarSlot* slot = find_slot(var_id);
+    return slot ? &slot->scalar : nullptr;
 }
 
 void VariableTable::set_scalar(u32 var_id, RValue value) {
-    auto& slot = slots_[var_id];
-    slot.scalar = std::move(value);
+    find_or_create_slot(var_id).scalar = std::move(value);
 }
 
 Result<const RValue*> VariableTable::get_array(u32 var_id, i32 i0, i32 i1, u8 dims) const noexcept {
@@ -48,16 +80,19 @@ Result<const RValue*> VariableTable::get_array(u32 var_id, i32 i0, i32 i1, u8 di
     if (!key_res) return key_res.error();
     const u32 key = key_res.value();
 
-    const auto it = slots_.find(var_id);
-    if (it == slots_.end()) {
+    const VarSlot* slot = find_slot(var_id);
+    if (!slot) {
         return static_cast<const RValue*>(nullptr);
     }
     if (key == 0u) {
-        return &it->second.scalar;
+        return &slot->scalar;
+    }
+    if (!slot->array_data) {
+        return static_cast<const RValue*>(nullptr);
     }
     const u32 column = key % kGmArrayMaxDim;
-    const auto row = it->second.rows.find(key / kGmArrayMaxDim);
-    if (row == it->second.rows.end() || column >= row->second.length) {
+    const auto row = slot->array_data->rows.find(key / kGmArrayMaxDim);
+    if (row == slot->array_data->rows.end() || column >= row->second.length) {
         return static_cast<const RValue*>(nullptr);
     }
     const auto value = row->second.values.find(column);
@@ -70,11 +105,14 @@ Result<void> VariableTable::set_array(u32 var_id, i32 i0, i32 i1, u8 dims, RValu
     if (!key_res) return key_res.error();
     const u32 key = key_res.value();
 
-    auto& slot = slots_[var_id];
+    VarSlot& slot = find_or_create_slot(var_id);
     if (key == 0u) {
         slot.scalar = std::move(value);
     } else {
-        auto& row = slot.rows[key / kGmArrayMaxDim];
+        if (!slot.array_data) {
+            slot.array_data = std::make_unique<VarSlot::ArrayData>();
+        }
+        auto& row = slot.array_data->rows[key / kGmArrayMaxDim];
         const u32 column = key % kGmArrayMaxDim;
         row.values[column] = std::move(value);
         row.length = std::max(row.length, column + 1);
@@ -83,14 +121,24 @@ Result<void> VariableTable::set_array(u32 var_id, i32 i0, i32 i1, u8 dims, RValu
 }
 
 void VariableTable::clear() {
-    slots_.clear();
+    flat_.clear();
+    if (map_) map_->clear();
 }
 
 std::vector<u32> VariableTable::all_var_ids() const {
     std::vector<u32> ids;
-    ids.reserve(slots_.size());
-    for (const auto& [id, slot] : slots_) {
-        ids.push_back(id);
+    if (map_) {
+        ids.reserve(map_->size());
+        for (const auto& [id, slot] : *map_) {
+            (void)slot;
+            ids.push_back(id);
+        }
+    } else {
+        ids.reserve(flat_.size());
+        for (const auto& [id, slot] : flat_) {
+            (void)slot;
+            ids.push_back(id);
+        }
     }
     return ids;
 }
@@ -98,6 +146,9 @@ std::vector<u32> VariableTable::all_var_ids() const {
 GmlVm::GmlVm(CompiledProgram& program, IVmHost* host)
     : program_(program), host_(host) {
     const_slots_.resize(program_.const_init_chunks.size());
+    value_stack_.reserve(512);
+    temp_stack_.reserve(128);
+    with_stack_.reserve(32);
 }
 
 bool GmlVm::is_declared_global(u32 var_id) const noexcept {
@@ -168,9 +219,20 @@ Result<RValue> GmlVm::execute_ext_gml(u32 ext_gml_id, i32 self_id, i32 other_id,
 }
 
 Result<RValue> GmlVm::execute_string(std::string_view code, i32 self_id, i32 other_id, std::span<const RValue> args) {
-    auto chunk_res = GmlCompiler::compile_chunk("<execute_string>", code, program_.symbols);
-    if (!chunk_res) return chunk_res.error();
-    return execute(chunk_res.value(), self_id, other_id, args);
+    std::string key(code);
+    std::shared_ptr<BytecodeChunk> cached;
+    if (const auto it = exec_string_cache_.find(key); it != exec_string_cache_.end()) {
+        cached = it->second;
+    } else {
+        auto chunk_res = GmlCompiler::compile_chunk("<execute_string>", code, program_.symbols);
+        if (!chunk_res) return chunk_res.error();
+        cached = std::make_shared<BytecodeChunk>(std::move(chunk_res.value()));
+        if (exec_string_cache_.size() >= 512) {
+            exec_string_cache_.clear();
+        }
+        exec_string_cache_.emplace(std::move(key), cached);
+    }
+    return execute(*cached, self_id, other_id, args);
 }
 
 Result<RValue> GmlVm::execute(
@@ -193,23 +255,33 @@ Result<RValue> GmlVm::execute(
     current_argc_ = static_cast<i32>(copy_cnt);
     ++call_depth_;
 
+    const usize stack_base = value_stack_.size();
+    const usize temp_base = temp_stack_.size();
+    const usize with_base = with_stack_.size();
+    if (chunk.temp_count > 0) {
+        temp_stack_.resize(temp_base + chunk.temp_count, RValue(0.0));
+    }
+
     struct ScopeRestore {
         GmlVm* vm;
         const std::array<RValue, 16>& saved_args;
         i32 saved_argc;
+        usize stack_base;
+        usize temp_base;
+        usize with_base;
         ~ScopeRestore() {
+            vm->value_stack_.resize(stack_base);
+            vm->temp_stack_.resize(temp_base);
+            vm->with_stack_.resize(with_base);
             vm->current_args_ = saved_args;
             vm->current_argc_ = saved_argc;
             --vm->call_depth_;
         }
-    } guard{this, saved_args, saved_argc};
+    } guard{this, saved_args, saved_argc, stack_base, temp_base, with_base};
 
-    std::vector<RValue> stack;
-    stack.reserve(64);
-
+    auto& stack = value_stack_;
+    auto& with_stack = with_stack_;
     VariableTable locals;
-    std::vector<RValue> temps(chunk.temp_count);
-    std::vector<WithFrame> with_stack;
 
     i32 cur_self = host_ ? host_->instance_handle(self_id) : self_id;
     i32 cur_other = host_ ? host_->instance_handle(other_id) : other_id;
@@ -219,6 +291,23 @@ Result<RValue> GmlVm::execute(
         RValue v = std::move(stack.back());
         stack.pop_back();
         return v;
+    };
+
+    auto pop_call_args = [&](usize argc, std::array<RValue, 16>& small_buf, std::vector<RValue>& big_buf) -> std::span<const RValue> {
+        const usize base = stack.size() - argc;
+        if (argc <= small_buf.size()) {
+            for (usize k = 0; k < argc; ++k) {
+                small_buf[k] = std::move(stack[base + k]);
+            }
+            stack.resize(base);
+            return std::span<const RValue>(small_buf.data(), argc);
+        }
+        big_buf.resize(argc);
+        for (usize k = 0; k < argc; ++k) {
+            big_buf[k] = std::move(stack[base + k]);
+        }
+        stack.resize(base);
+        return std::span<const RValue>(big_buf.data(), argc);
     };
 
     auto pop_indices = [&](u8 dims, i32& i0, i32& i1) {
@@ -333,11 +422,11 @@ Result<RValue> GmlVm::execute(
                 break;
 
             case OpCode::LoadTemp:
-                stack.push_back(temps[ins.operand]);
+                stack.push_back(temp_stack_[temp_base + ins.operand]);
                 break;
 
             case OpCode::StoreTemp:
-                temps[ins.operand] = pop();
+                temp_stack_[temp_base + ins.operand] = pop();
                 break;
 
             case OpCode::DeclareGlobal: {
@@ -623,15 +712,15 @@ Result<RValue> GmlVm::execute(
                 if (cnt <= 0) {
                     ip = ins.operand;
                 } else {
-                    temps[ins.aux] = RValue(cnt);
+                    temp_stack_[temp_base + ins.aux] = RValue(cnt);
                 }
                 break;
             }
 
             case OpCode::RepeatNext: {
-                const i64 rem = static_cast<i64>(temps[ins.aux].as_real()) - 1;
+                const i64 rem = static_cast<i64>(temp_stack_[temp_base + ins.aux].as_real()) - 1;
                 if (rem > 0) {
-                    temps[ins.aux] = RValue(rem);
+                    temp_stack_[temp_base + ins.aux] = RValue(rem);
                     ip = ins.operand;
                 }
                 break;
@@ -681,25 +770,23 @@ Result<RValue> GmlVm::execute(
 
             // ---- Calls & returns ----
             case OpCode::CallBuiltin: {
-                const usize argc = ins.aux;
-                const usize base = stack.size() - argc;
-                std::span<const RValue> call_args(stack.data() + base, argc);
+                std::array<RValue, 16> small_args;
+                std::vector<RValue> big_args;
+                const auto call_args = pop_call_args(ins.aux, small_args, big_args);
                 RValue ret(0.0);
                 if (host_) {
                     auto r = host_->call_builtin(ins.operand, cur_self, cur_other, call_args);
                     if (!r) return r.error();
                     ret = std::move(r.value());
                 }
-                stack.resize(base);
                 stack.push_back(std::move(ret));
                 break;
             }
 
             case OpCode::CallScript: {
-                const usize argc = ins.aux;
-                const usize base = stack.size() - argc;
-                std::vector<RValue> call_args(stack.begin() + static_cast<std::ptrdiff_t>(base), stack.end());
-                stack.resize(base);
+                std::array<RValue, 16> small_args;
+                std::vector<RValue> big_args;
+                const auto call_args = pop_call_args(ins.aux, small_args, big_args);
                 auto r = execute_script(ins.operand, cur_self, cur_other, call_args);
                 if (!r) return r.error();
                 stack.push_back(std::move(r.value()));
@@ -707,10 +794,9 @@ Result<RValue> GmlVm::execute(
             }
 
             case OpCode::CallExtGml: {
-                const usize argc = ins.aux;
-                const usize base = stack.size() - argc;
-                std::vector<RValue> call_args(stack.begin() + static_cast<std::ptrdiff_t>(base), stack.end());
-                stack.resize(base);
+                std::array<RValue, 16> small_args;
+                std::vector<RValue> big_args;
+                const auto call_args = pop_call_args(ins.aux, small_args, big_args);
                 auto r = execute_ext_gml(ins.operand, cur_self, cur_other, call_args);
                 if (!r) return r.error();
                 stack.push_back(std::move(r.value()));
@@ -718,26 +804,26 @@ Result<RValue> GmlVm::execute(
             }
 
             case OpCode::CallExtDll: {
-                const usize argc = ins.aux;
-                const usize base = stack.size() - argc;
-                std::span<const RValue> call_args(stack.data() + base, argc);
+                std::array<RValue, 16> small_args;
+                std::vector<RValue> big_args;
+                const auto call_args = pop_call_args(ins.aux, small_args, big_args);
                 RValue ret(0.0);
                 if (host_) {
                     auto r = host_->call_extension_dll(ins.operand, call_args);
                     if (!r) return r.error();
                     ret = std::move(r.value());
                 }
-                stack.resize(base);
                 stack.push_back(std::move(ret));
                 break;
             }
 
             case OpCode::CallCodeAction: {
                 const auto action = chunk.code_actions[ins.operand];
-                const usize base = stack.size() - ins.aux;
-                auto result = execute(*action, cur_self, cur_other, std::span<const RValue>(stack).subspan(base));
+                std::array<RValue, 16> small_args;
+                std::vector<RValue> big_args;
+                const auto call_args = pop_call_args(ins.aux, small_args, big_args);
+                auto result = execute(*action, cur_self, cur_other, call_args);
                 if (!result) return result.error();
-                stack.resize(base);
                 stack.push_back(std::move(result.value()));
                 break;
             }

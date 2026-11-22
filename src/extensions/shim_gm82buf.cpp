@@ -1362,8 +1362,8 @@ public:
             return RValue(1.0);
         }
         if (fn == "udpsocket_get_last_address") {
-            auto it = udpsockets_.find(static_cast<u32>(shim_i32(args, 0, 0)));
 #if !defined(__EMSCRIPTEN__)
+            auto it = udpsockets_.find(static_cast<u32>(shim_i32(args, 0, 0)));
             if (it != udpsockets_.end() && it->second.has_last_from) {
                 return RValue(sockaddr_to_ip(it->second.last_from));
             }
@@ -1371,8 +1371,8 @@ public:
             return RValue(std::string{});
         }
         if (fn == "udpsocket_get_last_port") {
-            auto it = udpsockets_.find(static_cast<u32>(shim_i32(args, 0, 0)));
 #if !defined(__EMSCRIPTEN__)
+            auto it = udpsockets_.find(static_cast<u32>(shim_i32(args, 0, 0)));
             if (it != udpsockets_.end() && it->second.has_last_from) {
                 return RValue(static_cast<f64>(sockaddr_to_port(it->second.last_from)));
             }
@@ -1380,8 +1380,8 @@ public:
             return RValue(0.0);
         }
         if (fn == "udpsocket_get_ttl") {
-            auto it = udpsockets_.find(static_cast<u32>(shim_i32(args, 0, 0)));
 #if !defined(__EMSCRIPTEN__)
+            auto it = udpsockets_.find(static_cast<u32>(shim_i32(args, 0, 0)));
             if (it != udpsockets_.end() && it->second.sock != kInvalidSocket) {
                 int ttl = 64;
                 socklen_t len = sizeof(ttl);

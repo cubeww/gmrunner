@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>gmrunner — GameMaker 8.0 / 8.1 / 8.2 WebAssembly Runtime</title>
+    <link rel="stylesheet" href="gmrunner_web.css" />
+</head>
+<body>
+    <header class="topbar">
+        <div class="brand">
+            <span class="brand-title">gmrunner</span>
+            <span class="badge" id="storage-badge">Storage: --</span>
+            <span class="status-text" id="status-text">Initializing WebAssembly...</span>
+        </div>
+        <div class="controls">
+            <button id="btn-pick-folder" type="button" title="Open a local GameMaker game folder (no ZIP required)">Open Folder</button>
+            <button id="btn-pick-file" type="button" title="Open a .zip archive or single .exe game">Open ZIP / EXE</button>
+            <button id="btn-touch" type="button" title="Toggle virtual touch controller">Touch: Auto</button>
+            <button id="btn-mute" type="button" title="Mute or unmute audio">Audio: On</button>
+            <button id="btn-export-saves" type="button" title="Download persistent save files">Export Saves</button>
+            <button id="btn-fullscreen" type="button" title="Toggle fullscreen">Fullscreen</button>
+            <button id="btn-stop" type="button" class="danger" disabled>Stop</button>
+        </div>
+    </header>
+
+    <main class="stage" id="drop-zone">
+        <canvas id="canvas" oncontextmenu="event.preventDefault()" tabindex="0"></canvas>
+
+        <div class="launcher-overlay" id="launcher-overlay">
+            <div class="launcher-card">
+                <h1>gmrunner WebAssembly</h1>
+                <p>Drop a <strong>GameMaker 8.0 / 8.1 / 8.2</strong> game folder, a <code>.zip</code> archive, or a standalone <code>.exe</code> anywhere on this page.</p>
+                <p class="hint">
+                    Folders and <code>.zip</code> archives are mounted lazily on demand — large multi-file games (including 1 GB+ external audio/asset libraries) open immediately without copying all files into RAM.
+                    Saves and virtual registry data persist automatically in OPFS / IndexedDB.
+                </p>
+                <div class="launcher-actions">
+                    <button id="hero-pick-folder" type="button" class="primary">Select Game Folder</button>
+                    <button id="hero-pick-file" type="button">Select .zip or .exe</button>
+                </div>
+            </div>
+        </div>
+
+        <input id="input-folder" type="file" webkitdirectory directory multiple hidden />
+        <input id="input-file" type="file" accept=".zip,.exe" hidden />
+    </main>
+
+    <script src="gmrunner_web.js"></script>
+    {{{ SCRIPT }}}
+</body>
+</html>

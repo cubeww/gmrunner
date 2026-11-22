@@ -68,8 +68,8 @@ struct SoundAsset {
     f64 length_ms = 0.0;
 
     // Backing media payload (only one populated according to source_kind)
-    std::vector<f32> pcm_stereo;                 // Interleaved stereo f32 @ kOutputSampleRate
-    std::shared_ptr<std::vector<u8>> stream_raw; // Compressed OGG/MP3/WAV/FLAC bytes for streaming
+    std::shared_ptr<std::vector<f32>> pcm_stereo; // Interleaved stereo f32 @ kOutputSampleRate (shared zero-copy)
+    std::shared_ptr<std::vector<u8>> stream_raw;  // Compressed OGG/MP3/WAV/FLAC bytes for streaming
     std::shared_ptr<TrackerModule> tracker_mod;
     std::shared_ptr<MidiSequence> midi_seq;
 
@@ -152,6 +152,10 @@ public:
 
     [[nodiscard]] Result<void> init();
     void shutdown() noexcept;
+    void suspend() noexcept;
+    void resume() noexcept;
+    void set_output_muted(bool muted) noexcept;
+    [[nodiscard]] bool is_output_muted() const noexcept;
     [[nodiscard]] bool is_initialized() const noexcept { return initialized_; }
 
     // Optional SoundFont loading for TinySoundFont MIDI playback.

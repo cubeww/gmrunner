@@ -22,6 +22,7 @@ namespace gm {
 namespace {
 
 constexpr usize kMaxBatchVertices = 16384;
+constexpr usize kVboRingVertices = 65536;
 
 // Minimal 8x8 ASCII 32..127 bitmap font for GM8 default font (-1).
 // Compact 8-byte-per-glyph table covering space through '~'.
@@ -363,9 +364,14 @@ Result<void> Renderer2D::init(GlGraphicsDevice& device) {
     device_ = &device;
 
     const bool is_es = device.caps().is_gles;
-    const std::string header = is_es ? "#version 300 es\nprecision highp float;\n" : "#version 330 core\n";
+    const std::string vs_header = is_es
+        ? "#version 300 es\nprecision highp float;\nprecision highp int;\n"
+        : "#version 330 core\n";
+    const std::string fs_header = is_es
+        ? "#version 300 es\nprecision highp float;\nprecision highp int;\nprecision highp sampler2D;\n"
+        : "#version 330 core\n";
 
-    const std::string vs_src = header + R"(
+    const std::string vs_src = vs_header + R"(
 layout(location = 0) in vec3 a_pos;
 layout(location = 1) in vec3 a_norm;
 layout(location = 2) in vec2 a_uv;
@@ -446,10 +452,11 @@ void main() {
     v_col_flat = lit_col;
     gl_Position = u_proj * view_pos;
     gl_Position.xy += u_pixel_center_offset * gl_Position.w;
+    gl_PointSize = 1.0;
 }
 )";
 
-    const std::string fs_src = header + R"(
+    const std::string fs_src = fs_header + R"(
 in vec2 v_uv;
 in vec4 v_col_smooth;
 flat in vec4 v_col_flat;
@@ -537,7 +544,9 @@ void main() {
     glGenBuffers(1, &vbo_);
     glBindVertexArray(vao_);
     glBindBuffer(GL_ARRAY_BUFFER, vbo_);
-    glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(kMaxBatchVertices * sizeof(Vertex3D)), nullptr, GL_STREAM_DRAW);
+    vbo_capacity_verts_ = kVboRingVertices;
+    vbo_write_offset_ = 0;
+    glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(vbo_capacity_verts_ * sizeof(Vertex3D)), nullptr, GL_STREAM_DRAW);
 
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex3D), reinterpret_cast<const void*>(offsetof(Vertex3D, x)));
@@ -558,9 +567,41 @@ void main() {
     mat4_identity(view_matrix_);
     mat4_identity(proj_matrix_);
 
+    ff_uniform_cache_ = {};
     dx9_.init(*device_);
 
     initialized_ = true;
+    return Result<void>::success();
+}
+
+Result<void> Renderer2D::reload_gpu_resources(const GameData& game) {
+    if (!device_) return Error{"Renderer2D::reload_gpu_resources called without device"};
+    // Clear stale GPU IDs without calling glDelete* on a lost GL context.
+    vao_ = 0;
+    vbo_ = 0;
+    vbo_capacity_verts_ = 0;
+    vbo_write_offset_ = 0;
+    shader_ = {};
+    builtin_font_tex_ = {};
+    screen_fbo_ = {};
+    screen_fbo_tex_ = {};
+    screen_fbo_w_ = 0;
+    screen_fbo_h_ = 0;
+    using_screen_fbo_ = false;
+    active_surface_id_ = -1;
+    sprites_.clear();
+    backgrounds_.clear();
+    fonts_.clear();
+    surfaces_.clear();
+    surface_tokens_.clear();
+    particle_shapes_.fill({});
+    vertices_.clear();
+    ff_uniform_cache_ = {};
+    initialized_ = false;
+
+    auto res = init(*device_);
+    if (!res) return res;
+    upload_game_assets(game);
     return Result<void>::success();
 }
 
@@ -929,7 +970,8 @@ void Renderer2D::present_screen(u32 border_color_bgr) {
     const i32 saved_surface = active_surface_id_;
     const bool saved_screen_fbo = using_screen_fbo_;
     const ViewportRect saved_viewport = active_viewport_;
-    const bool saved_scissor = glIsEnabled(GL_SCISSOR_TEST) == GL_TRUE;
+    const bool saved_scissor = device_->scissor_enabled();
+    const ViewportRect saved_scissor_rect = device_->scissor_rect();
     const bool saved_alpha_test = alpha_test_explicit_;
     const bool saved_d3d_active = d3d_active_;
     const bool saved_d3d_hidden = d3d_hidden_;
@@ -998,7 +1040,7 @@ void Renderer2D::present_screen(u32 border_color_bgr) {
     using_screen_fbo_ = saved_screen_fbo;
     active_viewport_ = saved_viewport;
     device_->set_viewport(saved_viewport);
-    if (saved_scissor) glEnable(GL_SCISSOR_TEST);
+    device_->set_scissor(saved_scissor, saved_scissor_rect);
     dx9_.set_active_shaders_raw(saved_dx9_vs, saved_dx9_ps);
     device_->set_color_mask(color_mask_[0], color_mask_[1], color_mask_[2], color_mask_[3]);
     device_->set_polygon_mode(saved_fill_mode);
@@ -1066,74 +1108,133 @@ void Renderer2D::upload_shader_uniforms(const f32 tint_rgba[4]) {
         gl_proj[13] = -gl_proj[13];
     }
 
-    f32 normal_mat[9];
-    compute_normal_mat3(world_matrix_, normal_mat);
-
     device_->bind_shader(shader_);
-    glUniformMatrix4fv(loc_world_, 1, GL_FALSE, world_matrix_);
-    glUniformMatrix4fv(loc_view_, 1, GL_FALSE, view_matrix_);
-    glUniformMatrix4fv(loc_proj_, 1, GL_FALSE, gl_proj);
-    glUniform2fv(loc_pixel_center_offset_, 1, pixel_center_offset_.data());
-    glUniformMatrix3fv(loc_normal_mat_, 1, GL_FALSE, normal_mat);
-    glUniform4fv(loc_model_tint_, 1, tint_rgba);
-    glUniform1i(loc_tex_, 0);
-    glUniform1i(loc_tex_blending_, tex_blending_ ? 1 : 0);
-    glUniform1i(loc_texcoord_mode_, texcoord_mode_);
-    glUniform1i(loc_flat_shading_, d3d_flat_shading_ ? 1 : 0);
+
+    auto& c = ff_uniform_cache_;
+    const bool force = !c.valid;
+    if (force) {
+        glUniform1i(loc_tex_, 0);
+    }
+
+    if (force || std::memcmp(c.world, world_matrix_, sizeof(c.world)) != 0) {
+        std::memcpy(c.world, world_matrix_, sizeof(c.world));
+        glUniformMatrix4fv(loc_world_, 1, GL_FALSE, world_matrix_);
+        f32 normal_mat[9];
+        compute_normal_mat3(world_matrix_, normal_mat);
+        glUniformMatrix3fv(loc_normal_mat_, 1, GL_FALSE, normal_mat);
+    }
+    if (force || std::memcmp(c.view, view_matrix_, sizeof(c.view)) != 0) {
+        std::memcpy(c.view, view_matrix_, sizeof(c.view));
+        glUniformMatrix4fv(loc_view_, 1, GL_FALSE, view_matrix_);
+    }
+    if (force || std::memcmp(c.proj, gl_proj, sizeof(c.proj)) != 0) {
+        std::memcpy(c.proj, gl_proj, sizeof(c.proj));
+        glUniformMatrix4fv(loc_proj_, 1, GL_FALSE, gl_proj);
+    }
+    if (force || c.pixel_center[0] != pixel_center_offset_[0] || c.pixel_center[1] != pixel_center_offset_[1]) {
+        c.pixel_center[0] = pixel_center_offset_[0];
+        c.pixel_center[1] = pixel_center_offset_[1];
+        glUniform2fv(loc_pixel_center_offset_, 1, pixel_center_offset_.data());
+    }
+    if (force || std::memcmp(c.tint, tint_rgba, sizeof(c.tint)) != 0) {
+        std::memcpy(c.tint, tint_rgba, sizeof(c.tint));
+        glUniform4fv(loc_model_tint_, 1, tint_rgba);
+    }
+
+    const i32 tb = tex_blending_ ? 1 : 0;
+    if (force || c.tex_blending != tb) {
+        c.tex_blending = tb;
+        glUniform1i(loc_tex_blending_, tb);
+    }
+    if (force || c.texcoord_mode != texcoord_mode_) {
+        c.texcoord_mode = texcoord_mode_;
+        glUniform1i(loc_texcoord_mode_, texcoord_mode_);
+    }
+    const i32 fs = d3d_flat_shading_ ? 1 : 0;
+    if (force || c.flat_shading != fs) {
+        c.flat_shading = fs;
+        glUniform1i(loc_flat_shading_, fs);
+    }
 
     // GM8 enables alpha test (GREATER 0) automatically when 3D hidden surface removal is on.
-    const bool effective_alpha_test = alpha_test_explicit_ || (d3d_active_ && d3d_hidden_);
+    const i32 effective_alpha_test = (alpha_test_explicit_ || (d3d_active_ && d3d_hidden_)) ? 1 : 0;
     const f32 effective_alpha_ref = alpha_test_explicit_ ? alpha_test_ref_ : 0.0f;
     const i32 effective_alpha_func = alpha_test_explicit_ ? alpha_test_func_ : 5; // D3DCMP_GREATER
-    glUniform1i(loc_alpha_test_, effective_alpha_test ? 1 : 0);
-    glUniform1f(loc_alpha_ref_, effective_alpha_ref);
-    glUniform1i(loc_alpha_func_, effective_alpha_func);
+    if (force || c.alpha_test != effective_alpha_test) {
+        c.alpha_test = effective_alpha_test;
+        glUniform1i(loc_alpha_test_, effective_alpha_test);
+    }
+    if (force || c.alpha_ref != effective_alpha_ref) {
+        c.alpha_ref = effective_alpha_ref;
+        glUniform1f(loc_alpha_ref_, effective_alpha_ref);
+    }
+    if (force || c.alpha_func != effective_alpha_func) {
+        c.alpha_func = effective_alpha_func;
+        glUniform1i(loc_alpha_func_, effective_alpha_func);
+    }
 
-    glUniform1i(loc_lighting_, d3d_lighting_ ? 1 : 0);
+    const i32 li = d3d_lighting_ ? 1 : 0;
+    if (force || c.lighting != li) {
+        c.lighting = li;
+        glUniform1i(loc_lighting_, li);
+    }
     if (d3d_lighting_) {
-        const ColorRGBA amb = gm_bgr_to_rgba(ambient_bgr_);
-        glUniform3f(loc_ambient_, amb.r / 255.0f, amb.g / 255.0f, amb.b / 255.0f);
-
-        i32 en[8]{};
-        i32 ty[8]{};
-        f32 pos[24]{};
-        f32 dir[24]{};
-        f32 col[24]{};
-        f32 rng[8]{};
-        f32 att[24]{};
-        f32 cone[24]{};
-        for (usize i = 0; i < 8; ++i) {
-            const auto& l = lights_[i];
-            en[i] = l.enabled ? 1 : 0;
-            ty[i] = l.type;
-            pos[i * 3 + 0] = l.pos[0]; pos[i * 3 + 1] = l.pos[1]; pos[i * 3 + 2] = l.pos[2];
-            dir[i * 3 + 0] = l.dir[0]; dir[i * 3 + 1] = l.dir[1]; dir[i * 3 + 2] = l.dir[2];
-            col[i * 3 + 0] = l.diffuse[0]; col[i * 3 + 1] = l.diffuse[1]; col[i * 3 + 2] = l.diffuse[2];
-            rng[i] = l.range;
-            att[i * 3 + 0] = l.atten[0]; att[i * 3 + 1] = l.atten[1]; att[i * 3 + 2] = l.atten[2];
-            if (l.type == 2) {
-                cone[i * 3] = std::cos(l.theta * 0.5f);
-                cone[i * 3 + 1] = std::cos(l.phi * 0.5f);
-                cone[i * 3 + 2] = l.falloff;
-            }
+        if (force || !c.lights_uploaded || c.ambient_bgr != ambient_bgr_) {
+            c.ambient_bgr = ambient_bgr_;
+            const ColorRGBA amb = gm_bgr_to_rgba(ambient_bgr_);
+            glUniform3f(loc_ambient_, amb.r / 255.0f, amb.g / 255.0f, amb.b / 255.0f);
         }
-        glUniform1iv(loc_light_enabled_, 8, en);
-        glUniform1iv(loc_light_type_, 8, ty);
-        glUniform3fv(loc_light_pos_, 8, pos);
-        glUniform3fv(loc_light_dir_, 8, dir);
-        glUniform3fv(loc_light_col_, 8, col);
-        glUniform1fv(loc_light_range_, 8, rng);
-        glUniform3fv(loc_light_atten_, 8, att);
-        glUniform3fv(loc_spot_cone_, 8, cone);
+        if (force || !c.lights_uploaded || std::memcmp(c.lights.data(), lights_.data(), sizeof(c.lights)) != 0) {
+            c.lights = lights_;
+            c.lights_uploaded = true;
+            i32 en[8]{};
+            i32 ty[8]{};
+            f32 pos[24]{};
+            f32 dir[24]{};
+            f32 col[24]{};
+            f32 rng[8]{};
+            f32 att[24]{};
+            f32 cone[24]{};
+            for (usize i = 0; i < 8; ++i) {
+                const auto& l = lights_[i];
+                en[i] = l.enabled ? 1 : 0;
+                ty[i] = l.type;
+                pos[i * 3 + 0] = l.pos[0]; pos[i * 3 + 1] = l.pos[1]; pos[i * 3 + 2] = l.pos[2];
+                dir[i * 3 + 0] = l.dir[0]; dir[i * 3 + 1] = l.dir[1]; dir[i * 3 + 2] = l.dir[2];
+                col[i * 3 + 0] = l.diffuse[0]; col[i * 3 + 1] = l.diffuse[1]; col[i * 3 + 2] = l.diffuse[2];
+                rng[i] = l.range;
+                att[i * 3 + 0] = l.atten[0]; att[i * 3 + 1] = l.atten[1]; att[i * 3 + 2] = l.atten[2];
+                if (l.type == 2) {
+                    cone[i * 3] = std::cos(l.theta * 0.5f);
+                    cone[i * 3 + 1] = std::cos(l.phi * 0.5f);
+                    cone[i * 3 + 2] = l.falloff;
+                }
+            }
+            glUniform1iv(loc_light_enabled_, 8, en);
+            glUniform1iv(loc_light_type_, 8, ty);
+            glUniform3fv(loc_light_pos_, 8, pos);
+            glUniform3fv(loc_light_dir_, 8, dir);
+            glUniform3fv(loc_light_col_, 8, col);
+            glUniform1fv(loc_light_range_, 8, rng);
+            glUniform3fv(loc_light_atten_, 8, att);
+            glUniform3fv(loc_spot_cone_, 8, cone);
+        }
     }
 
-    glUniform1i(loc_fog_mode_, fog_.mode);
-    if (fog_.mode != 0) {
-        const ColorRGBA fc = gm_bgr_to_rgba(fog_.color_bgr);
-        glUniform3f(loc_fog_color_, fc.r / 255.0f, fc.g / 255.0f, fc.b / 255.0f);
-        glUniform1f(loc_fog_start_, fog_.start);
-        glUniform1f(loc_fog_end_, fog_.end);
+    if (force || !c.fog_uploaded || c.fog.mode != fog_.mode ||
+        (fog_.mode != 0 && (c.fog.color_bgr != fog_.color_bgr || c.fog.start != fog_.start || c.fog.end != fog_.end))) {
+        c.fog = fog_;
+        c.fog_uploaded = true;
+        glUniform1i(loc_fog_mode_, fog_.mode);
+        if (fog_.mode != 0) {
+            const ColorRGBA fc = gm_bgr_to_rgba(fog_.color_bgr);
+            glUniform3f(loc_fog_color_, fc.r / 255.0f, fc.g / 255.0f, fc.b / 255.0f);
+            glUniform1f(loc_fog_start_, fog_.start);
+            glUniform1f(loc_fog_end_, fog_.end);
+        }
     }
+
+    c.valid = true;
 }
 
 Dx9DrawContext Renderer2D::make_dx9_draw_context(const f32 tint_rgba[4]) const noexcept {
@@ -1191,14 +1292,30 @@ void Renderer2D::flush() {
 
     glBindVertexArray(vao_);
     glBindBuffer(GL_ARRAY_BUFFER, vbo_);
-    const auto bytes = static_cast<GLsizeiptr>(vertices_.size() * sizeof(Vertex3D));
-    if (vertices_.size() > kMaxBatchVertices) {
-        // An immediate strip or fan must remain one draw, including its provoking vertices.
+    const usize count = vertices_.size();
+    const auto bytes = static_cast<GLsizeiptr>(count * sizeof(Vertex3D));
+    i32 first_vertex = 0;
+    if (count > vbo_capacity_verts_) {
+        // An immediate strip or fan larger than the ring must grow the buffer once.
+        vbo_capacity_verts_ = count;
+        vbo_write_offset_ = 0;
         glBufferData(GL_ARRAY_BUFFER, bytes, vertices_.data(), GL_STREAM_DRAW);
     } else {
-        glBufferSubData(GL_ARRAY_BUFFER, 0, bytes, vertices_.data());
+        if (vbo_write_offset_ + count > vbo_capacity_verts_) {
+            // Orphan the streaming VBO to avoid synchronizing against in-flight GPU draws.
+            glBufferData(GL_ARRAY_BUFFER,
+                         static_cast<GLsizeiptr>(vbo_capacity_verts_ * sizeof(Vertex3D)),
+                         nullptr,
+                         GL_STREAM_DRAW);
+            vbo_write_offset_ = 0;
+        }
+        first_vertex = static_cast<i32>(vbo_write_offset_);
+        const auto byte_offset = static_cast<GLintptr>(vbo_write_offset_ * sizeof(Vertex3D));
+        glBufferSubData(GL_ARRAY_BUFFER, byte_offset, bytes, vertices_.data());
+        vbo_write_offset_ += count;
     }
-    device_->draw_primitives(batch_topo_, static_cast<i32>(vertices_.size()), d3d_flat_shading_ && !used_custom_shader);
+    device_->draw_primitives(batch_topo_, static_cast<i32>(count), d3d_flat_shading_ && !used_custom_shader,
+                             1, 0, {}, first_vertex);
     glBindVertexArray(0);
 
     vertices_.clear();

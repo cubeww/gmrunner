@@ -7,6 +7,7 @@
 #include "gml/vm.h"
 #include "graphics/gl_graphics_device.h"
 #include "graphics/renderer2d.h"
+#include "graphics/touch_overlay.h"
 #include "loader/game_data.h"
 #include "platform/vfs.h"
 #include "platform/window.h"
@@ -118,6 +119,10 @@ public:
         CompiledProgram program,
         std::vector<std::string> cmd_args = {});
     void shutdown() noexcept;
+    void set_touch_overlay_enabled(bool enabled) noexcept { touch_overlay_.set_enabled(enabled); }
+    void set_audio_muted(bool muted) noexcept { audio_.set_output_muted(muted); }
+    [[nodiscard]] bool is_paused_in_background() const noexcept { return paused_in_background_; }
+    [[nodiscard]] i32 current_fps() const noexcept { return fps_; }
 
     [[nodiscard]] bool is_running() const noexcept { return running_; }
     [[nodiscard]] i32 room_speed() const noexcept {
@@ -548,6 +553,7 @@ private:
     bool use_precomputed_events_ = true;
     std::unique_ptr<GmlVm> vm_;
     Renderer2D renderer_;
+    TouchOverlay touch_overlay_;
     AudioEngine audio_;
     DllRegistry dll_registry_;
     DsManager ds_;
@@ -575,7 +581,17 @@ private:
     std::vector<EventFrame> event_stack_;
     PendingRoomAction pending_action_ = PendingRoomAction::None;
     i32 pending_room_id_ = -1;
+    struct RenderItem {
+        f64 depth = 0.0;
+        u8 kind = 0; // 0 = tile, 1 = instance, 2 = particles
+        usize order = 0;
+        i32 ref_id = 0;
+    };
+    std::vector<RenderItem> render_items_scratch_;
+
     bool running_ = false;
+    bool paused_in_background_ = false;
+    bool web_audio_unlocked_ = false;
     bool io_roomend_clear_ = true;
     bool window_fixed_ = false;
     bool no_more_lives_armed_ = false;

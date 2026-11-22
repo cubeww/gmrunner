@@ -186,6 +186,7 @@ Result<void> GlGraphicsDevice::init(GlProcLoader proc_loader) {
     glBindTexture(GL_TEXTURE_2D, 0);
 
     initialized_ = true;
+    reset_cached_state();
 
     GM_LOG_INFO("gfx", "Initialized %s", caps_.is_gles ? "OpenGL ES 3.0 / WebGL 2.0" : "OpenGL 3.3 Core");
     GM_LOG_INFO("gfx", "  Vendor:   %s", caps_.vendor.c_str());
@@ -226,20 +227,47 @@ void GlGraphicsDevice::shutdown() noexcept {
         white_texture_id_ = 0;
     }
 
+    reset_cached_state();
     initialized_ = false;
 }
 
+void GlGraphicsDevice::reset_cached_state() noexcept {
+    cache_ = CachedState{};
+}
+
+Result<void> GlGraphicsDevice::reinit_after_context_loss(GlProcLoader proc_loader) {
+    // Discard stale handles without invoking glDelete* against a lost context.
+    framebuffers_.clear();
+    textures_.clear();
+    sampler_ids_.fill(0);
+    flat_index_buffer_ = 0;
+    flat_indices_.clear();
+    white_texture_id_ = 0;
+    initialized_ = false;
+    reset_cached_state();
+    return init(proc_loader);
+}
+
 void GlGraphicsDevice::set_viewport(const ViewportRect& rect) {
+    if (cache_.viewport_valid && cache_.viewport == rect) return;
     glViewport(rect.x, rect.y, rect.width, rect.height);
+    cache_.viewport = rect;
+    cache_.viewport_valid = true;
 }
 
 void GlGraphicsDevice::set_scissor(bool enabled, const ViewportRect& rect) {
+    if (cache_.scissor_valid && cache_.scissor_enabled == enabled && (!enabled || cache_.scissor_rect == rect)) {
+        return;
+    }
     if (enabled) {
-        glEnable(GL_SCISSOR_TEST);
+        if (!cache_.scissor_valid || !cache_.scissor_enabled) glEnable(GL_SCISSOR_TEST);
         glScissor(rect.x, rect.y, rect.width, rect.height);
+        cache_.scissor_rect = rect;
     } else {
         glDisable(GL_SCISSOR_TEST);
     }
+    cache_.scissor_enabled = enabled;
+    cache_.scissor_valid = true;
 }
 
 void GlGraphicsDevice::clear(bool color, bool depth, bool stencil, f32 r, f32 g, f32 b, f32 a, f32 depth_val, i32 stencil_val) {
@@ -270,8 +298,9 @@ void GlGraphicsDevice::clear(bool color, bool depth, bool stencil, f32 r, f32 g,
 }
 
 void GlGraphicsDevice::set_blend_state(const BlendState& state) {
+    if (cache_.blend_valid && cache_.blend == state) return;
     if (state.enabled) {
-        glEnable(GL_BLEND);
+        if (!cache_.blend_valid || !cache_.blend.enabled) glEnable(GL_BLEND);
         glBlendFuncSeparate(
             to_gl_blend_factor(state.src_rgb),
             to_gl_blend_factor(state.dst_rgb),
@@ -281,33 +310,46 @@ void GlGraphicsDevice::set_blend_state(const BlendState& state) {
     } else {
         glDisable(GL_BLEND);
     }
+    cache_.blend = state;
+    cache_.blend_valid = true;
 }
 
 void GlGraphicsDevice::set_depth_state(const DepthState& state) {
+    if (cache_.depth_valid && cache_.depth == state) return;
     if (state.test_enabled) {
-        glEnable(GL_DEPTH_TEST);
+        if (!cache_.depth_valid || !cache_.depth.test_enabled) glEnable(GL_DEPTH_TEST);
         glDepthFunc(to_gl_compare(state.func));
     } else {
         glDisable(GL_DEPTH_TEST);
     }
     depth_write_enabled_ = state.write_enabled;
     glDepthMask(state.write_enabled ? GL_TRUE : GL_FALSE);
+    cache_.depth = state;
+    cache_.depth_valid = true;
 }
 
 void GlGraphicsDevice::set_cull_mode(CullMode mode) {
+    if (cache_.cull_valid && cache_.cull == mode) return;
     if (mode == CullMode::None) {
         glDisable(GL_CULL_FACE);
     } else {
-        glEnable(GL_CULL_FACE);
+        if (!cache_.cull_valid || cache_.cull == CullMode::None) glEnable(GL_CULL_FACE);
         glCullFace(mode == CullMode::Front ? GL_FRONT : GL_BACK);
     }
+    cache_.cull = mode;
+    cache_.cull_valid = true;
 }
 
 void GlGraphicsDevice::set_color_mask(bool r, bool g, bool b, bool a) {
+    const std::array<bool, 4> mask{r, g, b, a};
+    if (cache_.color_mask_valid && cache_.color_mask == mask) return;
     glColorMask(r ? GL_TRUE : GL_FALSE, g ? GL_TRUE : GL_FALSE, b ? GL_TRUE : GL_FALSE, a ? GL_TRUE : GL_FALSE);
+    cache_.color_mask = mask;
+    cache_.color_mask_valid = true;
 }
 
 void GlGraphicsDevice::set_polygon_mode(i32 mode) {
+    if (polygon_mode_ == mode && initialized_) return;
     polygon_mode_ = mode;
 #if !GMRUNNER_USE_GLES3
     GLenum gl_mode = GL_FILL;
@@ -320,7 +362,8 @@ void GlGraphicsDevice::set_polygon_mode(i32 mode) {
 }
 
 void GlGraphicsDevice::draw_primitives(PrimitiveTopology topo, i32 count, bool flat, u32 instances,
-                                       u32 index_size, std::span<const u8> index_bytes) {
+                                       u32 index_size, std::span<const u8> index_bytes,
+                                       i32 first_vertex) {
     if (count <= 0 || instances == 0 || (index_size != 0 && index_size != 2 && index_size != 4)) return;
     constexpr GLenum gl_modes[]{GL_POINTS, GL_LINES, GL_LINE_STRIP, GL_TRIANGLES, GL_TRIANGLE_STRIP, GL_TRIANGLE_FAN};
     GLenum mode = gl_modes[static_cast<usize>(topo)];
@@ -330,7 +373,7 @@ void GlGraphicsDevice::draw_primitives(PrimitiveTopology topo, i32 count, bool f
         // without changing its winding and move each line's first endpoint to the end.
         if (index_size && static_cast<usize>(count) > index_bytes.size() / index_size) return;
         auto emit = [&](i32 vertex) {
-            u32 index = static_cast<u32>(vertex);
+            u32 index = static_cast<u32>(vertex + first_vertex);
             if (index_size) {
                 index = 0;
                 std::memcpy(&index, index_bytes.data() + static_cast<usize>(vertex) * index_size, index_size);
@@ -370,8 +413,8 @@ void GlGraphicsDevice::draw_primitives(PrimitiveTopology topo, i32 count, bool f
         if (instances == 1) glDrawElements(mode, count, type, nullptr);
         else glDrawElementsInstanced(mode, count, type, nullptr, static_cast<GLsizei>(instances));
     } else {
-        if (instances == 1) glDrawArrays(mode, 0, count);
-        else glDrawArraysInstanced(mode, 0, count, static_cast<GLsizei>(instances));
+        if (instances == 1) glDrawArrays(mode, first_vertex, count);
+        else glDrawArraysInstanced(mode, first_vertex, count, static_cast<GLsizei>(instances));
     }
     if (reorder) glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
 }
@@ -397,6 +440,8 @@ Result<TextureHandle> GlGraphicsDevice::create_texture(const TextureDesc& desc, 
         return Error{"glGenTextures failed"};
     }
 
+    glActiveTexture(GL_TEXTURE0);
+    cache_.active_unit = 0;
     glBindTexture(GL_TEXTURE_2D, id);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
                     desc.min_filter == TextureFilter::Linear ? GL_LINEAR : GL_NEAREST);
@@ -436,6 +481,7 @@ Result<TextureHandle> GlGraphicsDevice::create_texture(const TextureDesc& desc, 
     const GLenum pixel_type = (desc.format == TextureFormat::Depth24Stencil8) ? GL_UNSIGNED_INT_24_8 : GL_UNSIGNED_BYTE;
     glTexImage2D(GL_TEXTURE_2D, 0, internal_fmt, desc.width, desc.height, 0, pixel_fmt, pixel_type, pixel_ptr);
     glBindTexture(GL_TEXTURE_2D, 0);
+    cache_.bound_tex_valid[0] = false;
 
     textures_[id] = TextureMeta{desc.width, desc.height};
     return TextureHandle{id};
@@ -445,6 +491,8 @@ void GlGraphicsDevice::update_texture(TextureHandle tex, i32 x, i32 y, i32 w, i3
     if (!tex.valid() || pixels.empty()) {
         return;
     }
+    glActiveTexture(GL_TEXTURE0);
+    cache_.active_unit = 0;
     glBindTexture(GL_TEXTURE_2D, tex.id);
     if (format == TextureFormat::BGRA8) {
         auto rgba = bgra_to_rgba(pixels);
@@ -455,6 +503,7 @@ void GlGraphicsDevice::update_texture(TextureHandle tex, i32 x, i32 y, i32 w, i3
         glTexSubImage2D(GL_TEXTURE_2D, 0, x, y, w, h, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
     }
     glBindTexture(GL_TEXTURE_2D, 0);
+    cache_.bound_tex_valid[0] = false;
 }
 
 void GlGraphicsDevice::set_texture_sampler(u32 slot, TextureFilter filter, TextureWrap wrap_u, TextureWrap wrap_v) {
@@ -470,6 +519,11 @@ void GlGraphicsDevice::set_texture_sampler(u32 slot, TextureFilter filter, Textu
 
 void GlGraphicsDevice::set_texture_sampler_ext(u32 slot, TextureFilter filter, i32 d3d_wrap_u, i32 d3d_wrap_v, u32 border_bgr) {
     if (slot >= sampler_ids_.size()) {
+        return;
+    }
+    auto& cs = cache_.samplers[slot];
+    if (cs.valid && cs.filter == filter && cs.wrap_u == d3d_wrap_u && cs.wrap_v == d3d_wrap_v &&
+        cs.border_bgr == border_bgr) {
         return;
     }
     auto d3d_to_gl_wrap = [this](i32 mode) noexcept -> GLenum {
@@ -497,16 +551,37 @@ void GlGraphicsDevice::set_texture_sampler_ext(u32 slot, TextureFilter filter, i
         glSamplerParameterfv(sampler, kTextureBorderColor, bc);
     }
     glBindSampler(slot, sampler);
+    cs.valid = true;
+    cs.filter = filter;
+    cs.wrap_u = d3d_wrap_u;
+    cs.wrap_v = d3d_wrap_v;
+    cs.border_bgr = border_bgr;
 }
 
 void GlGraphicsDevice::bind_texture(u32 slot, TextureHandle tex) {
-    glActiveTexture(GL_TEXTURE0 + slot);
-    glBindTexture(GL_TEXTURE_2D, tex.valid() ? tex.id : white_texture_id_);
+    const u32 gl_id = tex.valid() ? tex.id : white_texture_id_;
+    if (slot < cache_.bound_tex.size() && cache_.bound_tex_valid[slot] && cache_.bound_tex[slot] == gl_id) {
+        return;
+    }
+    if (cache_.active_unit != slot) {
+        glActiveTexture(GL_TEXTURE0 + slot);
+        cache_.active_unit = slot;
+    }
+    glBindTexture(GL_TEXTURE_2D, gl_id);
+    if (slot < cache_.bound_tex.size()) {
+        cache_.bound_tex[slot] = gl_id;
+        cache_.bound_tex_valid[slot] = true;
+    }
 }
 
 void GlGraphicsDevice::destroy_texture(TextureHandle tex) {
     if (!tex.valid()) {
         return;
+    }
+    for (usize i = 0; i < cache_.bound_tex.size(); ++i) {
+        if (cache_.bound_tex_valid[i] && cache_.bound_tex[i] == tex.id) {
+            cache_.bound_tex_valid[i] = false;
+        }
     }
     const GLuint id = tex.id;
     glDeleteTextures(1, &id);
@@ -561,7 +636,11 @@ Result<FramebufferHandle> GlGraphicsDevice::create_framebuffer(std::span<const T
 }
 
 void GlGraphicsDevice::bind_framebuffer(FramebufferHandle fbo) {
-    glBindFramebuffer(GL_FRAMEBUFFER, fbo.valid() ? fbo.id : 0u);
+    const u32 gl_id = fbo.valid() ? fbo.id : 0u;
+    if (cache_.fbo_valid && cache_.fbo == gl_id) return;
+    glBindFramebuffer(GL_FRAMEBUFFER, gl_id);
+    cache_.fbo = gl_id;
+    cache_.fbo_valid = true;
 }
 
 void GlGraphicsDevice::set_framebuffer_mrt_target(FramebufferHandle fbo, u32 slot, TextureHandle tex) {
@@ -617,6 +696,9 @@ bool GlGraphicsDevice::set_framebuffer_depth_from(FramebufferHandle dst_fbo, Fra
 void GlGraphicsDevice::destroy_framebuffer(FramebufferHandle fbo) {
     if (!fbo.valid()) {
         return;
+    }
+    if (cache_.fbo_valid && cache_.fbo == fbo.id) {
+        cache_.fbo_valid = false;
     }
     const auto it = framebuffers_.find(fbo.id);
     if (it != framebuffers_.end()) {
@@ -694,12 +776,19 @@ Result<ShaderHandle> GlGraphicsDevice::create_shader(std::string_view vertex_gls
 }
 
 void GlGraphicsDevice::bind_shader(ShaderHandle shader) {
-    glUseProgram(shader.valid() ? shader.id : 0u);
+    const u32 gl_id = shader.valid() ? shader.id : 0u;
+    if (cache_.program_valid && cache_.program == gl_id) return;
+    glUseProgram(gl_id);
+    cache_.program = gl_id;
+    cache_.program_valid = true;
 }
 
 void GlGraphicsDevice::destroy_shader(ShaderHandle shader) {
     if (!shader.valid()) {
         return;
+    }
+    if (cache_.program_valid && cache_.program == shader.id) {
+        cache_.program_valid = false;
     }
     glDeleteProgram(shader.id);
 }

@@ -169,7 +169,15 @@ bool check_instance_collision(
     }
 
     i32 al, at, ar, ab;
-    compute_bbox_at(a, ax, ay, game, al, at, ar, ab);
+    if (ax == a.x && ay == a.y) {
+        ensure_instance_bbox(a, game);
+        al = a.bbox_left;
+        at = a.bbox_top;
+        ar = a.bbox_right;
+        ab = a.bbox_bottom;
+    } else {
+        compute_bbox_at(a, ax, ay, game, al, at, ar, ab);
+    }
     ensure_instance_bbox(b, game);
     const i32 bl = b.bbox_left;
     const i32 bt = b.bbox_top;
@@ -192,19 +200,23 @@ bool check_instance_collision(
         const i32 b_ox = static_cast<i32>(delphi_round(b.x)) - spb->origin_x;
         const i32 b_oy = static_cast<i32>(delphi_round(b.y)) - spb->origin_y;
 
-        for (i32 wy = ot; wy <= ob; ++wy) {
-            const i32 lay = wy - a_oy;
-            const i32 lby = wy - b_oy;
-            if (lay < 0 || lay >= ma->height || lby < 0 || lby >= mb->height) continue;
-            const u8* row_a = ma->pixels.data() + static_cast<usize>(lay) * static_cast<usize>(ma->width);
-            const u8* row_b = mb->pixels.data() + static_cast<usize>(lby) * static_cast<usize>(mb->width);
-            for (i32 wx = ol; wx <= or_; ++wx) {
-                const i32 lax = wx - a_ox;
-                const i32 lbx = wx - b_ox;
-                if (lax >= 0 && lax < ma->width && lbx >= 0 && lbx < mb->width) {
-                    if (row_a[lax] != 0u && row_b[lbx] != 0u) {
-                        return true;
-                    }
+        const i32 wy_start = std::max({ot, a_oy, b_oy});
+        const i32 wy_end = std::min({ob, a_oy + ma->height - 1, b_oy + mb->height - 1});
+        const i32 wx_start = std::max({ol, a_ox, b_ox});
+        const i32 wx_end = std::min({or_, a_ox + ma->width - 1, b_ox + mb->width - 1});
+        if (wy_start > wy_end || wx_start > wx_end) {
+            return false;
+        }
+        const i32 span_w = wx_end - wx_start + 1;
+        const i32 a_x0 = wx_start - a_ox;
+        const i32 b_x0 = wx_start - b_ox;
+
+        for (i32 wy = wy_start; wy <= wy_end; ++wy) {
+            const u8* row_a = ma->pixels.data() + static_cast<usize>(wy - a_oy) * static_cast<usize>(ma->width) + a_x0;
+            const u8* row_b = mb->pixels.data() + static_cast<usize>(wy - b_oy) * static_cast<usize>(mb->width) + b_x0;
+            for (i32 k = 0; k < span_w; ++k) {
+                if ((row_a[k] & row_b[k]) != 0u) {
+                    return true;
                 }
             }
         }

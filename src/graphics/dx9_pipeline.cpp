@@ -499,7 +499,6 @@ bool Dx9Pipeline::bind_and_upload(const Dx9DrawContext& ctx, TextureHandle stage
         glUniform1i(lp->loc_vs_samp[s], static_cast<GLint>(8u + s));
     }
 
-    glActiveTexture(GL_TEXTURE0);
     return true;
 }
 
@@ -596,10 +595,13 @@ i32 Dx9Pipeline::create_index_buffer(std::span<const u8> bytes, i32 d3d_format) 
     GLuint ibo = 0;
     glGenBuffers(1, &ibo);
     if (ibo == 0) return -1;
-    glBindBuffer(GL_ARRAY_BUFFER, ibo);
-    glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(bytes.size()),
+    // WebGL 2.0 permanently binds a buffer object to its first target; upload using
+    // GL_ELEMENT_ARRAY_BUFFER with VAO 0 bound so no active VAO state is modified.
+    glBindVertexArray(0);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr>(bytes.size()),
                  bytes.empty() ? nullptr : bytes.data(), GL_STATIC_DRAW);
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
 
     const i32 id = ++next_ibuf_id_;
     GpuIndexBuffer buffer{ibo, d3d_format, static_cast<u32>(bytes.size()), {}};

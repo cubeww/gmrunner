@@ -1,8 +1,15 @@
 #include "platform/window.h"
 
 #include "base/log.h"
+#include "platform/web_bridge.h"
 
 #include <SDL3/SDL.h>
+
+#include <algorithm>
+
+#if defined(__EMSCRIPTEN__)
+#include <emscripten/emscripten.h>
+#endif
 
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -15,6 +22,24 @@
 #endif
 
 namespace gm {
+
+#if defined(__EMSCRIPTEN__)
+// SDL normalizes pointer positions against the whole element. With object-fit: contain,
+// the canvas bitmap occupies only the centered rectangle inside that element.
+EM_JS(void, web_canvas_pointer_scale, (float* factors), {
+    const canvas = Module.canvas;
+    const rect = canvas.getBoundingClientRect();
+    let x = 1, y = 1;
+    if (canvas.width && canvas.height && rect.width && rect.height &&
+        getComputedStyle(canvas).objectFit === 'contain') {
+        const scale = Math.min(rect.width / canvas.width, rect.height / canvas.height);
+        x = rect.width / (canvas.width * scale);
+        y = rect.height / (canvas.height * scale);
+    }
+    HEAPF32[factors >> 2] = x;
+    HEAPF32[(factors >> 2) + 1] = y;
+});
+#endif
 
 void InputState::begin_frame() {
     key_pressed.fill(false);
@@ -37,6 +62,7 @@ void InputState::clear_all() {
     last_key = 0;
     current_key = 0;
     last_char.clear();
+    touches.clear();
 }
 
 PlatformWindow::~PlatformWindow() {
@@ -98,6 +124,10 @@ Result<void> PlatformWindow::create(const WindowConfig& config) {
     visible_ = true;
     set_vsync(config.vsync);
     set_cursor_visible(config.show_cursor);
+#if !defined(__ANDROID__)
+    // Enable UTF-8 text input events for keyboard_string / keyboard_lastchar on desktop & web.
+    SDL_StartTextInput(window_);
+#endif
 
     GM_LOG_INFO("platform", "Created window %dx%d (drawable %dx%d)",
                 width(), height(), drawable_width(), drawable_height());
@@ -211,8 +241,25 @@ WindowEvents PlatformWindow::poll_events_impl(bool clear_edges) {
         input_.key_down[18] = input_.key_down[164] || input_.key_down[165]; // vk_alt
     };
 
+#if defined(__EMSCRIPTEN__)
+    std::array<f32, 2> pointer_scale{};
+    auto map_pointer = [&](float& x, float& y, float w, float h) {
+        if (pointer_scale[0] == 0.0f) web_canvas_pointer_scale(pointer_scale.data());
+        x = (x - w * 0.5f) * pointer_scale[0] + w * 0.5f;
+        y = (y - h * 0.5f) * pointer_scale[1] + h * 0.5f;
+    };
+#endif
     SDL_Event ev{};
     while (SDL_PollEvent(&ev)) {
+#if defined(__EMSCRIPTEN__)
+        if (ev.type == SDL_EVENT_MOUSE_MOTION) {
+            map_pointer(ev.motion.x, ev.motion.y, width(), height());
+        } else if (ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN || ev.type == SDL_EVENT_MOUSE_BUTTON_UP) {
+            map_pointer(ev.button.x, ev.button.y, width(), height());
+        } else if (ev.type == SDL_EVENT_FINGER_DOWN || ev.type == SDL_EVENT_FINGER_MOTION) {
+            map_pointer(ev.tfinger.x, ev.tfinger.y, 1.0f, 1.0f);
+        }
+#endif
         switch (ev.type) {
             case SDL_EVENT_QUIT:
             case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
@@ -236,6 +283,21 @@ WindowEvents PlatformWindow::poll_events_impl(bool clear_edges) {
                 out.focus_lost = true;
                 break;
 
+            case SDL_EVENT_WINDOW_ENTER_FULLSCREEN:
+                fullscreen_ = true;
+                out.resized = true;
+                out.new_width = drawable_width();
+                out.new_height = drawable_height();
+                break;
+
+            case SDL_EVENT_WINDOW_LEAVE_FULLSCREEN:
+                fullscreen_ = false;
+                apply_pending_windowed_size();
+                out.resized = true;
+                out.new_width = drawable_width();
+                out.new_height = drawable_height();
+                break;
+
             case SDL_EVENT_WILL_ENTER_BACKGROUND:
                 out.entered_background = true;
                 break;
@@ -244,7 +306,13 @@ WindowEvents PlatformWindow::poll_events_impl(bool clear_edges) {
                 out.entered_foreground = true;
                 break;
 
+            case SDL_EVENT_RENDER_DEVICE_RESET:
+            case SDL_EVENT_RENDER_TARGETS_RESET:
+                out.context_lost = true;
+                break;
+
             case SDL_EVENT_KEY_DOWN: {
+                out.any_user_gesture = true;
                 const u8 vk = sdl_scancode_to_gm_vk(static_cast<i32>(ev.key.scancode));
                 if (vk != 0 && !ev.key.repeat) {
                     if (!input_.key_down[vk]) {
@@ -301,6 +369,7 @@ WindowEvents PlatformWindow::poll_events_impl(bool clear_edges) {
                 break;
 
             case SDL_EVENT_MOUSE_BUTTON_DOWN: {
+                out.any_user_gesture = true;
                 const u8 btn = sdl_mouse_button_to_gm(ev.button.button);
                 if (btn > 0 && btn < input_.mouse_down.size()) {
                     if (!input_.mouse_down[btn]) {
@@ -330,6 +399,49 @@ WindowEvents PlatformWindow::poll_events_impl(bool clear_edges) {
                 if (ev.wheel.y > 0.0f) input_.mouse_wheel_up = true;
                 if (ev.wheel.y < 0.0f) input_.mouse_wheel_down = true;
                 break;
+
+            case SDL_EVENT_FINGER_DOWN: {
+                out.any_user_gesture = true;
+                input_.touch_seen = true;
+                const i64 fid = static_cast<i64>(ev.tfinger.fingerID);
+                const f32 tx = std::clamp(ev.tfinger.x, 0.0f, 1.0f);
+                const f32 ty = std::clamp(ev.tfinger.y, 0.0f, 1.0f);
+                auto it = std::find_if(input_.touches.begin(), input_.touches.end(),
+                                       [fid](const TouchFinger& f) { return f.finger_id == fid; });
+                if (it != input_.touches.end()) {
+                    it->x = tx;
+                    it->y = ty;
+                } else {
+                    input_.touches.push_back(TouchFinger{fid, tx, ty});
+                }
+                break;
+            }
+
+            case SDL_EVENT_FINGER_MOTION: {
+                input_.touch_seen = true;
+                const i64 fid = static_cast<i64>(ev.tfinger.fingerID);
+                const f32 tx = std::clamp(ev.tfinger.x, 0.0f, 1.0f);
+                const f32 ty = std::clamp(ev.tfinger.y, 0.0f, 1.0f);
+                auto it = std::find_if(input_.touches.begin(), input_.touches.end(),
+                                       [fid](const TouchFinger& f) { return f.finger_id == fid; });
+                if (it != input_.touches.end()) {
+                    it->x = tx;
+                    it->y = ty;
+                } else {
+                    input_.touches.push_back(TouchFinger{fid, tx, ty});
+                }
+                break;
+            }
+
+            case SDL_EVENT_FINGER_UP:
+            case SDL_EVENT_FINGER_CANCELED: {
+                const i64 fid = static_cast<i64>(ev.tfinger.fingerID);
+                input_.touches.erase(
+                    std::remove_if(input_.touches.begin(), input_.touches.end(),
+                                   [fid](const TouchFinger& f) { return f.finger_id == fid; }),
+                    input_.touches.end());
+                break;
+            }
 
             case SDL_EVENT_DROP_FILE:
                 if (ev.drop.data && ev.drop.data[0] != '\0') {
@@ -407,12 +519,17 @@ void PlatformWindow::apply_pending_windowed_size() {
 }
 
 void PlatformWindow::set_vsync(bool enabled) {
+#if defined(__EMSCRIPTEN__)
+    // WebGL swap timing is governed by the browser compositor / requestAnimationFrame.
+    (void)enabled;
+#else
     if (gl_context_) {
         if (!SDL_GL_SetSwapInterval(enabled ? 1 : 0)) {
             GM_LOG_WARN("platform", "SDL_GL_SetSwapInterval(%d) failed: %s",
                         enabled ? 1 : 0, SDL_GetError());
         }
     }
+#endif
 }
 
 void PlatformWindow::set_cursor_visible(bool visible) {
@@ -713,12 +830,19 @@ void* PlatformWindow::gl_get_proc_address(const char* proc_name) noexcept {
 }
 
 void PlatformWindow::show_message(std::string_view title, std::string_view message) const {
+#if defined(__EMSCRIPTEN__)
+    web_show_message(title, message);
+#else
     const std::string t(title);
     const std::string m(message);
     SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, t.c_str(), m.c_str(), window_);
+#endif
 }
 
 bool PlatformWindow::show_question(std::string_view title, std::string_view message) const {
+#if defined(__EMSCRIPTEN__)
+    return web_show_question(title, message);
+#else
     const std::string t(title);
     const std::string m(message);
 
@@ -740,6 +864,33 @@ bool PlatformWindow::show_question(std::string_view title, std::string_view mess
         return false;
     }
     return button_id == 1;
+#endif
+}
+
+std::string PlatformWindow::prompt_string(std::string_view prompt, std::string_view default_val) const {
+#if defined(__EMSCRIPTEN__)
+    return web_prompt_string(prompt, default_val);
+#else
+    (void)prompt;
+    return std::string(default_val);
+#endif
+}
+
+void PlatformWindow::set_text_input(bool enabled) {
+    if (!window_) return;
+    if (enabled) {
+        SDL_StartTextInput(window_);
+    } else {
+        SDL_StopTextInput(window_);
+    }
+}
+
+bool PlatformWindow::is_mobile_touch_platform() noexcept {
+#if defined(__ANDROID__)
+    return true;
+#else
+    return false;
+#endif
 }
 
 bool PlatformWindow::open_url(std::string_view url) {

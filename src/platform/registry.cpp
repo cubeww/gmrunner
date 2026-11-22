@@ -23,7 +23,7 @@
 #include <windows.h>
 #include <io.h>
 #include <share.h>
-#else
+#elif !defined(__EMSCRIPTEN__)
 #include <cerrno>
 #include <sys/file.h>
 #include <unistd.h>
@@ -69,6 +69,11 @@ FileLock lock_hive(const std::filesystem::path& path) {
                             LOCKFILE_EXCLUSIVE_LOCK, 0, 1, 0, &overlapped)) {
         file.reset();
     }
+    return file;
+#elif defined(__EMSCRIPTEN__)
+    // Emscripten is single-process and MEMFS/IDBFS/OPFS do not implement flock().
+    (void)path;
+    return FileLock(nullptr, std::fclose);
 #else
     FileLock file(std::fopen(path.c_str(), "a+b"), std::fclose);
     if (file) {
@@ -76,10 +81,12 @@ FileLock lock_hive(const std::filesystem::path& path) {
         do {
             result = flock(fileno(file.get()), LOCK_EX);
         } while (result == -1 && errno == EINTR);
-        if (result == -1) file.reset();
+        if (result == -1 && errno != ENOSYS && errno != EOPNOTSUPP) {
+            file.reset();
+        }
     }
-#endif
     return file;
+#endif
 }
 
 bool read_hive(const std::filesystem::path& path, std::vector<RegistryEntry>& entries) {
@@ -141,17 +148,25 @@ void Vfs::registry_set_root(i32 root_id) {
 std::optional<Vfs::RegistryValue> Vfs::access_registry_value(
     std::optional<std::string_view> key, std::string_view name, const RegistryValue* replacement) const {
     static constexpr const char* hives[] = {"HKCU", "HKLM", "HKCR", "HKU"};
-    const auto& dir = registry_directory();
+    const auto dir = registry_dir_.empty() ? registry_directory() : registry_dir_;
     if (dir.empty()) {
         GM_LOG_WARN("vfs", "Cannot locate virtual registry directory");
         return std::nullopt;
     }
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
     const auto path = dir / hives[key ? registry_root_ : 0];
     auto lock_path = path;
     lock_path += ".lock";
     const auto lock = lock_hive(lock_path);
     std::vector<RegistryEntry> entries;
-    if (!lock || !read_hive(path, entries)) {
+#if defined(__EMSCRIPTEN__)
+    const bool locked = true;
+    (void)lock;
+#else
+    const bool locked = (lock != nullptr);
+#endif
+    if (!locked || !read_hive(path, entries)) {
         GM_LOG_WARN("vfs", "Cannot read virtual registry hive '%s'", path_to_utf8(path).c_str());
         return std::nullopt;
     }
@@ -173,6 +188,8 @@ std::optional<Vfs::RegistryValue> Vfs::access_registry_value(
     else found->value = *replacement;
     if (!write_hive(path, entries)) {
         GM_LOG_WARN("vfs", "Cannot write virtual registry hive '%s'", path_to_utf8(path).c_str());
+    } else {
+        notify_persist_write();
     }
     return std::nullopt;
 }

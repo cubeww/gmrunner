@@ -14,6 +14,8 @@
 #include <filesystem>
 #include <thread>
 
+#include <SDL3/SDL.h>
+
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -24,10 +26,19 @@
 #include <windows.h>
 #include <psapi.h>
 #include <tlhelp32.h>
+#elif defined(__EMSCRIPTEN__) || defined(__ANDROID__)
+#if defined(__ANDROID__)
+#include <unistd.h>
+#endif
 #else
 #include <SDL3/SDL_process.h>
 #include <cerrno>
 #include <sys/wait.h>
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#elif defined(__linux__)
+#include <unistd.h>
+#endif
 #endif
 
 namespace gm {
@@ -144,6 +155,7 @@ f64 power_next_val(f64 x) noexcept {
     return std::pow(2.0, p);
 }
 
+#if !defined(__EMSCRIPTEN__) && !defined(__ANDROID__)
 std::filesystem::path local_program(const Vfs& vfs, std::string_view name) {
     const auto find_file = [&](std::string_view candidate) -> std::filesystem::path {
         std::error_code ec;
@@ -164,8 +176,9 @@ std::filesystem::path local_program(const Vfs& vfs, std::string_view name) {
     }
     return find_file(name);
 }
+#endif
 
-#if !defined(_WIN32)
+#if !defined(_WIN32) && !defined(__EMSCRIPTEN__) && !defined(__ANDROID__)
 // CreateProcess receives a Windows command line. SDL on other platforms takes argv.
 std::vector<std::string> split_process_args(std::string_view cmd) {
     std::vector<std::string> args;
@@ -206,6 +219,11 @@ public:
     bool start(const Vfs& vfs, std::string_view command, bool detached) {
         // The DLL occupies its single tracked slot even for a failed CreateProcess.
         if (!detached) failed_start_ = true;
+#if defined(__EMSCRIPTEN__) || defined(__ANDROID__)
+        (void)vfs;
+        (void)command;
+        return false;
+#else
         const auto cwd = vfs.resolve_for_read(".");
 #if defined(_WIN32)
         const auto begin = command.find_first_not_of(" \t");
@@ -254,6 +272,7 @@ public:
 #endif
         if (!detached) failed_start_ = false;
         return true;
+#endif
     }
 
     f64 poll() {
@@ -267,13 +286,16 @@ public:
         DWORD code = 75;
         GetExitCodeProcess(process_, &code);
         release();
+        return static_cast<f64>(code);
+#elif defined(__EMSCRIPTEN__) || defined(__ANDROID__)
+        return 75;
 #else
         int code = 0;
         if (!SDL_WaitProcess(process_, false, &code)) return 259;
         SDL_DestroyProcess(process_);
         process_ = nullptr;
-#endif
         return static_cast<f64>(code);
+#endif
     }
 
     void release() {
@@ -281,7 +303,7 @@ public:
         if (!process_) return;
 #if defined(_WIN32)
         CloseHandle(process_);
-#else
+#elif !defined(__EMSCRIPTEN__) && !defined(__ANDROID__)
         const auto pid = static_cast<pid_t>(SDL_GetNumberProperty(
             SDL_GetProcessProperties(process_), SDL_PROP_PROCESS_PID_NUMBER, 0));
         const bool exited = SDL_WaitProcess(process_, false, nullptr);
@@ -298,6 +320,8 @@ public:
 private:
 #if defined(_WIN32)
     HANDLE process_ = nullptr;
+#elif defined(__EMSCRIPTEN__) || defined(__ANDROID__)
+    void* process_ = nullptr;
 #else
     SDL_Process* process_ = nullptr;
 #endif
@@ -577,6 +601,23 @@ public:
                                      sizeof(pmc))) {
                 return RValue(static_cast<f64>(pmc.PrivateUsage));
             }
+#elif defined(__APPLE__)
+            mach_task_basic_info info{};
+            mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+            if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
+                          reinterpret_cast<task_info_t>(&info), &count) == KERN_SUCCESS) {
+                return RValue(static_cast<f64>(info.resident_size));
+            }
+#elif defined(__linux__) || defined(__ANDROID__)
+            long rss_pages = 0;
+            if (FILE* f = std::fopen("/proc/self/statm", "r")) {
+                long total_pages = 0;
+                if (std::fscanf(f, "%ld %ld", &total_pages, &rss_pages) == 2) {
+                    std::fclose(f);
+                    return RValue(static_cast<f64>(rss_pages) * static_cast<f64>(sysconf(_SC_PAGESIZE)));
+                }
+                std::fclose(f);
+            }
 #endif
             return RValue(0.0);
         }
@@ -631,17 +672,10 @@ public:
             return RValue(static_cast<f64>(val));
         }
         if (fn == "file_get_timestamp") {
-            const auto path = host.ext_vfs().resolve_for_read(shim_str(args, 0));
-            std::error_code ec;
-            if (!std::filesystem::exists(path, ec) || ec) return RValue(-1.0);
-            const auto ftime = std::filesystem::last_write_time(path, ec);
-            if (ec) return RValue(-1.0);
-            const auto sctp = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
-                ftime - std::filesystem::file_time_type::clock::now() + std::chrono::system_clock::now());
-            const f64 unix_sec = static_cast<f64>(std::chrono::duration_cast<std::chrono::seconds>(
-                sctp.time_since_epoch()).count());
+            const auto ts = host.ext_vfs().last_write_time_unix(shim_str(args, 0));
+            if (!ts) return RValue(-1.0);
             // Delphi TDateTime epoch is 1899-12-30 (25569 days before 1970-01-01).
-            return RValue(unix_sec / 86400.0 + 25569.0);
+            return RValue(static_cast<f64>(*ts) / 86400.0 + 25569.0);
         }
         if (fn == "date_get_current_timezone") {
             const std::time_t now = std::time(nullptr);
@@ -663,6 +697,11 @@ public:
                 if (sps.BatteryFlag >= 128) return RValue(0.0);
                 return RValue(static_cast<f64>(sps.BatteryLifePercent));
             }
+#else
+            int pct = -1;
+            const SDL_PowerState st = SDL_GetPowerInfo(nullptr, &pct);
+            if (st == SDL_POWERSTATE_NO_BATTERY) return RValue(0.0);
+            if (pct >= 0) return RValue(static_cast<f64>(pct));
 #endif
             return RValue(100.0);
         }
@@ -674,6 +713,10 @@ public:
                 if (sps.ACLineStatus == 1) return RValue(2.0);
                 return RValue(1.0);
             }
+#else
+            const SDL_PowerState st = SDL_GetPowerInfo(nullptr, nullptr);
+            if (st == SDL_POWERSTATE_ON_BATTERY) return RValue(1.0);
+            if (st == SDL_POWERSTATE_CHARGING || st == SDL_POWERSTATE_CHARGED) return RValue(2.0);
 #endif
             return RValue(0.0);
         }

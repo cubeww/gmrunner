@@ -73,6 +73,7 @@ public:
 
     [[nodiscard]] Result<void> init(GlGraphicsDevice& device);
     void shutdown() noexcept;
+    [[nodiscard]] Result<void> reload_gpu_resources(const GameData& game);
 
     // Asset GPU uploads (also supports incremental dynamic sprite/bg/font additions)
     void upload_game_assets(const GameData& game);
@@ -380,7 +381,29 @@ private:
 
     u32 vao_ = 0;
     u32 vbo_ = 0;
+    usize vbo_capacity_verts_ = 0;
+    usize vbo_write_offset_ = 0;
     ShaderHandle shader_;
+    struct FfUniformCache {
+        bool valid = false;
+        f32 world[16]{};
+        f32 view[16]{};
+        f32 proj[16]{};
+        f32 pixel_center[2]{};
+        f32 tint[4]{};
+        i32 tex_blending = -1;
+        i32 texcoord_mode = -1;
+        i32 flat_shading = -1;
+        i32 alpha_test = -1;
+        f32 alpha_ref = -1.0f;
+        i32 alpha_func = -1;
+        i32 lighting = -1;
+        u32 ambient_bgr = 0;
+        std::array<D3dLightState, 8> lights{};
+        bool lights_uploaded = false;
+        D3dFogState fog{};
+        bool fog_uploaded = false;
+    } ff_uniform_cache_{};
     i32 loc_world_ = -1;
     i32 loc_view_ = -1;
     i32 loc_proj_ = -1;

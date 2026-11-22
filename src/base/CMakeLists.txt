@@ -17,4 +17,7 @@ add_library(gm_base STATIC
 
 target_include_directories(gm_base PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(gm_base PRIVATE zlibstatic)
+if(ANDROID)
+    target_link_libraries(gm_base PRIVATE log)
+endif()
 gmrunner_apply_warnings(gm_base)

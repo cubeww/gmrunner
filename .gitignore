@@ -1,7 +1,12 @@
 # Build directories
 /build/
+/dist/
 /out/
 /cmake-build-*/
+/android/.gradle/
+/android/app/build/
+/android/build/
+/android/local.properties
 
 # IDE / Editor / Tooling caches
 /.vs/
