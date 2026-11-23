@@ -1066,6 +1066,12 @@ i32 PlatformWindow::drawable_height() const noexcept {
 }
 
 i32 PlatformWindow::display_width() const noexcept {
+#if defined(__EMSCRIPTEN__)
+    // GM display dimensions are pixels. SDL caches screen.width in CSS pixels at startup.
+    if (is_mobile_touch_platform()) {
+        return EM_ASM_INT({ return Math.max(1, Math.round(screen.width * devicePixelRatio)); });
+    }
+#endif
     const SDL_DisplayID did = window_ ? SDL_GetDisplayForWindow(window_) : SDL_GetPrimaryDisplay();
     if (const SDL_DisplayMode* mode = SDL_GetDesktopDisplayMode(did)) {
         return mode->w;
@@ -1074,6 +1080,11 @@ i32 PlatformWindow::display_width() const noexcept {
 }
 
 i32 PlatformWindow::display_height() const noexcept {
+#if defined(__EMSCRIPTEN__)
+    if (is_mobile_touch_platform()) {
+        return EM_ASM_INT({ return Math.max(1, Math.round(screen.height * devicePixelRatio)); });
+    }
+#endif
     const SDL_DisplayID did = window_ ? SDL_GetDisplayForWindow(window_) : SDL_GetPrimaryDisplay();
     if (const SDL_DisplayMode* mode = SDL_GetDesktopDisplayMode(did)) {
         return mode->h;
