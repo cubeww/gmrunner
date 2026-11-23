@@ -82,6 +82,7 @@ Result<void> Runner::init(GameData game, CompiledProgram program, std::vector<st
     next_instance_id_ = std::max(100001, game_.room_max_id + 1);
     next_tile_id_ = std::max(10000001, game_.room_max_tile_id + 1);
     window_color_ = game_.options.window_color;
+    window_.set_show_icons(!game_.options.no_buttons);
     window_region_scale_ = game_.options.scale / 100.0;
     sync_vsync_ = (game_.options.sync_vertex != 0);
 
@@ -93,6 +94,9 @@ Result<void> Runner::init(GameData game, CompiledProgram program, std::vector<st
     renderer_.upload_game_assets(game_);
     if (auto res = touch_overlay_.init(gfx_); !res) {
         GM_LOG_WARN("gfx", "Touch overlay init failed: %s", res.error_message().c_str());
+    }
+    if (auto res = message_dialog_.init(gfx_, game_); !res) {
+        GM_LOG_WARN("gfx", "Message dialog init failed: %s", res.error_message().c_str());
     }
     if (PlatformWindow::is_mobile_touch_platform()) {
         touch_overlay_.set_enabled(true);
@@ -254,6 +258,8 @@ void Runner::shutdown() noexcept {
     running_ = false;
 
     if (vm_ && current_room_ >= 0) {
+        // A host stop interrupted the active event. Game End handlers still run.
+        if (host_stop_requested_) pending_action_ = PendingRoomAction::None;
         // Fire Game End event on remaining active instances.
         broadcast_event(7, 3); // ev_other, ev_game_end
     }
@@ -320,6 +326,7 @@ void Runner::shutdown() noexcept {
 
     dll_registry_.reset(this);
     audio_.shutdown();
+    message_dialog_.shutdown();
     touch_overlay_.shutdown();
     renderer_.shutdown();
     vm_.reset();
@@ -737,6 +744,7 @@ void Runner::tick_frame() {
         if (auto res = gfx_.reinit_after_context_loss(&PlatformWindow::gl_get_proc_address); res) {
             (void)renderer_.reload_gpu_resources(game_);
             (void)touch_overlay_.reload_gpu_resources();
+            (void)message_dialog_.reload_gpu_resources();
         }
     }
 #if defined(__EMSCRIPTEN__)
@@ -3003,7 +3011,7 @@ bool Runner::sleep_ms(f64 ms) {
     while (true) {
         const WindowEvents ev = window_.poll_events_accumulate();
         update_mouse_room_coords();
-        if (ev.quit_requested) {
+        if (host_stop_requested_ || ev.quit_requested) {
             running_ = false;
             pending_action_ = PendingRoomAction::EndGame;
             return false;
@@ -3021,7 +3029,7 @@ bool Runner::wait_for_key() {
     inp.key_released.fill(false);
     while (true) {
         const WindowEvents ev = window_.poll_events_accumulate();
-        if (ev.quit_requested) {
+        if (host_stop_requested_ || ev.quit_requested) {
             running_ = false;
             pending_action_ = PendingRoomAction::EndGame;
             return false;
@@ -3045,7 +3053,7 @@ bool Runner::wait_for_mouse() {
     inp.mouse_released.fill(false);
     while (true) {
         const WindowEvents ev = window_.poll_events_accumulate();
-        if (ev.quit_requested) {
+        if (host_stop_requested_ || ev.quit_requested) {
             running_ = false;
             pending_action_ = PendingRoomAction::EndGame;
             return false;
@@ -3063,6 +3071,259 @@ bool Runner::wait_for_mouse() {
         }
         Clock::sleep_until_us(Clock::now_us() + 4000u);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Cross-Platform Self-Drawn GM8 Modal Message & Input Dialogs
+// ---------------------------------------------------------------------------
+
+std::string Runner::decode_dialog_string(std::string_view raw, u8 charset) const {
+    if (game_.meta.encoding == EncodingMode::Utf8) {
+        return std::string(raw);
+    }
+    const u32 cp = gdi_charset_to_codepage(charset, game_.meta.string_codepage());
+    return codepage_to_utf8(raw, cp);
+}
+
+std::string Runner::encode_dialog_string(std::string_view utf8, u8 charset) const {
+    if (game_.meta.encoding == EncodingMode::Utf8) {
+        return std::string(utf8);
+    }
+    const u32 cp = gdi_charset_to_codepage(charset, game_.meta.string_codepage());
+    return utf8_to_codepage(utf8, cp);
+}
+
+void Runner::run_message_dialog_modal(bool with_input) {
+    if (!window_.is_open()) {
+        return;
+    }
+
+    const bool prev_cursor = window_.is_cursor_visible();
+    const bool prev_text_input = window_.is_text_input_active();
+    window_.set_cursor_visible(true);
+    if (with_input) {
+        window_.set_text_input(true);
+    }
+    window_.reset_modal_input_state();
+    renderer_.flush();
+
+    const bool mobile_touch = PlatformWindow::is_mobile_touch_platform();
+#if defined(__EMSCRIPTEN__)
+    const bool web_editor = with_input && mobile_touch;
+    if (web_editor) message_dialog_.begin_web_editor();
+#endif
+    ModalInputFrame minput{};
+
+    while (!host_stop_requested_) {
+        const u64 frame_start = Clock::now_us();
+        window_.poll_modal_events(minput);
+        const auto& wev = minput.window_events;
+
+        if (wev.entered_background) {
+            paused_in_background_ = true;
+            audio_.suspend();
+            vfs_.notify_persist_write();
+        }
+        if (wev.entered_foreground) {
+            paused_in_background_ = false;
+            audio_.resume();
+        }
+        if (wev.context_lost) {
+            if (auto res = gfx_.reinit_after_context_loss(&PlatformWindow::gl_get_proc_address); res) {
+                (void)renderer_.reload_gpu_resources(game_);
+                (void)touch_overlay_.reload_gpu_resources();
+                (void)message_dialog_.reload_gpu_resources();
+            }
+        }
+#if defined(__EMSCRIPTEN__)
+        if (wev.any_user_gesture && !web_audio_unlocked_) {
+            web_audio_unlocked_ = true;
+            web_unlock_audio();
+            audio_.resume();
+        }
+#endif
+        if (wev.quit_requested) {
+            running_ = false;
+            pending_action_ = PendingRoomAction::EndGame;
+            break;
+        }
+
+        const i32 ww = std::max(1, window_.width());
+        const i32 wh = std::max(1, window_.height());
+        const i32 dw = std::max(1, window_.drawable_width());
+        const i32 dh = std::max(1, window_.drawable_height());
+
+        if (wev.resized) {
+            i32 vx = 0, vy = 0, vw = 1, vh = 1, cw = 1, ch = 1;
+            compute_canvas_viewport(vx, vy, vw, vh, cw, ch);
+            const i32 bw = requested_backbuffer_w_ > 0 ? requested_backbuffer_w_ : cw;
+            const i32 bh = requested_backbuffer_h_ > 0 ? requested_backbuffer_h_ : ch;
+            renderer_.set_screen_region(dw, dh, bw, bh, ViewportRect{vx, vy, vw, vh});
+        }
+
+        const i32 wx = window_.x();
+        const i32 wy = window_.y();
+        const f32 dscale = window_.display_scale();
+
+#if defined(__EMSCRIPTEN__)
+        if (web_editor) message_dialog_.poll_web_editor(minput);
+#endif
+        const bool keep_open = message_dialog_.update(
+            minput, ww, wh, dw, dh, wx, wy, dscale, mobile_touch, frame_start);
+
+        if (with_input && message_dialog_.consume_text_input_focus_request()) {
+            window_.set_text_input(true);
+        }
+        if (with_input && keep_open) {
+            i32 ix = 0, iy = 0, iw = 0, ih = 0, icaret = 0;
+            if (message_dialog_.get_input_window_rect(ww, wh, dw, dh, wx, wy, dscale, mobile_touch,
+                                                      ix, iy, iw, ih, icaret)) {
+#if defined(__EMSCRIPTEN__)
+                if (web_editor) web_position_dialog_editor(ix, iy, iw, ih, ww, wh);
+#endif
+                window_.set_text_input_area(ix, iy, iw, ih, icaret);
+            }
+        }
+
+        if (!paused_in_background_) {
+            if (renderer_.has_screen_frame()) {
+                renderer_.present_screen(window_color_);
+            } else {
+                const auto saved = gfx_.save_render_state();
+                gfx_.bind_framebuffer(FramebufferHandle{});
+                gfx_.set_scissor(false);
+                gfx_.set_viewport(ViewportRect{0, 0, dw, dh});
+                const ColorRGBA c = gm_bgr_to_rgba(window_color_, 255);
+                gfx_.clear(true, false, false,
+                           static_cast<f32>(c.r) / 255.0f,
+                           static_cast<f32>(c.g) / 255.0f,
+                           static_cast<f32>(c.b) / 255.0f,
+                           1.0f);
+                gfx_.restore_render_state(saved);
+            }
+            if (keep_open) {
+                message_dialog_.render(ww, wh, dw, dh, wx, wy, dscale, mobile_touch, frame_start);
+            }
+            window_.swap_buffers();
+            renderer_.end_frame();
+        }
+
+        if (!keep_open) {
+            break;
+        }
+#if defined(__EMSCRIPTEN__)
+        // Even an over-budget frame must return control to the browser for input.
+        const u64 elapsed_ms = (Clock::now_us() - frame_start) / 1000;
+        Clock::yield_ms(elapsed_ms < 16 ? static_cast<u32>(16 - elapsed_ms) : 1);
+#else
+        Clock::sleep_until_us(frame_start + 16000u);
+#endif
+    }
+
+#if defined(__EMSCRIPTEN__)
+    if (web_editor) web_end_dialog_editor();
+#endif
+    if (with_input && !prev_text_input) {
+        window_.set_text_input(false);
+    }
+    window_.set_cursor_visible(prev_cursor);
+
+    // Match GM8 sub_5F6964: clear all keyboard/mouse state so dismissing the dialog
+    // never leaks clicks or key presses into the next game step.
+    window_.input_mut().clear_all();
+    mouse_button_ = 0;
+    mouse_lastbutton_ = 0;
+}
+
+void Runner::show_message_dialog(std::string_view text) {
+    (void)show_message_ext_dialog(text, "", "OK", "");
+}
+
+i32 Runner::show_message_ext_dialog(
+    std::string_view text,
+    std::string_view but1,
+    std::string_view but2,
+    std::string_view but3) {
+    const auto& st = message_dialog_.style();
+    message_dialog_.begin_message(
+        decode_dialog_string(text, st.text_font.charset),
+        decode_dialog_string(but1, st.button_font.charset),
+        decode_dialog_string(but2, st.button_font.charset),
+        decode_dialog_string(but3, st.button_font.charset));
+    run_message_dialog_modal(false);
+    return message_dialog_.result_button();
+}
+
+bool Runner::show_question_dialog(std::string_view text) {
+    return show_message_ext_dialog(text, "Yes", "", "No") == 1;
+}
+
+std::string Runner::get_string_dialog(std::string_view text, std::string_view def) {
+    const auto& st = message_dialog_.style();
+    message_dialog_.begin_input(
+        decode_dialog_string(text, st.text_font.charset),
+        decode_dialog_string(def, st.input_font.charset));
+    run_message_dialog_modal(true);
+    if (message_dialog_.result_button() == 0) return std::string(def);
+    return encode_dialog_string(message_dialog_.result_text_utf8(), st.input_font.charset);
+}
+
+f64 Runner::get_integer_dialog(std::string_view text, f64 def) {
+    const i64 def_int = static_cast<i64>(delphi_round(def));
+    const std::string def_str = std::to_string(def_int);
+    const std::string raw = get_string_dialog(text, def_str);
+
+    if (message_dialog_.result_button() == 0) return def;
+
+    // Match Delphi SysUtils.StrToInt semantics: optional leading/trailing whitespace,
+    // optional +/-, decimal or $/0x hex integer; invalid input falls back to round(def).
+    usize start = 0;
+    usize end = raw.size();
+    while (start < end && (raw[start] == ' ' || raw[start] == '\t' || raw[start] == '\r' || raw[start] == '\n')) {
+        ++start;
+    }
+    while (end > start && (raw[end - 1] == ' ' || raw[end - 1] == '\t' || raw[end - 1] == '\r' || raw[end - 1] == '\n')) {
+        --end;
+    }
+    if (start >= end) {
+        return static_cast<f64>(def_int);
+    }
+
+    std::string_view sv(raw.data() + start, end - start);
+    bool negative = false;
+    if (sv.front() == '+' || sv.front() == '-') {
+        negative = (sv.front() == '-');
+        sv.remove_prefix(1);
+    }
+    if (sv.empty()) {
+        return static_cast<f64>(def_int);
+    }
+
+    int base = 10;
+    if (sv.front() == '$') {
+        base = 16;
+        sv.remove_prefix(1);
+    } else if (sv.size() >= 2 && sv[0] == '0' && (sv[1] == 'x' || sv[1] == 'X')) {
+        base = 16;
+        sv.remove_prefix(2);
+    }
+    if (sv.empty()) {
+        return static_cast<f64>(def_int);
+    }
+
+    i64 value = 0;
+    for (char c : sv) {
+        int digit = -1;
+        if (c >= '0' && c <= '9') digit = c - '0';
+        else if (base == 16 && c >= 'a' && c <= 'f') digit = 10 + (c - 'a');
+        else if (base == 16 && c >= 'A' && c <= 'F') digit = 10 + (c - 'A');
+        else return static_cast<f64>(def_int);
+        if (value > (INT64_MAX - digit) / base) {
+            return static_cast<f64>(def_int);
+        }
+        value = value * base + digit;
+    }
+    return static_cast<f64>(negative ? -value : value);
 }
 
 // ---------------------------------------------------------------------------

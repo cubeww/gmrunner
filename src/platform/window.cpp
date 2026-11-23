@@ -19,6 +19,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <commctrl.h>
 #endif
 
 namespace gm {
@@ -99,12 +100,20 @@ Result<void> PlatformWindow::create(const WindowConfig& config) {
     if (config.resizable) flags |= SDL_WINDOW_RESIZABLE;
     if (config.fullscreen) flags |= SDL_WINDOW_FULLSCREEN;
     if (config.borderless) flags |= SDL_WINDOW_BORDERLESS;
+#if defined(_WIN32)
+    if (!config.show_icons) flags |= SDL_WINDOW_HIDDEN;
+#endif
 
     window_ = SDL_CreateWindow(config.title.c_str(), config.width, config.height, flags);
     if (!window_) {
         return Error{std::string("SDL_CreateWindow failed: ") + SDL_GetError()};
     }
 
+    show_icons_ = true;
+    set_show_icons(config.show_icons);
+#if defined(_WIN32)
+    if (!config.show_icons) SDL_ShowWindow(window_);
+#endif
     gl_context_ = SDL_GL_CreateContext(window_);
     if (!gl_context_) {
         std::string err = SDL_GetError();
@@ -464,6 +473,220 @@ WindowEvents PlatformWindow::poll_events_impl(bool clear_edges) {
     return out;
 }
 
+void PlatformWindow::reset_modal_input_state() noexcept {
+    modal_left_down_ = false;
+    modal_pointer_is_touch_ = false;
+    modal_touch_finger_.reset();
+    modal_mouse_x_ = input_.mouse_x;
+    modal_mouse_y_ = input_.mouse_y;
+}
+
+void PlatformWindow::poll_modal_events(ModalInputFrame& out) {
+    out = ModalInputFrame{};
+    out.mouse_x = modal_mouse_x_;
+    out.mouse_y = modal_mouse_y_;
+    out.left_down = modal_left_down_;
+    out.pointer_is_touch = modal_pointer_is_touch_;
+
+#if defined(__EMSCRIPTEN__)
+    std::array<f32, 2> pointer_scale{};
+    auto map_pointer = [&](float& x, float& y, float w, float h) {
+        if (pointer_scale[0] == 0.0f) web_canvas_pointer_scale(pointer_scale.data());
+        x = (x - w * 0.5f) * pointer_scale[0] + w * 0.5f;
+        y = (y - h * 0.5f) * pointer_scale[1] + h * 0.5f;
+    };
+#endif
+
+    const f32 win_w = static_cast<f32>(std::max(1, width()));
+    const f32 win_h = static_cast<f32>(std::max(1, height()));
+
+    SDL_Event ev{};
+    while (SDL_PollEvent(&ev)) {
+#if defined(__EMSCRIPTEN__)
+        if (ev.type == SDL_EVENT_MOUSE_MOTION) {
+            map_pointer(ev.motion.x, ev.motion.y, win_w, win_h);
+        } else if (ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN || ev.type == SDL_EVENT_MOUSE_BUTTON_UP) {
+            map_pointer(ev.button.x, ev.button.y, win_w, win_h);
+        } else if (ev.type == SDL_EVENT_FINGER_DOWN || ev.type == SDL_EVENT_FINGER_MOTION ||
+                   ev.type == SDL_EVENT_FINGER_UP || ev.type == SDL_EVENT_FINGER_CANCELED) {
+            map_pointer(ev.tfinger.x, ev.tfinger.y, 1.0f, 1.0f);
+        }
+#endif
+        switch (ev.type) {
+            case SDL_EVENT_QUIT:
+            case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
+                out.window_events.quit_requested = true;
+                break;
+
+            case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
+            case SDL_EVENT_WINDOW_RESIZED:
+                out.window_events.resized = true;
+                out.window_events.new_width = drawable_width();
+                out.window_events.new_height = drawable_height();
+                break;
+
+            case SDL_EVENT_WINDOW_FOCUS_GAINED:
+                has_focus_ = true;
+                out.window_events.focus_gained = true;
+                break;
+
+            case SDL_EVENT_WINDOW_FOCUS_LOST:
+                has_focus_ = false;
+                out.window_events.focus_lost = true;
+                break;
+
+            case SDL_EVENT_WINDOW_ENTER_FULLSCREEN:
+                fullscreen_ = true;
+                out.window_events.resized = true;
+                out.window_events.new_width = drawable_width();
+                out.window_events.new_height = drawable_height();
+                break;
+
+            case SDL_EVENT_WINDOW_LEAVE_FULLSCREEN:
+                fullscreen_ = false;
+                apply_pending_windowed_size();
+                out.window_events.resized = true;
+                out.window_events.new_width = drawable_width();
+                out.window_events.new_height = drawable_height();
+                break;
+
+            case SDL_EVENT_WILL_ENTER_BACKGROUND:
+                out.window_events.entered_background = true;
+                break;
+
+            case SDL_EVENT_DID_ENTER_FOREGROUND:
+                out.window_events.entered_foreground = true;
+                break;
+
+            case SDL_EVENT_RENDER_DEVICE_RESET:
+            case SDL_EVENT_RENDER_TARGETS_RESET:
+                out.window_events.context_lost = true;
+                break;
+
+            case SDL_EVENT_KEY_DOWN: {
+                out.window_events.any_user_gesture = true;
+                ModalKeyEvent ke{};
+                ke.vk = sdl_scancode_to_gm_vk(static_cast<i32>(ev.key.scancode));
+                ke.keycode = static_cast<u32>(ev.key.key);
+                ke.repeat = ev.key.repeat;
+                ke.ctrl = (ev.key.mod & SDL_KMOD_CTRL) != 0;
+                ke.shift = (ev.key.mod & SDL_KMOD_SHIFT) != 0;
+                ke.alt = (ev.key.mod & SDL_KMOD_ALT) != 0;
+                ke.gui = (ev.key.mod & SDL_KMOD_GUI) != 0;
+                out.keyboard_events.emplace_back(ke);
+                break;
+            }
+
+            case SDL_EVENT_TEXT_INPUT:
+                if (ev.text.text && ev.text.text[0] != '\0') {
+                    out.keyboard_events.emplace_back(std::string(ev.text.text));
+                }
+                break;
+
+            case SDL_EVENT_TEXT_EDITING:
+                out.keyboard_events.emplace_back(ModalComposition{
+                    ev.edit.text ? ev.edit.text : "", ev.edit.start, ev.edit.length});
+                break;
+
+            case SDL_EVENT_MOUSE_MOTION:
+                modal_pointer_is_touch_ = (ev.motion.which == SDL_TOUCH_MOUSEID);
+                modal_mouse_x_ = ev.motion.x;
+                modal_mouse_y_ = ev.motion.y;
+                out.mouse_x = modal_mouse_x_;
+                out.mouse_y = modal_mouse_y_;
+                out.mouse_moved = true;
+                out.pointer_is_touch = modal_pointer_is_touch_;
+                break;
+
+            case SDL_EVENT_MOUSE_BUTTON_DOWN:
+                out.window_events.any_user_gesture = true;
+                modal_pointer_is_touch_ = (ev.button.which == SDL_TOUCH_MOUSEID);
+                modal_mouse_x_ = ev.button.x;
+                modal_mouse_y_ = ev.button.y;
+                out.mouse_x = modal_mouse_x_;
+                out.mouse_y = modal_mouse_y_;
+                out.pointer_is_touch = modal_pointer_is_touch_;
+                if (ev.button.button == SDL_BUTTON_LEFT) {
+                    modal_left_down_ = true;
+                    out.left_down = true;
+                    out.left_pressed = true;
+                    if (ev.button.clicks >= 2) {
+                        out.left_double_click = true;
+                    }
+                }
+                break;
+
+            case SDL_EVENT_MOUSE_BUTTON_UP:
+                modal_pointer_is_touch_ = (ev.button.which == SDL_TOUCH_MOUSEID);
+                modal_mouse_x_ = ev.button.x;
+                modal_mouse_y_ = ev.button.y;
+                out.mouse_x = modal_mouse_x_;
+                out.mouse_y = modal_mouse_y_;
+                out.pointer_is_touch = modal_pointer_is_touch_;
+                if (ev.button.button == SDL_BUTTON_LEFT) {
+                    modal_left_down_ = false;
+                    out.left_down = false;
+                    out.left_released = true;
+                }
+                break;
+
+            case SDL_EVENT_FINGER_DOWN: {
+                out.window_events.any_user_gesture = true;
+                const i64 fid = static_cast<i64>(ev.tfinger.fingerID);
+                if (!modal_touch_finger_.has_value()) {
+                    modal_touch_finger_ = fid;
+                    modal_pointer_is_touch_ = true;
+                    modal_mouse_x_ = std::clamp(ev.tfinger.x, 0.0f, 1.0f) * win_w;
+                    modal_mouse_y_ = std::clamp(ev.tfinger.y, 0.0f, 1.0f) * win_h;
+                    modal_left_down_ = true;
+                    out.mouse_x = modal_mouse_x_;
+                    out.mouse_y = modal_mouse_y_;
+                    out.mouse_moved = true;
+                    out.left_down = true;
+                    out.left_pressed = true;
+                    out.pointer_is_touch = true;
+                }
+                break;
+            }
+
+            case SDL_EVENT_FINGER_MOTION: {
+                const i64 fid = static_cast<i64>(ev.tfinger.fingerID);
+                if (modal_touch_finger_.has_value() && *modal_touch_finger_ == fid) {
+                    modal_pointer_is_touch_ = true;
+                    modal_mouse_x_ = std::clamp(ev.tfinger.x, 0.0f, 1.0f) * win_w;
+                    modal_mouse_y_ = std::clamp(ev.tfinger.y, 0.0f, 1.0f) * win_h;
+                    out.mouse_x = modal_mouse_x_;
+                    out.mouse_y = modal_mouse_y_;
+                    out.mouse_moved = true;
+                    out.pointer_is_touch = true;
+                }
+                break;
+            }
+
+            case SDL_EVENT_FINGER_UP:
+            case SDL_EVENT_FINGER_CANCELED: {
+                const i64 fid = static_cast<i64>(ev.tfinger.fingerID);
+                if (modal_touch_finger_.has_value() && *modal_touch_finger_ == fid) {
+                    modal_touch_finger_.reset();
+                    modal_pointer_is_touch_ = true;
+                    modal_mouse_x_ = std::clamp(ev.tfinger.x, 0.0f, 1.0f) * win_w;
+                    modal_mouse_y_ = std::clamp(ev.tfinger.y, 0.0f, 1.0f) * win_h;
+                    modal_left_down_ = false;
+                    out.mouse_x = modal_mouse_x_;
+                    out.mouse_y = modal_mouse_y_;
+                    out.left_down = false;
+                    out.left_released = true;
+                    out.pointer_is_touch = true;
+                }
+                break;
+            }
+
+            default:
+                break;
+        }
+    }
+}
+
 void PlatformWindow::swap_buffers() {
     if (window_) {
         SDL_GL_SwapWindow(window_);
@@ -543,6 +766,7 @@ void PlatformWindow::set_vsync(bool enabled) {
 }
 
 void PlatformWindow::set_cursor_visible(bool visible) {
+    cursor_visible_ = visible;
     if (visible) {
         SDL_ShowCursor();
     } else {
@@ -550,11 +774,71 @@ void PlatformWindow::set_cursor_visible(bool visible) {
     }
 }
 
+f32 PlatformWindow::display_scale() const noexcept {
+    if (!window_) return 1.0f;
+    const f32 s = SDL_GetWindowDisplayScale(window_);
+    return (s > 0.1f && s < 16.0f) ? s : 1.0f;
+}
+
 void PlatformWindow::set_borderless(bool borderless) {
     borderless_ = borderless;
     if (window_) {
         SDL_SetWindowBordered(window_, !borderless);
     }
+}
+
+#if defined(_WIN32)
+namespace {
+constexpr DWORD caption_buttons = WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
+
+LRESULT CALLBACK filter_caption_buttons(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
+                                        UINT_PTR id, DWORD_PTR data) {
+    if (msg == WM_STYLECHANGING && static_cast<int>(wp) == GWL_STYLE) {
+        auto& style = *reinterpret_cast<STYLESTRUCT*>(lp);
+        // SDL rebuilds the window style on fullscreen, border and resize changes.
+        // Remember its latest windowed buttons for window_set_showicons(true).
+        if (style.styleNew & WS_SYSMENU) {
+            *reinterpret_cast<u32*>(data) = style.styleNew & caption_buttons;
+            style.styleNew &= ~caption_buttons;
+        }
+    } else if (msg == WM_NCDESTROY) {
+        RemoveWindowSubclass(hwnd, filter_caption_buttons, id);
+    }
+    return DefSubclassProc(hwnd, msg, wp, lp);
+}
+} // namespace
+#endif
+
+void PlatformWindow::set_show_icons(bool show) {
+    if (show_icons_ == show) return;
+#if defined(_WIN32)
+    if (window_) {
+        const auto hwnd = static_cast<HWND>(SDL_GetPointerProperty(SDL_GetWindowProperties(window_),
+                                                                  SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr));
+        if (hwnd) {
+            const DWORD style = GetWindowLongW(hwnd, GWL_STYLE);
+            DWORD updated = style;
+            if (show) {
+                RemoveWindowSubclass(hwnd, filter_caption_buttons, 0);
+                if (style & WS_CAPTION) updated |= caption_button_style_;
+            } else {
+                if (!SetWindowSubclass(hwnd, filter_caption_buttons, 0,
+                                       reinterpret_cast<DWORD_PTR>(&caption_button_style_))) {
+                    GM_LOG_WARN("platform", "Could not hide window caption buttons");
+                    return;
+                }
+                caption_button_style_ = style & caption_buttons;
+                if (style & WS_SYSMENU) updated &= ~caption_buttons;
+            }
+            if (updated != style) {
+                SetWindowLongW(hwnd, GWL_STYLE, static_cast<LONG>(updated));
+                SetWindowPos(hwnd, nullptr, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOACTIVATE |
+                             SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER);
+            }
+        }
+    }
+#endif
+    show_icons_ = show;
 }
 
 void PlatformWindow::set_stay_on_top(bool on_top) {
@@ -893,6 +1177,16 @@ void PlatformWindow::set_text_input(bool enabled) {
     } else {
         SDL_StopTextInput(window_);
     }
+}
+
+bool PlatformWindow::is_text_input_active() const noexcept {
+    return window_ && SDL_TextInputActive(window_);
+}
+
+void PlatformWindow::set_text_input_area(i32 x, i32 y, i32 w, i32 h, i32 cursor_offset) {
+    if (!window_) return;
+    const SDL_Rect rect{x, y, std::max(1, w), std::max(1, h)};
+    SDL_SetTextInputArea(window_, &rect, cursor_offset);
 }
 
 bool PlatformWindow::is_mobile_touch_platform() noexcept {

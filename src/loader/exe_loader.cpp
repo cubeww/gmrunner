@@ -156,6 +156,115 @@ void read_particle_shapes(std::span<const u8> runner, GameData& game) {
     }
 }
 
+void read_message_form_assets(std::span<const u8> runner, GameData& game) {
+    // GM8.0/8.1/8.2 embed the default TMessageForm background JPEG and 3-state button
+    // TImageList bitmap in the runner's Delphi DFM resource.
+    std::string_view bytes(reinterpret_cast<const char*>(runner.data()), runner.size());
+    constexpr std::string_view form_sig("TPF0\x0c" "TMessageForm\x0b" "MessageForm", 29);
+    const usize form = bytes.find(form_sig);
+    if (form == bytes.npos) return;
+
+    const usize form_limit = std::min<usize>(runner.size() - form, 65536u);
+    std::string_view chunk = bytes.substr(form, form_limit);
+
+    // 1. BackgroundImage.Picture.Data -> Pascal class name + 4-byte length + JPEG/BMP bytes.
+    constexpr std::string_view bg_obj("\x0f" "BackgroundImage", 16);
+    if (const usize bg_pos = chunk.find(bg_obj); bg_pos != chunk.npos) {
+        constexpr std::string_view pic_prop("\x0c" "Picture.Data\x0a", 14);
+        const usize search_len = std::min<usize>(chunk.size() - bg_pos, 256u);
+        if (const usize ppos = chunk.substr(bg_pos, search_len).find(pic_prop); ppos != std::string_view::npos) {
+            BinaryReader prop_reader(runner.subspan(form + bg_pos + ppos + pic_prop.size()));
+            if (auto data_res = prop_reader.read_length_prefixed_span(); data_res) {
+                const auto blob = data_res.value();
+                if (blob.size() >= 6) {
+                    const usize cls_len = blob[0];
+                    if (1 + cls_len + 4 <= blob.size()) {
+                        BinaryReader inner(blob.subspan(1 + cls_len));
+                        if (auto img_res = inner.read_length_prefixed_span(); img_res && !img_res.value().empty()) {
+                            const auto img = img_res.value();
+                            game.message_background_image.assign(img.begin(), img.end());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. TheImages.Bitmap -> Win32 ImageList stream ("IL") containing 3 button subimages (80x25).
+    constexpr std::string_view il_obj("\x09" "TheImages", 10);
+    if (const usize il_pos = chunk.find(il_obj); il_pos != chunk.npos) {
+        constexpr std::string_view bmp_prop("\x06" "Bitmap\x0a", 8);
+        const usize search_len = std::min<usize>(chunk.size() - il_pos, 256u);
+        if (const usize bpos = chunk.substr(il_pos, search_len).find(bmp_prop); bpos != std::string_view::npos) {
+            BinaryReader prop_reader(runner.subspan(form + il_pos + bpos + bmp_prop.size()));
+            if (auto data_res = prop_reader.read_length_prefixed_span(); data_res) {
+                const auto il = data_res.value();
+                if (il.size() >= 28 + 54 && il[0] == 'I' && il[1] == 'L') {
+                    BinaryReader hdr(il.subspan(4));
+                    const auto cur_count = hdr.read_u16();
+                    (void)hdr.read_u16(); // cMaxImage
+                    (void)hdr.read_u16(); // cGrow
+                    const auto btn_w = hdr.read_u16();
+                    const auto btn_h = hdr.read_u16();
+                    if (cur_count && btn_w && btn_h &&
+                        cur_count.value() >= 3 && btn_w.value() > 0 && btn_h.value() > 0 &&
+                        btn_w.value() <= 512 && btn_h.value() <= 512) {
+                        const i32 bw = static_cast<i32>(btn_w.value());
+                        const i32 bh = static_cast<i32>(btn_h.value());
+                        // Locate embedded BMP ("BM") after the 28-byte ImageList header.
+                        usize bm_off = 28;
+                        while (bm_off + 54 <= il.size() && !(il[bm_off] == 'B' && il[bm_off + 1] == 'M')) {
+                            ++bm_off;
+                        }
+                        if (bm_off + 54 <= il.size()) {
+                            BinaryReader dib(il.subspan(bm_off + 10));
+                            const auto px_off = dib.read_u32();
+                            const auto dib_sz = dib.read_u32();
+                            const auto img_w = dib.read_i32();
+                            const auto img_h = dib.read_i32();
+                            const auto planes = dib.read_u16();
+                            const auto bpp = dib.read_u16();
+                            const auto comp = dib.read_u32();
+                            if (px_off && dib_sz && img_w && img_h && planes && bpp && comp &&
+                                dib_sz.value() >= 40 && planes.value() == 1 && comp.value() == 0 &&
+                                (bpp.value() == 24 || bpp.value() == 32) &&
+                                img_w.value() >= bw * 3 && std::abs(img_h.value()) >= bh) {
+                                const i32 src_w = img_w.value();
+                                const i32 src_h = std::abs(img_h.value());
+                                const bool top_down = img_h.value() < 0;
+                                const usize bytes_per_px = bpp.value() / 8u;
+                                const usize row_stride = ((static_cast<usize>(src_w) * bytes_per_px) + 3u) & ~usize{3u};
+                                const usize pixel_base = bm_off + px_off.value();
+                                if (pixel_base + row_stride * static_cast<usize>(src_h) <= il.size()) {
+                                    for (usize s = 0; s < 3; ++s) {
+                                        auto& dst = game.message_buttons[s];
+                                        dst.width = bw;
+                                        dst.height = bh;
+                                        dst.bgra.resize(static_cast<usize>(bw) * static_cast<usize>(bh) * 4u);
+                                        for (i32 y = 0; y < bh; ++y) {
+                                            const i32 src_y = top_down ? y : (src_h - 1 - y);
+                                            const usize src_row = pixel_base + static_cast<usize>(src_y) * row_stride;
+                                            for (i32 x = 0; x < bw; ++x) {
+                                                const usize sx = static_cast<usize>(static_cast<i32>(s) * bw + x);
+                                                const usize sp = src_row + sx * bytes_per_px;
+                                                const usize dp = (static_cast<usize>(y) * static_cast<usize>(bw) + static_cast<usize>(x)) * 4u;
+                                                dst.bgra[dp + 0] = il[sp + 0];
+                                                dst.bgra[dp + 1] = il[sp + 1];
+                                                dst.bgra[dp + 2] = il[sp + 2];
+                                                dst.bgra[dp + 3] = 255u; // TheImages has Masked=False
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 Result<std::vector<u8>> read_optional_bitmap(BinaryReader& r) {
     auto exists_res = r.read_bool32();
     if (!exists_res) return exists_res.error();
@@ -1369,7 +1478,9 @@ Result<GameData> ExeLoader::load_from_bytes(std::vector<u8> exe_bytes, const Loa
     game.meta.exe_size = exe_bytes.size();
     game.meta.pe_overlay_offset = find_pe_overlay_offset(exe_bytes);
     if (game.meta.pe_overlay_offset > 0) {
-        read_particle_shapes(std::span<const u8>(exe_bytes).first(game.meta.pe_overlay_offset), game);
+        const auto runner_span = std::span<const u8>(exe_bytes).first(game.meta.pe_overlay_offset);
+        read_particle_shapes(runner_span, game);
+        read_message_form_assets(runner_span, game);
     }
 
     bool is_gm81_family = false;

@@ -93,6 +93,7 @@ public:
     void begin_screen_pass(i32 canvas_w, i32 canvas_h, i32 backbuffer_w, i32 backbuffer_h, const ViewportRect& present_viewport);
     // Presents the internal screen FBO onto the window backbuffer with letterbox border color.
     void present_screen(u32 border_color_bgr);
+    [[nodiscard]] bool has_screen_frame() const noexcept { return screen_fbo_tex_.valid(); }
     // Startup option, set before init() so the default shader stays unchanged.
     void set_sharp_scale(bool enabled) noexcept { sharp_scale_ = enabled; }
     void end_frame();

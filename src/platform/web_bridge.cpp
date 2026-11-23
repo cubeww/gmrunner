@@ -9,6 +9,7 @@
 #include <emscripten/emscripten.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
@@ -187,6 +188,77 @@ EM_JS(char*, js_web_prompt_string, (const char* prompt_ptr, const char* def_ptr)
     return stringToNewUTF8(res === null ? d : String(res));
 });
 
+// A real hit target lets the browser focus its editor during the user's tap.
+EM_JS(void, js_begin_dialog_editor, (const char* value, const char* label), {
+    const el = document.createElement('input');
+    el.type = 'text';
+    el.enterKeyHint = 'done';
+    el.autocomplete = 'off';
+    el.setAttribute('aria-label', UTF8ToString(label));
+    el.value = UTF8ToString(value);
+    el.style.cssText = 'position:fixed;z-index:2147483647;opacity:0;margin:0;padding:0;border:0;box-sizing:border-box;font-size:16px';
+    const state = { el, dirty: false, action: 0, composing: false };
+    Module.gmDialogEditor = state;
+    const dirty = () => { state.dirty = true; };
+    for (const type of ['input', 'select', 'click', 'keyup', 'selectionchange']) {
+        el.addEventListener(type, dirty);
+    }
+    el.addEventListener('compositionstart', () => { state.composing = true; });
+    el.addEventListener('compositionend', () => { state.composing = false; dirty(); });
+    for (const type of ['keydown', 'keyup', 'keypress']) {
+        el.addEventListener(type, e => {
+            e.stopPropagation();
+            if (type !== 'keydown' || e.isComposing || state.composing || e.keyCode === 229) return;
+            if (e.key === 'Enter' || e.key === 'Escape') {
+                e.preventDefault();
+                state.action = e.key === 'Enter' ? 13 : 27;
+                dirty();
+            }
+        });
+    }
+    Module.canvas.parentElement.appendChild(el);
+    el.select();
+});
+
+EM_JS(void, js_position_dialog_editor, (int x, int y, int w, int h, int win_w, int win_h), {
+    const canvas = Module.canvas;
+    const rect = canvas.getBoundingClientRect();
+    let width = rect.width, height = rect.height;
+    if (getComputedStyle(canvas).objectFit === 'contain' && canvas.width && canvas.height) {
+        const scale = Math.min(width / canvas.width, height / canvas.height);
+        width = canvas.width * scale;
+        height = canvas.height * scale;
+    }
+    const style = Module.gmDialogEditor.el.style;
+    style.left = (rect.left + (rect.width - width) / 2 + x * width / win_w) + 'px';
+    style.top = (rect.top + (rect.height - height) / 2 + y * height / win_h) + 'px';
+    style.width = (w * width / win_w) + 'px';
+    style.height = (h * height / win_h) + 'px';
+});
+
+EM_JS(char*, js_poll_dialog_editor, (int* meta), {
+    const state = Module.gmDialogEditor;
+    if (!state.dirty) return 0;
+    state.dirty = false;
+    const el = state.el;
+    const start = Array.from(el.value.slice(0, el.selectionStart)).length;
+    const end = Array.from(el.value.slice(0, el.selectionEnd)).length;
+    const backward = el.selectionDirection === 'backward';
+    HEAP32[meta >> 2] = backward ? end : start;
+    HEAP32[(meta >> 2) + 1] = backward ? start : end;
+    HEAP32[(meta >> 2) + 2] = state.action;
+    state.action = 0;
+    return stringToNewUTF8(el.value);
+});
+
+EM_JS(void, js_end_dialog_editor, (), {
+    const el = Module.gmDialogEditor.el;
+    const focused = document.activeElement === el;
+    el.remove();
+    delete Module.gmDialogEditor;
+    if (focused) Module.canvas.focus({ preventScroll: true });
+});
+
 EM_JS(void, js_web_unlock_audio, (), {
     if (typeof Module.gmUnlockAudio === 'function') {
         Module.gmUnlockAudio();
@@ -196,6 +268,110 @@ EM_JS(void, js_web_unlock_audio, (), {
 EM_JS(void, js_web_report_status, (const char* status_ptr), {
     if (typeof Module.gmSetStatus === 'function') {
         Module.gmSetStatus(UTF8ToString(status_ptr));
+    }
+});
+
+EM_JS(int, js_web_font_metrics, (const char* css_font_ptr, float em_px, int* out_vals), {
+    try {
+        if (!Module._gmFontCanvas) {
+            Module._gmFontCanvas = document.createElement('canvas');
+            Module._gmFontCanvas.width = 128;
+            Module._gmFontCanvas.height = 128;
+            Module._gmFontCtx = Module._gmFontCanvas.getContext('2d', { willReadFrequently: true });
+        }
+        const ctx = Module._gmFontCtx;
+        if (!ctx) return 0;
+        ctx.font = UTF8ToString(css_font_ptr);
+        const m = ctx.measureText('Agjy|');
+        const asc = Math.ceil(m.fontBoundingBoxAscent || m.actualBoundingBoxAscent || (em_px * 0.85));
+        const desc = Math.ceil(m.fontBoundingBoxDescent || m.actualBoundingBoxDescent || (em_px * 0.25));
+        const lh = Math.max(asc + desc, Math.ceil(em_px * 1.18));
+        HEAP32[out_vals >> 2] = Math.max(1, asc);
+        HEAP32[(out_vals >> 2) + 1] = Math.max(0, desc);
+        HEAP32[(out_vals >> 2) + 2] = Math.max(1, lh);
+        return 1;
+    } catch (_) {
+        return 0;
+    }
+});
+
+EM_JS(uint8_t*, js_web_rasterize_glyph, (const char* css_font_ptr, float em_px, uint32_t codepoint, int* out_meta, float* out_adv), {
+    try {
+        if (!Module._gmFontCanvas) {
+            Module._gmFontCanvas = document.createElement('canvas');
+            Module._gmFontCanvas.width = 128;
+            Module._gmFontCanvas.height = 128;
+            Module._gmFontCtx = Module._gmFontCanvas.getContext('2d', { willReadFrequently: true });
+        }
+        const canvas = Module._gmFontCanvas;
+        const ctx = Module._gmFontCtx;
+        if (!ctx) return 0;
+
+        const fontStr = UTF8ToString(css_font_ptr);
+        const ch = String.fromCodePoint(codepoint);
+        ctx.font = fontStr;
+        const m = ctx.measureText(ch);
+        const adv = m.width || 0;
+        HEAPF32[out_adv >> 2] = adv;
+
+        const pad = Math.max(8, Math.ceil(em_px * 0.6));
+        const cw = Math.max(32, Math.min(256, Math.ceil(adv + pad * 2)));
+        const chh = Math.max(32, Math.min(256, Math.ceil(em_px * 2.4 + pad * 2)));
+        if (canvas.width < cw || canvas.height < chh) {
+            canvas.width = Math.max(canvas.width, cw);
+            canvas.height = Math.max(canvas.height, chh);
+        }
+
+        const ox = pad;
+        const oy = Math.ceil(em_px * 1.4) + pad;
+        ctx.clearRect(0, 0, cw, chh);
+        ctx.font = fontStr;
+        ctx.textBaseline = 'alphabetic';
+        ctx.textAlign = 'left';
+        ctx.fillStyle = '#ffffff';
+        ctx.fillText(ch, ox, oy);
+
+        const img = ctx.getImageData(0, 0, cw, chh).data;
+        let minX = cw, minY = chh, maxX = -1, maxY = -1;
+        for (let y = 0; y < chh; ++y) {
+            const row = y * cw * 4;
+            for (let x = 0; x < cw; ++x) {
+                if (img[row + x * 4 + 3] > 0) {
+                    if (x < minX) minX = x;
+                    if (x > maxX) maxX = x;
+                    if (y < minY) minY = y;
+                    if (y > maxY) maxY = y;
+                }
+            }
+        }
+
+        if (maxX < minX || maxY < minY) {
+            HEAP32[out_meta >> 2] = 0;
+            HEAP32[(out_meta >> 2) + 1] = 0;
+            HEAP32[(out_meta >> 2) + 2] = 0;
+            HEAP32[(out_meta >> 2) + 3] = 0;
+            return 0;
+        }
+
+        const gw = maxX - minX + 1;
+        const gh = maxY - minY + 1;
+        const ptr = _malloc(gw * gh);
+        if (!ptr) return 0;
+        let di = 0;
+        for (let y = minY; y <= maxY; ++y) {
+            const row = y * cw * 4;
+            for (let x = minX; x <= maxX; ++x) {
+                HEAPU8[ptr + di] = img[row + x * 4 + 3];
+                ++di;
+            }
+        }
+        HEAP32[out_meta >> 2] = gw;
+        HEAP32[(out_meta >> 2) + 1] = gh;
+        HEAP32[(out_meta >> 2) + 2] = minX - ox;
+        HEAP32[(out_meta >> 2) + 3] = minY - oy;
+        return ptr;
+    } catch (_) {
+        return 0;
     }
 });
 
@@ -350,6 +526,29 @@ std::string web_prompt_string(std::string_view prompt, std::string_view default_
     return take_js_string(js_web_prompt_string(p.c_str(), d.c_str()));
 }
 
+void web_begin_dialog_editor(const std::string& value, const std::string& label) {
+    js_begin_dialog_editor(value.c_str(), label.c_str());
+}
+
+void web_position_dialog_editor(int x, int y, int w, int h, int win_w, int win_h) {
+    js_position_dialog_editor(x, y, w, h, win_w, win_h);
+}
+
+bool web_poll_dialog_editor(std::string& value, int& anchor, int& caret, int& action) {
+    int meta[3]{};
+    char* text = js_poll_dialog_editor(meta);
+    if (!text) return false;
+    value = take_js_string(text);
+    anchor = meta[0];
+    caret = meta[1];
+    action = meta[2];
+    return true;
+}
+
+void web_end_dialog_editor() {
+    js_end_dialog_editor();
+}
+
 void web_unlock_audio() {
     js_web_unlock_audio();
 }
@@ -357,6 +556,81 @@ void web_unlock_audio() {
 void web_report_status(std::string_view status_text) {
     std::string s(status_text);
     js_web_report_status(s.c_str());
+}
+
+namespace {
+
+std::string build_web_css_font(std::string_view family_name, f32 em_px, bool bold, bool italic) {
+    std::string css;
+    if (italic) css += "italic ";
+    if (bold) css += "bold ";
+    char sz_buf[32];
+    std::snprintf(sz_buf, sizeof(sz_buf), "%.2fpx ", static_cast<double>(std::max(1.0f, em_px)));
+    css += sz_buf;
+
+    const std::string lower = ascii_to_lower(family_name);
+    if (lower.empty() || lower == "ms sans serif" || lower == "microsoft sans serif") {
+        css += "Tahoma, \"Microsoft Sans Serif\", Arial, sans-serif";
+    } else {
+        std::string safe;
+        safe.reserve(family_name.size());
+        for (char c : family_name) {
+            if (c != '"' && c != '\'' && c != ';' && c != '\r' && c != '\n') safe.push_back(c);
+        }
+        if (!safe.empty()) {
+            css += "\"";
+            css += safe;
+            css += "\", ";
+        }
+        css += "Tahoma, Arial, sans-serif";
+    }
+    return css;
+}
+
+} // namespace
+
+bool web_measure_font_metrics(
+    std::string_view family_name,
+    f32 em_px,
+    bool bold,
+    bool italic,
+    i32& out_ascent,
+    i32& out_descent,
+    i32& out_line_height) {
+    const std::string css = build_web_css_font(family_name, em_px, bold, italic);
+    int vals[3]{};
+    if (js_web_font_metrics(css.c_str(), em_px, vals) == 0) {
+        return false;
+    }
+    out_ascent = vals[0];
+    out_descent = vals[1];
+    out_line_height = vals[2];
+    return true;
+}
+
+bool web_rasterize_glyph(
+    std::string_view family_name,
+    f32 em_px,
+    bool bold,
+    bool italic,
+    u32 codepoint,
+    WebGlyphBitmap& out) {
+    const std::string css = build_web_css_font(family_name, em_px, bold, italic);
+    int meta[4]{};
+    float adv = 0.0f;
+    uint8_t* pixels = js_web_rasterize_glyph(css.c_str(), em_px, codepoint, meta, &adv);
+    out.width = meta[0];
+    out.height = meta[1];
+    out.xoff = meta[2];
+    out.yoff = meta[3];
+    out.advance = adv;
+    out.alpha.clear();
+    if (pixels && out.width > 0 && out.height > 0) {
+        const usize count = static_cast<usize>(out.width) * static_cast<usize>(out.height);
+        out.alpha.assign(pixels, pixels + count);
+        std::free(pixels);
+    }
+    return true;
 }
 
 } // namespace gm

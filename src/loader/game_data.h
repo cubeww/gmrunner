@@ -402,6 +402,8 @@ struct GameData {
     GameMetadata meta;
     GameOptions options;
     std::array<Bitmap32, 14> particle_shapes;
+    std::vector<u8> message_background_image; // Encoded JPEG/BMP from TMessageForm.BackgroundImage
+    std::array<Bitmap32, 3> message_buttons;  // 3-state button strip from TMessageForm.TheImages
 
     std::vector<ExtensionData> extensions;
     std::vector<TriggerData> triggers;

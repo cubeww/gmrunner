@@ -1083,10 +1083,10 @@ void Runner::register_builtins_graphics() {
     });
     register_builtin("window_get_showborder", [](Runner& r, i32, i32, std::span<const RValue>) { return RValue(r.window_showborder_); });
     register_builtin("window_set_showicons", [](Runner& r, i32, i32, std::span<const RValue> a) {
-        r.window_showicons_ = arg_bool(a, 0, true);
+        r.window().set_show_icons(arg_bool(a, 0, true));
         return RValue(0.0);
     });
-    register_builtin("window_get_showicons", [](Runner& r, i32, i32, std::span<const RValue>) { return RValue(r.window_showicons_); });
+    register_builtin("window_get_showicons", [](Runner& r, i32, i32, std::span<const RValue>) { return RValue(r.window().shows_icons()); });
     register_builtin("window_set_stayontop", [](Runner& r, i32, i32, std::span<const RValue> a) {
         r.window().set_stay_on_top(arg_bool(a, 0, false));
         return RValue(0.0);

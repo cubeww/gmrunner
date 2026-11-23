@@ -72,6 +72,28 @@ public:
         return it != textures_.end() ? it->second.height : 0;
     }
 
+    struct SavedRenderState {
+        bool viewport_valid = false;
+        ViewportRect viewport{};
+        bool scissor_valid = false;
+        bool scissor_enabled = false;
+        ViewportRect scissor_rect{};
+        bool blend_valid = false;
+        BlendState blend{};
+        bool depth_valid = false;
+        DepthState depth{};
+        bool cull_valid = false;
+        CullMode cull = CullMode::None;
+        bool color_mask_valid = false;
+        std::array<bool, 4> color_mask{true, true, true, true};
+        i32 polygon_mode = 2;
+        bool program_valid = false;
+        u32 program = 0;
+    };
+
+    [[nodiscard]] SavedRenderState save_render_state() const noexcept;
+    void restore_render_state(const SavedRenderState& state);
+
 private:
     struct FramebufferEntry {
         u32 fbo = 0;

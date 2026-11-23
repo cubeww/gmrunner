@@ -75,7 +75,10 @@ void Runner::register_builtins_misc() {
     });
     register_builtin("highscore_show_ext", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
 
-    register_builtin("message_text_charset", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
+    register_builtin("message_text_charset", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        r.message_dialog().set_charset(arg_i32(a, 0, 0), static_cast<u8>(arg_i32(a, 1, 1) & 0xFF));
+        return RValue(0.0);
+    });
     register_builtin("show_menu", [](Runner&, i32, i32, std::span<const RValue> a) {
         return RValue(arg_i32(a, 1, 0));
     });

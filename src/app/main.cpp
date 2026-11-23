@@ -41,7 +41,8 @@ struct AppState {
     bool running = true;
     bool sharp_scale = false;
     bool loop_active = false;
-    bool in_tick = false;
+    bool web_busy = false;
+    bool stop_requested = false;
     gm::u64 frame_count = 0;
     gm::u64 start_us = 0;
     gm::u64 last_raf_us = 0;
@@ -271,6 +272,13 @@ void tick_app_frame(AppState& app) {
 
 std::unique_ptr<AppState> g_web_app;
 
+// Launch, a game tick and teardown may all suspend inside Wasm.
+struct WebCallScope {
+    explicit WebCallScope(AppState& app) : app(app) { app.web_busy = true; }
+    ~WebCallScope() { app.web_busy = false; }
+    AppState& app;
+};
+
 void stop_web_game_internal() {
     if (!g_web_app) return;
     if (g_web_app->loop_active) {
@@ -278,6 +286,7 @@ void stop_web_game_internal() {
         emscripten_cancel_main_loop();
     }
     if (g_web_app->runner) {
+        g_web_app->runner->request_host_stop();
         g_web_app->runner->shutdown();
         g_web_app->runner.reset();
     }
@@ -298,29 +307,16 @@ extern "C" {
 EMSCRIPTEN_KEEPALIVE
 void gmrunner_web_frame(void* userdata) {
     auto* app = static_cast<AppState*>(userdata);
-    if (!app || app->in_tick) {
+    if (!app || app->web_busy) {
         // Prevent Asyncify/JSPI re-entrancy while an async asset read or sleep is suspended.
         return;
     }
-    if (!app->running) {
-        if (app->loop_active) {
-            app->loop_active = false;
-            emscripten_cancel_main_loop();
-        }
-        if (app->runner) {
-            app->runner->shutdown();
-            app->runner.reset();
-        }
-        gm::web_flush_persist_sync();
-        gm::web_report_status("Game ended");
+    WebCallScope guard(*app);
+    if (!app->running || app->stop_requested) {
+        stop_web_game_internal();
+        gm::web_report_status(app->stop_requested ? "Stopped" : "Game ended");
         return;
     }
-
-    struct TickGuard {
-        bool& flag;
-        ~TickGuard() { flag = false; }
-    } guard{app->in_tick};
-    app->in_tick = true;
 
     const gm::u64 now = gm::Clock::now_us();
     if (app->last_raf_us == 0) {
@@ -353,7 +349,17 @@ void gmrunner_web_frame(void* userdata) {
 }
 
 EMSCRIPTEN_KEEPALIVE
+int gmrunner_web_request_stop() {
+    if (!g_web_app) return 1;
+    g_web_app->stop_requested = true;
+    if (g_web_app->runner) g_web_app->runner->request_host_stop();
+    return !g_web_app->web_busy;
+}
+
+EMSCRIPTEN_KEEPALIVE
 void gmrunner_web_stop() {
+    if (!g_web_app || !gmrunner_web_request_stop()) return;
+    WebCallScope guard(*g_web_app);
     stop_web_game_internal();
     gm::web_report_status("Stopped");
 }
@@ -389,7 +395,9 @@ void gmrunner_web_set_muted(int muted) {
 
 EMSCRIPTEN_KEEPALIVE
 int gmrunner_web_launch(const char* mode_cstr, const char* path_cstr, const char* game_key_cstr) {
-    if (!g_web_app) return 1;
+    if (!g_web_app || g_web_app->web_busy) return 1;
+    WebCallScope guard(*g_web_app);
+    g_web_app->stop_requested = false;
     stop_web_game_internal();
 
     const std::string mode = mode_cstr ? mode_cstr : "memfs";
@@ -475,6 +483,7 @@ int gmrunner_web_launch(const char* mode_cstr, const char* path_cstr, const char
     app.window.set_size(win_w, win_h);
 
     std::vector<std::string> cmd_args = {exe_lookup_path};
+    if (app.stop_requested) return 1;
     app.runner = std::make_unique<gm::Runner>(app.vfs, app.window, app.gfx);
     app.runner->renderer().set_sharp_scale(app.sharp_scale);
     if (auto res = app.runner->init(std::move(loaded_game), std::move(compiled), std::move(cmd_args)); !res) {
@@ -482,6 +491,10 @@ int gmrunner_web_launch(const char* mode_cstr, const char* path_cstr, const char
         app.runner.reset();
         gm::web_report_status("Init failed: " + res.error_message());
         return 7;
+    }
+    if (app.stop_requested) {
+        stop_web_game_internal();
+        return 1;
     }
     app.runner->set_touch_layout_path(gm::Vfs::path_from_utf8(persist_dir + "/registry/touch_layout.cfg"));
 
@@ -663,6 +676,7 @@ int main(int argc, char** argv) {
     if (loaded_game) {
         win_cfg.fullscreen = win_cfg.fullscreen || loaded_game->options.fullscreen;
         win_cfg.borderless = loaded_game->options.no_border;
+        win_cfg.show_icons = !loaded_game->options.no_buttons;
         win_cfg.show_cursor = loaded_game->options.show_cursor;
         win_cfg.resizable = true;
         win_cfg.vsync = opts.vsync || (loaded_game->options.sync_vertex != 0);

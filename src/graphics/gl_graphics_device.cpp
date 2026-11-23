@@ -235,6 +235,40 @@ void GlGraphicsDevice::reset_cached_state() noexcept {
     cache_ = CachedState{};
 }
 
+GlGraphicsDevice::SavedRenderState GlGraphicsDevice::save_render_state() const noexcept {
+    SavedRenderState s{};
+    s.viewport_valid = cache_.viewport_valid;
+    s.viewport = cache_.viewport;
+    s.scissor_valid = cache_.scissor_valid;
+    s.scissor_enabled = cache_.scissor_enabled;
+    s.scissor_rect = cache_.scissor_rect;
+    s.blend_valid = cache_.blend_valid;
+    s.blend = cache_.blend;
+    s.depth_valid = cache_.depth_valid;
+    s.depth = cache_.depth;
+    s.cull_valid = cache_.cull_valid;
+    s.cull = cache_.cull;
+    s.color_mask_valid = cache_.color_mask_valid;
+    s.color_mask = cache_.color_mask;
+    s.polygon_mode = polygon_mode_;
+    s.program_valid = cache_.program_valid;
+    s.program = cache_.program;
+    return s;
+}
+
+void GlGraphicsDevice::restore_render_state(const SavedRenderState& s) {
+    if (s.viewport_valid) set_viewport(s.viewport);
+    if (s.scissor_valid) set_scissor(s.scissor_enabled, s.scissor_rect);
+    if (s.blend_valid) set_blend_state(s.blend);
+    if (s.depth_valid) set_depth_state(s.depth);
+    if (s.cull_valid) set_cull_mode(s.cull);
+    if (s.color_mask_valid) {
+        set_color_mask(s.color_mask[0], s.color_mask[1], s.color_mask[2], s.color_mask[3]);
+    }
+    set_polygon_mode(s.polygon_mode);
+    if (s.program_valid) bind_shader(ShaderHandle{s.program});
+}
+
 Result<void> GlGraphicsDevice::reinit_after_context_loss(GlProcLoader proc_loader) {
     // Discard stale handles without invoking glDelete* against a lost context.
     framebuffers_.clear();

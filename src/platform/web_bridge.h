@@ -6,6 +6,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace gm {
 
@@ -34,11 +35,43 @@ void web_show_message(std::string_view title, std::string_view message);
 [[nodiscard]] bool web_show_question(std::string_view title, std::string_view message);
 [[nodiscard]] std::string web_prompt_string(std::string_view prompt, std::string_view default_val);
 
+void web_begin_dialog_editor(const std::string& value, const std::string& label);
+void web_position_dialog_editor(int x, int y, int w, int h, int win_w, int win_h);
+bool web_poll_dialog_editor(std::string& value, int& anchor, int& caret, int& action);
+void web_end_dialog_editor();
+
 // Attempts to resume any suspended WebAudio AudioContexts after a user gesture.
 void web_unlock_audio();
 
 // Reports runtime status/FPS back to the web shell HUD.
 void web_report_status(std::string_view status_text);
+
+// Browser 2D canvas glyph rasterizer used by the self-drawn message dialog on WebAssembly.
+struct WebGlyphBitmap {
+    i32 width = 0;
+    i32 height = 0;
+    i32 xoff = 0;
+    i32 yoff = 0;
+    f32 advance = 0.0f;
+    std::vector<u8> alpha;
+};
+
+[[nodiscard]] bool web_measure_font_metrics(
+    std::string_view family_name,
+    f32 em_px,
+    bool bold,
+    bool italic,
+    i32& out_ascent,
+    i32& out_descent,
+    i32& out_line_height);
+
+[[nodiscard]] bool web_rasterize_glyph(
+    std::string_view family_name,
+    f32 em_px,
+    bool bold,
+    bool italic,
+    u32 codepoint,
+    WebGlyphBitmap& out);
 
 #endif
 

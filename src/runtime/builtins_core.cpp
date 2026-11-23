@@ -1485,12 +1485,12 @@ void Runner::register_builtins_core() {
     });
     register_builtin("show_message", [](Runner& r, i32, i32, std::span<const RValue> a) {
         const std::string s = a.empty() ? std::string{} : (a[0].is_string() ? a[0].as_string() : format_gm_real(a[0].as_real()));
-        r.window().show_message(r.room_caption_.empty() ? "GameMaker" : r.room_caption_, s);
+        r.show_message_dialog(s);
         return RValue(0.0);
     });
     register_builtin("show_question", [](Runner& r, i32, i32, std::span<const RValue> a) {
         const std::string s = a.empty() ? std::string{} : (a[0].is_string() ? a[0].as_string() : format_gm_real(a[0].as_real()));
-        return RValue(r.window().show_question(r.room_caption_.empty() ? "GameMaker" : r.room_caption_, s));
+        return RValue(r.show_question_dialog(s));
     });
     register_builtin("show_error", [](Runner& r, i32, i32, std::span<const RValue> a) {
         const std::string msg(arg_str(a, 0));
@@ -1506,33 +1506,82 @@ void Runner::register_builtins_core() {
     });
     register_builtin("show_message_ext", [](Runner& r, i32, i32, std::span<const RValue> a) {
         const std::string s = a.empty() ? std::string{} : (a[0].is_string() ? a[0].as_string() : format_gm_real(a[0].as_real()));
-        r.window().show_message(r.room_caption_.empty() ? "GameMaker" : r.room_caption_, s);
-        return RValue(1);
+        return RValue(r.show_message_ext_dialog(s, arg_str(a, 1), arg_str(a, 2), arg_str(a, 3)));
     });
     register_builtin("show_info", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
     register_builtin("load_info", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
-    register_builtin("message_background", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
-    register_builtin("message_alpha", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
-    register_builtin("message_button", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
-    register_builtin("message_text_font", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
-    register_builtin("message_button_font", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
-    register_builtin("message_input_font", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
-    register_builtin("message_mouse_color", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
-    register_builtin("message_input_color", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
-    register_builtin("message_caption", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
-    register_builtin("message_position", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
-    register_builtin("message_size", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
+    register_builtin("message_background", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        const i32 bg_id = arg_i32(a, 0, -1);
+        if (bg_id >= 0 && static_cast<usize>(bg_id) < r.game().backgrounds.size() &&
+            r.game().backgrounds[static_cast<usize>(bg_id)].exists) {
+            r.message_dialog().set_background(r.game().backgrounds[static_cast<usize>(bg_id)].bitmap);
+        } else {
+            GM_LOG_WARN("gml", "message_background: non-existing background %d", bg_id);
+        }
+        return RValue(0.0);
+    });
+    register_builtin("message_alpha", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        r.message_dialog().set_alpha(arg_real(a, 0, 1.0));
+        return RValue(0.0);
+    });
+    register_builtin("message_button", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        const i32 spr_id = arg_i32(a, 0, -1);
+        if (spr_id >= 0 && static_cast<usize>(spr_id) < r.game().sprites.size() &&
+            r.game().sprites[static_cast<usize>(spr_id)].exists) {
+            r.message_dialog().set_button(r.game().sprites[static_cast<usize>(spr_id)]);
+        } else {
+            GM_LOG_WARN("gml", "message_button: non-existing sprite %d", spr_id);
+        }
+        return RValue(0.0);
+    });
+    register_builtin("message_text_font", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        const std::string name = codepage_to_utf8(arg_str(a, 0), r.game().meta.string_codepage());
+        r.message_dialog().set_text_font(
+            name, arg_real(a, 1, -1.0), arg_real(a, 2, -1.0),
+            static_cast<i32>(delphi_round(arg_real(a, 3, -1.0))));
+        return RValue(0.0);
+    });
+    register_builtin("message_button_font", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        const std::string name = codepage_to_utf8(arg_str(a, 0), r.game().meta.string_codepage());
+        r.message_dialog().set_button_font(
+            name, arg_real(a, 1, -1.0), arg_real(a, 2, -1.0),
+            static_cast<i32>(delphi_round(arg_real(a, 3, -1.0))));
+        return RValue(0.0);
+    });
+    register_builtin("message_input_font", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        const std::string name = codepage_to_utf8(arg_str(a, 0), r.game().meta.string_codepage());
+        r.message_dialog().set_input_font(
+            name, arg_real(a, 1, -1.0), arg_real(a, 2, -1.0),
+            static_cast<i32>(delphi_round(arg_real(a, 3, -1.0))));
+        return RValue(0.0);
+    });
+    register_builtin("message_mouse_color", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        r.message_dialog().set_mouse_color(static_cast<u32>(arg_i32(a, 0, 0xFFFFFF)) & 0xFFFFFFu);
+        return RValue(0.0);
+    });
+    register_builtin("message_input_color", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        r.message_dialog().set_input_color(static_cast<u32>(arg_i32(a, 0, 0x3C3C3C)) & 0xFFFFFFu);
+        return RValue(0.0);
+    });
+    register_builtin("message_caption", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        const bool show = arg_bool(a, 0, false);
+        const std::string cap = codepage_to_utf8(arg_str(a, 1), r.game().meta.string_codepage());
+        r.message_dialog().set_caption(show, cap);
+        return RValue(0.0);
+    });
+    register_builtin("message_position", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        r.message_dialog().set_position(arg_i32(a, 0, -1), arg_i32(a, 1, -1));
+        return RValue(0.0);
+    });
+    register_builtin("message_size", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        r.message_dialog().set_size(arg_i32(a, 0, -1), arg_i32(a, 1, -1));
+        return RValue(0.0);
+    });
     register_builtin("get_string", [](Runner& r, i32, i32, std::span<const RValue> a) {
-        return RValue(r.window().prompt_string(arg_str(a, 0), arg_str(a, 1)));
+        return RValue(r.get_string_dialog(arg_str(a, 0), arg_str(a, 1)));
     });
     register_builtin("get_integer", [](Runner& r, i32, i32, std::span<const RValue> a) {
-        const f64 def_val = arg_real(a, 1);
-        const std::string def_str = std::to_string(static_cast<i64>(delphi_round(def_val)));
-        const std::string input = r.window().prompt_string(arg_str(a, 0), def_str);
-        if (input == def_str) return RValue(def_val);
-        char* end = nullptr;
-        const f64 parsed = std::strtod(input.c_str(), &end);
-        return RValue((end && end != input.c_str()) ? parsed : def_val);
+        return RValue(r.get_integer_dialog(arg_str(a, 0), arg_real(a, 1)));
     });
     register_builtin("sleep", [](Runner& r, i32, i32, std::span<const RValue> a) -> Result<RValue> {
         const f64 ms = std::max(0.0, arg_real(a, 0));

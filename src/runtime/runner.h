@@ -6,6 +6,7 @@
 #include "gml/compiler.h"
 #include "gml/vm.h"
 #include "graphics/gl_graphics_device.h"
+#include "graphics/message_dialog.h"
 #include "graphics/renderer2d.h"
 #include "graphics/touch_overlay.h"
 #include "loader/game_data.h"
@@ -198,6 +199,7 @@ public:
     [[nodiscard]] PlatformWindow& window() noexcept { return window_; }
     [[nodiscard]] GlGraphicsDevice& gfx() noexcept { return gfx_; }
     [[nodiscard]] Renderer2D& renderer() noexcept { return renderer_; }
+    [[nodiscard]] MessageDialog& message_dialog() noexcept { return message_dialog_; }
     [[nodiscard]] AudioEngine& audio() noexcept { return audio_; }
     [[nodiscard]] DllRegistry& dll_registry() noexcept { return dll_registry_; }
     [[nodiscard]] DsManager& ds() noexcept { return ds_; }
@@ -292,6 +294,17 @@ public:
     bool wait_for_key();
     bool wait_for_mouse();
 
+    // Cross-platform self-drawn GM8 modal message & input dialogs (TMessageForm)
+    void show_message_dialog(std::string_view text);
+    [[nodiscard]] i32 show_message_ext_dialog(
+        std::string_view text,
+        std::string_view but1,
+        std::string_view but2,
+        std::string_view but3);
+    [[nodiscard]] bool show_question_dialog(std::string_view text);
+    [[nodiscard]] std::string get_string_dialog(std::string_view text, std::string_view def);
+    [[nodiscard]] f64 get_integer_dialog(std::string_view text, f64 def);
+
     // Dynamic asset & event mutation helpers
     static void apply_removeback_and_smooth(Bitmap32& bmp, bool removeback, bool smooth);
     static void rebuild_sprite_masks(SpriteData& sp, i32 alpha_tolerance = 0, i32 bbox_mode = 0,
@@ -310,6 +323,7 @@ public:
     void request_room_restart();
     void request_game_restart();
     void request_game_end();
+    void request_host_stop() { host_stop_requested_ = true; request_game_end(); }
     [[nodiscard]] i32 room_order_index(i32 room_id) const noexcept;
     [[nodiscard]] i32 room_next_id(i32 room_id) const noexcept;
     [[nodiscard]] i32 room_previous_id(i32 room_id) const noexcept;
@@ -417,7 +431,6 @@ public:
 
     // Window & transition state
     bool window_showborder_ = true;
-    bool window_showicons_ = true;
     f64 window_region_scale_ = -1.0;
     i32 window_region_w_ = 0;
     i32 window_region_h_ = 0;
@@ -546,6 +559,9 @@ private:
         }
     }
     void render_view(i32 view_idx, f32 vx, f32 vy, f32 vw, f32 vh, f32 angle, i32 px, i32 py, i32 pw, i32 ph);
+    void run_message_dialog_modal(bool with_input);
+    [[nodiscard]] std::string decode_dialog_string(std::string_view raw, u8 charset) const;
+    [[nodiscard]] std::string encode_dialog_string(std::string_view utf8, u8 charset) const;
 
     void parse_ini_text(std::string_view text);
     std::string serialize_ini() const;
@@ -560,6 +576,7 @@ private:
     bool use_precomputed_events_ = true;
     std::unique_ptr<GmlVm> vm_;
     Renderer2D renderer_;
+    MessageDialog message_dialog_;
     TouchOverlay touch_overlay_;
     AudioEngine audio_;
     DllRegistry dll_registry_;
@@ -586,6 +603,7 @@ private:
     i32 next_tile_id_ = 10000001;
 
     std::vector<EventFrame> event_stack_;
+    bool host_stop_requested_ = false;
     PendingRoomAction pending_action_ = PendingRoomAction::None;
     i32 pending_room_id_ = -1;
     struct RenderItem {

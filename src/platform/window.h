@@ -6,6 +6,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <variant>
 #include <vector>
 
 struct SDL_Window;
@@ -22,6 +23,7 @@ struct WindowConfig {
     bool borderless = false;
     bool vsync = true;
     bool show_cursor = true;
+    bool show_icons = true;
 };
 
 struct TouchFinger {
@@ -72,6 +74,37 @@ struct WindowEvents {
     i32 new_height = 0;
 };
 
+struct ModalKeyEvent {
+    u8 vk = 0;
+    u32 keycode = 0;
+    bool repeat = false;
+    bool ctrl = false;
+    bool shift = false;
+    bool alt = false;
+    bool gui = false;
+};
+
+struct ModalComposition {
+    std::string text;
+    i32 start;
+    i32 length;
+};
+
+struct ModalInputFrame {
+    WindowEvents window_events{};
+    // SDL delivers key, committed text and IME composition events in editing order.
+    std::vector<std::variant<ModalKeyEvent, std::string, ModalComposition>> keyboard_events;
+
+    f32 mouse_x = 0.0f;
+    f32 mouse_y = 0.0f;
+    bool mouse_moved = false;
+    bool left_down = false;
+    bool left_pressed = false;
+    bool left_released = false;
+    bool left_double_click = false;
+    bool pointer_is_touch = false;
+};
+
 class PlatformWindow : public NonCopyable {
 public:
     PlatformWindow() = default;
@@ -83,6 +116,8 @@ public:
 
     WindowEvents poll_events();
     WindowEvents poll_events_accumulate();
+    void poll_modal_events(ModalInputFrame& out);
+    void reset_modal_input_state() noexcept;
     void swap_buffers();
 
     void set_title(std::string_view title);
@@ -93,8 +128,12 @@ public:
     void set_fullscreen(bool fullscreen);
     void set_vsync(bool enabled);
     void set_cursor_visible(bool visible);
+    [[nodiscard]] bool is_cursor_visible() const noexcept { return cursor_visible_; }
+    [[nodiscard]] f32 display_scale() const noexcept;
     void set_borderless(bool borderless);
     [[nodiscard]] bool is_borderless() const noexcept { return borderless_; }
+    void set_show_icons(bool show);
+    [[nodiscard]] bool shows_icons() const noexcept { return show_icons_; }
     void set_stay_on_top(bool on_top);
     [[nodiscard]] bool is_stay_on_top() const noexcept { return stay_on_top_; }
     void set_resizable(bool resizable);
@@ -149,6 +188,8 @@ public:
     [[nodiscard]] bool show_question(std::string_view title, std::string_view message) const;
     [[nodiscard]] std::string prompt_string(std::string_view prompt, std::string_view default_val) const;
     void set_text_input(bool enabled);
+    [[nodiscard]] bool is_text_input_active() const noexcept;
+    void set_text_input_area(i32 x, i32 y, i32 w, i32 h, i32 cursor_offset = 0);
     [[nodiscard]] static bool is_mobile_touch_platform() noexcept;
     [[nodiscard]] static bool open_url(std::string_view url);
     [[nodiscard]] static std::string clipboard_get_text();
@@ -166,10 +207,20 @@ private:
     std::optional<std::pair<i32, i32>> pending_windowed_size_;
     std::optional<std::pair<i32, i32>> pending_windowed_position_;
     bool borderless_ = false;
+    bool show_icons_ = true;
+#if defined(_WIN32)
+    u32 caption_button_style_ = 0;
+#endif
     bool stay_on_top_ = false;
     bool resizable_ = true;
     bool visible_ = true;
+    bool cursor_visible_ = true;
     bool has_focus_ = true;
+    bool modal_left_down_ = false;
+    bool modal_pointer_is_touch_ = false;
+    std::optional<i64> modal_touch_finger_;
+    f32 modal_mouse_x_ = 0.0f;
+    f32 modal_mouse_y_ = 0.0f;
     InputState input_{};
 };
 

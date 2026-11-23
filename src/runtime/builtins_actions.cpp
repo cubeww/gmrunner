@@ -419,7 +419,7 @@ void Runner::register_builtins_actions() {
         return RValue(0.0);
     });
     register_builtin("action_message", [](Runner& r, i32, i32, std::span<const RValue> a) {
-        r.window().show_message(r.room_caption_.empty() ? "GameMaker" : r.room_caption_, a.empty() ? std::string{} : dnd_val_to_str(a[0]));
+        r.show_message_dialog(a.empty() ? std::string{} : dnd_val_to_str(a[0]));
         return RValue(0.0);
     });
     register_builtin("action_end_game", [](Runner& r, i32, i32, std::span<const RValue>) {
@@ -484,7 +484,7 @@ void Runner::register_builtins_actions() {
         });
     });
     register_builtin("action_if_question", [](Runner& r, i32, i32, std::span<const RValue> a) {
-        return RValue(r.window().show_question(r.room_caption_.empty() ? "GameMaker" : r.room_caption_, arg_str(a, 0)));
+        return RValue(r.show_question_dialog(a.empty() ? std::string{} : dnd_val_to_str(a[0])));
     });
     register_builtin("action_if_dice", [](Runner& r, i32, i32, std::span<const RValue> a) {
         const f64 sides = arg_real(a, 0, 1.0);

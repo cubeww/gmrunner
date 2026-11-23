@@ -8,6 +8,15 @@
     if (NativeAudioContext) {
         const WrappedAudioContext = function (...args) {
             const ctx = new NativeAudioContext(...args);
+            const resume = ctx.resume.bind(ctx);
+            ctx.resume = () => {
+                if (ctx.state !== "suspended") return resume();
+                // Autoplay can leave miniaudio's resume pending until a gesture.
+                // Closing this game's device cancels that pending operation.
+                return resume().catch(error => {
+                    if (ctx.state !== "closed" || error.name !== "InvalidStateError") throw error;
+                });
+            };
             trackedAudioContexts.push(ctx);
             return ctx;
         };
@@ -430,12 +439,28 @@
         if (editTouchBtn) editTouchBtn.disabled = visible;
     }
 
-    async function launchWasmGame(mode, pathArg, gameKey) {
+    let gameRequest = 0;
+    async function waitForGameIdle(request) {
+        while (request === gameRequest && !Module._gmrunner_web_request_stop()) {
+            await new Promise(resolve => setTimeout(resolve, 10));
+        }
+    }
+
+    async function launchWasmGame(mode, pathArg, gameKey, source) {
         if (!runtimeReady) {
             setStatus("Wait for WebAssembly initialization to finish...");
             return;
         }
         unlockTrackedAudio();
+        const request = ++gameRequest;
+        await waitForGameIdle(request);
+        if (request !== gameRequest) return;
+        Module.gmWebFs = mode === "folder" ? source : null;
+        Module.gmWebZip = mode === "zip" ? source : null;
+        if (mode === "memfs") {
+            ensureMemfsDir("/game");
+            Module.FS.writeFile(pathArg, source);
+        }
         setLauncherVisible(false);
         const rc = await Module.ccall(
             "gmrunner_web_launch",
@@ -444,6 +469,7 @@
             [mode, pathArg || "", gameKey],
             { async: true }
         );
+        if (request !== gameRequest) return;
         if (rc !== 0) {
             setLauncherVisible(true);
         } else {
@@ -470,9 +496,7 @@
             setStatus("No GameMaker .exe found in selected folder");
             return;
         }
-        Module.gmWebZip = null;
-        Module.gmWebFs = index;
-        await launchWasmGame("folder", index.defaultExe, rootName);
+        await launchWasmGame("folder", index.defaultExe, rootName, index);
     }
 
     async function handleSingleFile(file) {
@@ -480,18 +504,11 @@
         const lower = file.name.toLowerCase();
         const key = file.name.replace(/\.[^.]+$/, "");
         if (lower.endsWith(".zip")) {
-            Module.gmWebFs = null;
-            Module.gmWebZip = { file };
-            await launchWasmGame("zip", "", key);
+            await launchWasmGame("zip", "", key, { file });
         } else if (lower.endsWith(".exe")) {
             setStatus(`Loading ${file.name}...`);
             const bytes = new Uint8Array(await file.arrayBuffer());
-            ensureMemfsDir("/game");
-            const memPath = "/game/" + file.name;
-            Module.FS.writeFile(memPath, bytes);
-            Module.gmWebFs = null;
-            Module.gmWebZip = null;
-            await launchWasmGame("memfs", memPath, key);
+            await launchWasmGame("memfs", "/game/" + file.name, key, bytes);
         } else {
             setStatus("Unsupported file type — choose a folder, .zip, or .exe");
         }
@@ -573,8 +590,11 @@
 
         document.getElementById("btn-stop")?.addEventListener("click", async () => {
             if (!runtimeReady) return;
+            const request = ++gameRequest;
+            await waitForGameIdle(request);
+            if (request !== gameRequest) return;
             await Module.ccall("gmrunner_web_stop", null, [], [], { async: true });
-            setLauncherVisible(true);
+            if (request === gameRequest) setLauncherVisible(true);
         });
 
         document.getElementById("btn-touch")?.addEventListener("click", (ev) => {
@@ -608,7 +628,7 @@
 
         document.getElementById("btn-fullscreen")?.addEventListener("click", () => {
             if (!document.fullscreenElement) {
-                (canvas?.requestFullscreen || dropZone?.requestFullscreen)?.call(canvas || dropZone);
+                (dropZone || canvas)?.requestFullscreen?.();
             } else {
                 document.exitFullscreen?.();
             }
@@ -655,9 +675,7 @@
                             setStatus("No GameMaker .exe found in dropped folder");
                             return;
                         }
-                        Module.gmWebZip = null;
-                        Module.gmWebFs = index;
-                        await launchWasmGame("folder", index.defaultExe, firstEntry.name);
+                        await launchWasmGame("folder", index.defaultExe, firstEntry.name, index);
                         return;
                     }
                 }
