@@ -40,6 +40,18 @@ void ma_data_callback(ma_device* device, void* output, const void* input, ma_uin
     }
 }
 
+int read_vorbis_stereo(stb_vorbis* decoder, std::span<f32> output) noexcept {
+    const int frames = stb_vorbis_get_samples_float_interleaved(
+        decoder, 2, output.data(), static_cast<int>(output.size()));
+    // stb_vorbis zero-fills the missing right channel for mono input.
+    if (stb_vorbis_get_info(decoder).channels == 1) {
+        for (int i = 0; i < frames; ++i) {
+            output[2 * i + 1] = output[2 * i];
+        }
+    }
+    return frames;
+}
+
 void resample_stereo_linear(
     const f32* src,
     usize src_frames,
@@ -491,8 +503,7 @@ struct AudioChannel {
                 u32 written = 0;
                 while (written < frame_count) {
                     if (stream_chunk_pos >= static_cast<f64>(stream_chunk_frames)) {
-                        const int got = stb_vorbis_get_samples_float_interleaved(
-                            ogg_decoder, 2, stream_chunk.data(), static_cast<int>(stream_chunk.size()));
+                        const int got = read_vorbis_stereo(ogg_decoder, stream_chunk);
                         if (got <= 0) {
                             if (consume_loop_iteration()) {
                                 stb_vorbis_seek(ogg_decoder, static_cast<unsigned int>(lp_start));
@@ -799,7 +810,7 @@ bool AudioEngine::decode_asset_from_memory(
         if (total_s > 0) raw_stereo.reserve(static_cast<usize>(total_s) * 2u);
         std::array<f32, 4096 * 2> chunk{};
         for (;;) {
-            const int got = stb_vorbis_get_samples_float_interleaved(vorb, 2, chunk.data(), static_cast<int>(chunk.size()));
+            const int got = read_vorbis_stereo(vorb, chunk);
             if (got <= 0) break;
             raw_stereo.insert(raw_stereo.end(), chunk.begin(), chunk.begin() + static_cast<std::ptrdiff_t>(got * 2));
         }
