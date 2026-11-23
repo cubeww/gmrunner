@@ -2264,7 +2264,7 @@ i32 Runner::target_instance_at(i32 target, usize index, TargetUse use) const {
 }
 
 Result<RValue> Runner::get_builtin_global(u32 var_id, i32 idx, bool has_idx) {
-    const i32 i8 = std::clamp(has_idx ? idx : 0, 0, 7);
+    const i32 i8 = has_idx && idx >= 0 && idx < 8 ? idx : 0;
     switch (var_id) {
         case 0u: return RValue(action_relative_);
         case 1u: case 2u: case 3u: case 4u: case 5u: case 6u: case 7u: case 8u:
@@ -2390,7 +2390,7 @@ Result<RValue> Runner::get_builtin_global(u32 var_id, i32 idx, bool has_idx) {
 }
 
 Result<void> Runner::set_builtin_global(u32 var_id, i32 idx, bool has_idx, RValue value) {
-    const i32 i8 = std::clamp(has_idx ? idx : 0, 0, 7);
+    const i32 i8 = has_idx && idx >= 0 && idx < 8 ? idx : 0;
     switch (var_id) {
         case 1u: case 2u: case 3u: case 4u: case 5u: case 6u: case 7u: case 8u:
         case 9u: case 10u: case 11u: case 12u: case 13u: case 14u: case 15u: case 16u:
@@ -2447,10 +2447,11 @@ Result<void> Runner::set_builtin_global(u32 var_id, i32 idx, bool has_idx, RValu
         case 54u: backgrounds_[static_cast<usize>(i8)].alpha = value.as_real(); return Result<void>::success();
         case 55u: view_enabled_ = value.is_truthy(); return Result<void>::success();
         case 57u: views_[static_cast<usize>(i8)].visible = value.is_truthy(); return Result<void>::success();
-        case 58u: views_[static_cast<usize>(i8)].xview = value.as_real(); return Result<void>::success();
-        case 59u: views_[static_cast<usize>(i8)].yview = value.as_real(); return Result<void>::success();
-        case 60u: views_[static_cast<usize>(i8)].wview = value.as_real(); return Result<void>::success();
-        case 61u: views_[static_cast<usize>(i8)].hview = value.as_real(); return Result<void>::success();
+        // GM stores the view rectangle in integer pixels on each GML assignment.
+        case 58u: views_[static_cast<usize>(i8)].xview = value.as_i32(); return Result<void>::success();
+        case 59u: views_[static_cast<usize>(i8)].yview = value.as_i32(); return Result<void>::success();
+        case 60u: views_[static_cast<usize>(i8)].wview = value.as_i32(); return Result<void>::success();
+        case 61u: views_[static_cast<usize>(i8)].hview = value.as_i32(); return Result<void>::success();
         case 62u: views_[static_cast<usize>(i8)].xport = value.as_i32(); return Result<void>::success();
         case 63u: views_[static_cast<usize>(i8)].yport = value.as_i32(); return Result<void>::success();
         case 64u: views_[static_cast<usize>(i8)].wport = value.as_i32(); return Result<void>::success();
