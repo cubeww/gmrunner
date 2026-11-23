@@ -17,6 +17,7 @@ struct CliOptions {
     bool show_help = false;
     bool verbose = false;
     bool fullscreen = false;
+    bool sharp_scale = false;
     bool vsync = true;
     bool touch_overlay = false;
     std::string touch_layout_path;

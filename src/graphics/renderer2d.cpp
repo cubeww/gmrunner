@@ -355,13 +355,16 @@ void main() {
 }
 )";
 
-    const std::string fs_src = fs_header + R"(
+    const std::string fs_src = fs_header + (sharp_scale_ ? "#define SHARP_SCALE\n" : "") + R"(
 in vec2 v_uv;
 in vec4 v_col_smooth;
 flat in vec4 v_col_flat;
 in vec3 v_view_pos;
 
 uniform sampler2D u_tex;
+#ifdef SHARP_SCALE
+uniform float u_sharp_factor;
+#endif
 uniform int u_tex_blending;
 uniform int u_flat_shading;
 uniform int u_alpha_test;
@@ -386,7 +389,17 @@ bool pass_alpha_test(float a, float ref_v, int fn) {
 }
 
 void main() {
-    vec4 texel = texture(u_tex, v_uv);
+    vec2 uv = v_uv;
+#ifdef SHARP_SCALE
+    if (u_sharp_factor > 0.0) {
+        // Equivalent to nearest integer enlargement followed by a bilinear sample.
+        vec2 size = vec2(textureSize(u_tex, 0));
+        vec2 pos = uv * size - 0.5;
+        vec2 weight = clamp((fract(pos) - 0.5) * u_sharp_factor + 0.5, 0.0, 1.0);
+        uv = (floor(pos) + 0.5 + weight) / size;
+    }
+#endif
+    vec4 texel = texture(u_tex, uv);
     vec4 v_col = (u_flat_shading != 0) ? v_col_flat : v_col_smooth;
     vec4 c = (u_tex_blending != 0) ? (texel * v_col) : texel;
 
@@ -418,6 +431,7 @@ void main() {
     loc_normal_mat_ = glGetUniformLocation(shader_.id, "u_normal_mat");
     loc_model_tint_ = glGetUniformLocation(shader_.id, "u_model_tint");
     loc_tex_ = glGetUniformLocation(shader_.id, "u_tex");
+    loc_sharp_factor_ = glGetUniformLocation(shader_.id, "u_sharp_factor");
     loc_tex_blending_ = glGetUniformLocation(shader_.id, "u_tex_blending");
     loc_texcoord_mode_ = glGetUniformLocation(shader_.id, "u_texcoord_mode");
     loc_alpha_test_ = glGetUniformLocation(shader_.id, "u_alpha_test");
@@ -910,6 +924,18 @@ void Renderer2D::present_screen(u32 border_color_bgr) {
     set_projection_ortho(0.0f, 0.0f, static_cast<f32>(screen_w_), static_cast<f32>(screen_h_), 0.0f,
                          screen_viewport_.x, screen_viewport_.y, screen_viewport_.width, screen_viewport_.height);
     const ColorRGBA white{255, 255, 255, 255};
+    const bool saved_filter = linear_filter_;
+    if (sharp_scale_) {
+        linear_filter_ = screen_viewport_.width % screen_fbo_w_ != 0 ||
+                         screen_viewport_.height % screen_fbo_h_ != 0;
+        if (linear_filter_) {
+            const f32 scale_x = static_cast<f32>(screen_viewport_.width) / screen_fbo_w_;
+            const f32 scale_y = static_cast<f32>(screen_viewport_.height) / screen_fbo_h_;
+            const f32 factor = std::clamp(std::round(std::max(scale_x, scale_y)), 2.0f, 8.0f);
+            device_->bind_shader(shader_);
+            glUniform1f(loc_sharp_factor_, factor);
+        }
+    }
     push_quad(screen_fbo_tex_,
               0.0f, 0.0f, 0.0f, 0.0f, white,
               static_cast<f32>(screen_w_), 0.0f, 1.0f, 0.0f, white,
@@ -917,6 +943,8 @@ void Renderer2D::present_screen(u32 border_color_bgr) {
               0.0f, static_cast<f32>(screen_h_), 0.0f, 1.0f, white);
     flush();
 
+    if (sharp_scale_ && linear_filter_) glUniform1f(loc_sharp_factor_, 0.0f);
+    linear_filter_ = saved_filter;
     std::memcpy(world_matrix_, saved_world, sizeof(saved_world));
     std::memcpy(view_matrix_, saved_view, sizeof(saved_view));
     std::memcpy(proj_matrix_, saved_proj, sizeof(saved_proj));

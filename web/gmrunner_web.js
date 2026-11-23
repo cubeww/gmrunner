@@ -516,6 +516,7 @@
     }
 
     window.Module = {
+        arguments: new URLSearchParams(window.location.search).has("sharp-scale") ? ["--sharp-scale"] : [],
         canvas: (function () {
             return document.getElementById("canvas");
         })(),

@@ -34,10 +34,13 @@ gmrunner path/to/game.zip
 
 # Additional options
 gmrunner --save-dir ./saves --touch-overlay path/to/game.zip
+gmrunner --sharp-scale path/to/game.zip
 gmrunner --inspect path/to/game.exe
 gmrunner --compile-check path/to/game.exe
 gmrunner --help
 ```
+
+`--sharp-scale` uses nearest-neighbor sampling at integer zoom and smooths pixel edges at fractional zoom when presenting the final game image. On the web, use `gmrunner.html?sharp-scale` or `gmrunner.html?game=game.zip&sharp-scale`.
 
 ## Building
 

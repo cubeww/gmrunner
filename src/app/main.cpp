@@ -39,6 +39,7 @@ struct AppState {
     gm::GlGraphicsDevice gfx;
     std::unique_ptr<gm::Runner> runner;
     bool running = true;
+    bool sharp_scale = false;
     bool loop_active = false;
     bool in_tick = false;
     gm::u64 frame_count = 0;
@@ -475,6 +476,7 @@ int gmrunner_web_launch(const char* mode_cstr, const char* path_cstr, const char
 
     std::vector<std::string> cmd_args = {exe_lookup_path};
     app.runner = std::make_unique<gm::Runner>(app.vfs, app.window, app.gfx);
+    app.runner->renderer().set_sharp_scale(app.sharp_scale);
     if (auto res = app.runner->init(std::move(loaded_game), std::move(compiled), std::move(cmd_args)); !res) {
         GM_LOG_ERROR("runtime", "Runner initialization failed: %s", res.error_message().c_str());
         app.runner.reset();
@@ -532,6 +534,7 @@ int main(int argc, char** argv) {
     }
 
     g_web_app = std::make_unique<AppState>();
+    g_web_app->sharp_scale = opts.sharp_scale;
     if (auto res = g_web_app->vfs.init_temp_dir(); !res) {
         GM_LOG_WARN("app", "%s", res.error_message().c_str());
     }
@@ -686,6 +689,7 @@ int main(int argc, char** argv) {
             cmd_args.emplace_back(argv[i] ? argv[i] : "");
         }
         app.runner = std::make_unique<gm::Runner>(app.vfs, app.window, app.gfx);
+        app.runner->renderer().set_sharp_scale(opts.sharp_scale);
         if (auto res = app.runner->init(std::move(*loaded_game), std::move(*compiled_prog), std::move(cmd_args)); !res) {
             GM_LOG_FATAL("runtime", "Runner initialization failed: %s", res.error_message().c_str());
             app.runner.reset();

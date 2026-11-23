@@ -23,6 +23,7 @@ void print_cli_help() {
         "  --width <px>           Initial window width (default: 800)\n"
         "  --height <px>          Initial window height (default: 608)\n"
         "  --fullscreen           Start in fullscreen mode\n"
+        "  --sharp-scale          Use Sharp pixel-art scaling for the final game image\n"
         "  --vsync / --no-vsync   Enable or disable vertical sync (default: enabled)\n"
         "  --touch-overlay        Enable on-screen virtual touch controller\n"
         "  --touch-layout <path>  Load/save custom virtual touch layout from file\n"
@@ -54,6 +55,8 @@ Result<CliOptions> parse_cli(int argc, char** argv) {
             opts.verbose = true;
         } else if (arg == "--fullscreen") {
             opts.fullscreen = true;
+        } else if (arg == "--sharp-scale") {
+            opts.sharp_scale = true;
         } else if (arg == "--vsync") {
             opts.vsync = true;
         } else if (arg == "--no-vsync") {

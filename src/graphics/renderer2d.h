@@ -93,6 +93,8 @@ public:
     void begin_screen_pass(i32 canvas_w, i32 canvas_h, i32 backbuffer_w, i32 backbuffer_h, const ViewportRect& present_viewport);
     // Presents the internal screen FBO onto the window backbuffer with letterbox border color.
     void present_screen(u32 border_color_bgr);
+    // Startup option, set before init() so the default shader stays unchanged.
+    void set_sharp_scale(bool enabled) noexcept { sharp_scale_ = enabled; }
     void end_frame();
     void flush();
 
@@ -409,6 +411,7 @@ private:
     i32 loc_normal_mat_ = -1;
     i32 loc_model_tint_ = -1;
     i32 loc_tex_ = -1;
+    i32 loc_sharp_factor_ = -1;
     i32 loc_tex_blending_ = -1;
     i32 loc_texcoord_mode_ = -1;
     i32 loc_alpha_test_ = -1;
@@ -438,6 +441,7 @@ private:
     BlendState blend_state_{};
     bool separate_alpha_blend_ = false;
     bool linear_filter_ = false;
+    bool sharp_scale_ = false;
     bool tex_repeat_ = false;
     bool tex_blending_ = true;
     i32 texcoord_mode_ = 0;
