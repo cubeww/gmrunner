@@ -95,7 +95,7 @@ gmrunner/
     ├── graphics/                  # gm_graphics: IGraphicsDevice, cached GlGraphicsDevice, 2D/3D renderers, surfaces, SM1/2/3 transpiler, TouchOverlay
     ├── audio/                     # gm_audio: software mixer (shared PCM), decoders, DSP, 3D, .wasd, FMODSIMPLEPW crypto
     ├── runtime/                   # gm_runtime: StepLoop, Room/Instance/Object, TMask collisions, mp_*, particles, ds_*, 1282 built-ins
-    ├── extensions/                # gm_extensions: GEX loader, external_call dispatcher, native C++ shims
+    ├── extensions/                # gm_extensions: core registry/SDK (core/, shared/, cmake/) + auto-discovered native modules (modules/*)
     └── app/                       # gmrunner executable (Desktop/WASM) / libmain.so (Android): CLI + reentrant frame loop entrypoint
 ```
 

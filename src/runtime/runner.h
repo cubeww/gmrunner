@@ -2,7 +2,7 @@
 
 #include "audio/audio_engine.h"
 #include "base/types.h"
-#include "extensions/dll_registry.h"
+#include "extensions/core/extension_registry.h"
 #include "gml/compiler.h"
 #include "gml/vm.h"
 #include "graphics/gl_graphics_device.h"
@@ -201,7 +201,7 @@ public:
     [[nodiscard]] Renderer2D& renderer() noexcept { return renderer_; }
     [[nodiscard]] MessageDialog& message_dialog() noexcept { return message_dialog_; }
     [[nodiscard]] AudioEngine& audio() noexcept { return audio_; }
-    [[nodiscard]] DllRegistry& dll_registry() noexcept { return dll_registry_; }
+    [[nodiscard]] ExtensionRegistry& extensions() noexcept { return extensions_; }
     [[nodiscard]] DsManager& ds() noexcept { return ds_; }
     [[nodiscard]] ParticleManager& particles() noexcept { return particles_; }
     [[nodiscard]] MpGridManager& mp_grids() noexcept { return mp_grids_; }
@@ -579,7 +579,7 @@ private:
     MessageDialog message_dialog_;
     TouchOverlay touch_overlay_;
     AudioEngine audio_;
-    DllRegistry dll_registry_;
+    ExtensionRegistry extensions_;
     DsManager ds_;
     GmlRandom rng_;
     ParticleManager particles_{rng_};

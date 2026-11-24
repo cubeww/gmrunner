@@ -1609,7 +1609,7 @@ void Runner::register_builtins_core() {
         for (i32 i = 0; i < nargs; ++i) {
             arg_types.push_back((arg_i32(a, static_cast<usize>(5 + i), 0) == 1) ? ExternalValueType::String : ExternalValueType::Real);
         }
-        return RValue(r.dll_registry().define_external(dll, fn, call_type, ret_type, std::move(arg_types)));
+        return RValue(r.extensions().define_external(dll, fn, call_type, ret_type, std::move(arg_types)));
     };
     auto fn_ext_define_fixed = [](i32 fixed_nargs) {
         return [fixed_nargs](Runner& r, i32, i32, std::span<const RValue> a) {
@@ -1623,7 +1623,7 @@ void Runner::register_builtins_core() {
                 if (arg_i32(a, 2 + i) == 1) arg_types[i] = ExternalValueType::String;
             }
             const auto ret_type = arg_i32(a, 2 + typed) == 1 ? ExternalValueType::String : ExternalValueType::Real;
-            return RValue(r.dll_registry().define_external(dll, fn, 0, ret_type, std::move(arg_types)));
+            return RValue(r.extensions().define_external(dll, fn, 0, ret_type, std::move(arg_types)));
         };
     };
     register_builtin("external_define", fn_ext_define);
@@ -1640,7 +1640,7 @@ void Runner::register_builtins_core() {
     auto fn_ext_call = [](Runner& r, i32, i32, std::span<const RValue> a) {
         if (a.empty()) return RValue(0.0);
         const i32 id = arg_i32(a, 0, 0);
-        return r.dll_registry().call_external(r, id, a.subspan(1));
+        return r.extensions().call_external(r, id, a.subspan(1));
     };
     register_builtin("external_call", fn_ext_call);
     register_builtin("external_call0", fn_ext_call);
@@ -1654,11 +1654,11 @@ void Runner::register_builtins_core() {
     register_builtin("external_call8", fn_ext_call);
 
     register_builtin("external_free", [](Runner& r, i32, i32, std::span<const RValue> a) {
-        r.dll_registry().free_external(r, arg_str(a, 0));
+        r.extensions().free_external(r, arg_str(a, 0));
         return RValue(0.0);
     });
     register_builtin("get_function_address", [](Runner&, i32, i32, std::span<const RValue> a) {
-        return RValue(DllRegistry::get_function_address(arg_str(a, 0)));
+        return RValue(ExtensionRegistry::get_function_address(arg_str(a, 0)));
     });
 
     // -----------------------------------------------------------------------

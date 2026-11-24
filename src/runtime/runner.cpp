@@ -108,9 +108,10 @@ Result<void> Runner::init(GameData game, CompiledProgram program, std::vector<st
     }
     audio_.load_game_sounds(game_);
 
-    // Register native cross-platform DLL shims (GMFMODSimple, SuperSound, MaizeMusic, CleanMem).
-    dll_registry_.reset(this);
-    dll_registry_.register_builtin_shims();
+    // Register compiled native cross-platform extensions and pre-bind GEX DLL exports.
+    extensions_.reset(this);
+    extensions_.register_compiled_extensions();
+    extensions_.bind_gex_functions(program_.symbols.extension_dll_functions());
 
     // Export included files marked export_action == 1 (temp_dir) or 2 (working_dir).
     for (const auto& inc : game_.included_files) {
@@ -228,7 +229,7 @@ Result<void> Runner::init(GameData game, CompiledProgram program, std::vector<st
                             break;
                         }
                     }
-                    (void)dll_registry_.call_gex_dll(*this, inc.filename, ext_sym, {}, ExternalValueType::Real);
+                    (void)extensions_.call_gex_dll(*this, inc.filename, ext_sym, {}, ExternalValueType::Real);
                 }
             }
         }
@@ -287,7 +288,7 @@ void Runner::shutdown() noexcept {
                             break;
                         }
                     }
-                    (void)dll_registry_.call_gex_dll(*this, inc.filename, ext_sym, {}, ExternalValueType::Real);
+                    (void)extensions_.call_gex_dll(*this, inc.filename, ext_sym, {}, ExternalValueType::Real);
                 }
             }
         }
@@ -324,7 +325,7 @@ void Runner::shutdown() noexcept {
     particles_.clear_all();
     mp_grids_.destroy_all();
 
-    dll_registry_.reset(this);
+    extensions_.reset(this);
     audio_.shutdown();
     message_dialog_.shutdown();
     touch_overlay_.shutdown();
@@ -2617,7 +2618,7 @@ Result<void> Runner::set_builtin_inst(i32 inst_id, u32 var_id, i32 idx, bool has
 }
 
 Result<RValue> Runner::ext_call_function(i32 address, i32 self, i32 other, std::span<const RValue> args) {
-    const auto* func = DllRegistry::callback_by_address(address);
+    const auto* func = ExtensionRegistry::callback_by_address(address);
     if (!func) return Error{"Invalid GM function callback"};
     return call_builtin(func->id, self, other, args);
 }
@@ -2678,32 +2679,7 @@ Result<RValue> Runner::call_builtin(u32 func_id, i32 self_id, i32 other_id, std:
 }
 
 Result<RValue> Runner::call_extension_dll(u32 ext_dll_id, std::span<const RValue> args) {
-    if (ext_dll_id < program_.symbols.extension_dll_functions().size()) {
-        const auto& fn = program_.symbols.extension_dll_functions()[ext_dll_id];
-        const ExternalValueType ret_type =
-            (fn.return_type == 1) ? ExternalValueType::String : ExternalValueType::Real;
-
-        if (!fn.arg_types.empty()) {
-            std::vector<RValue> coerced;
-            coerced.reserve(args.size());
-            for (usize i = 0; i < args.size(); ++i) {
-                if (i < fn.arg_types.size()) {
-                    if (fn.arg_types[i] == 1 && !args[i].is_string()) {
-                        coerced.emplace_back(format_gm_real(args[i].as_real()));
-                    } else if (fn.arg_types[i] == 2 && args[i].is_string()) {
-                        coerced.emplace_back(std::strtod(args[i].as_string().c_str(), nullptr));
-                    } else {
-                        coerced.push_back(args[i]);
-                    }
-                } else {
-                    coerced.push_back(args[i]);
-                }
-            }
-            return dll_registry_.call_gex_dll(*this, fn.dll_filename, fn.external_name, coerced, ret_type);
-        }
-        return dll_registry_.call_gex_dll(*this, fn.dll_filename, fn.external_name, args, ret_type);
-    }
-    return RValue(0.0);
+    return extensions_.call_gex_bound(*this, ext_dll_id, args);
 }
 
 // ---------------------------------------------------------------------------

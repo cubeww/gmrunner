@@ -22,25 +22,35 @@ Cross-platform C++20 runtime for **GameMaker 8.0 / 8.1 / 8.2** games, targeting 
 - **GM 8.0 / 8.1 / 8.2 Runtime**: Direct PE executable decryption and loading, GML bytecode compiler/VM with D&D action lowering, faithful 17-stage step loop, pixel-accurate/rotated collisions, particles, paths, and data structures.
 - **Unified Graphics & Shaders**: OpenGL 3.3 Core (Desktop), OpenGL ES 3.0 (Android), and WebGL 2.0 (Web) backend with batched 2D, fixed-function D3D8/9 3D, surfaces/MRT, and an in-house D3D9 SM1–SM3 bytecode-to-GLSL transpiler.
 - **Software Audio Mixer**: Cross-platform audio (`miniaudio`, `stb_vorbis`, `TinySoundFont`, tracker playback) with pitch/fade controls, 3D spatialization, and DSP effects.
-- **Native Extension Shims**: Cross-platform C++ implementations for embedded `.gex` and runtime DLLs (`gm82core`, `gm82buf`, `gm82snd`, `gm82joy`, `gm82drag`, `gm82test`, `gm82dx8`/`gm82dx9`, `GMFMODSimple`, `SuperSound`, `MaizeMusic`, `CleanMem`).
+- **Modular Native Extensions**: Cross-platform C++ extension registry replacing 32-bit Windows `.gex` and runtime DLLs (`gm82core`, `gm82buf`, `gm82snd`, `gm82joy`, `gm82drag`, `gm82test`, `gm82dx8`/`gm82dx9`, `GMFMODSimple`, `SuperSound`, `MaizeMusic`, `CleanMem`).
 - **Zero-Extraction Loading & Touch Controls**: Run `.exe` files, game folders, or streamed `.zip` archives directly, with persistent saves (OPFS/IDBFS on Web) and a built-in multi-touch virtual gamepad.
 
 ## Usage
 
 ```bash
-gmrunner path/to/game.exe
-gmrunner path/to/game_dir
-gmrunner path/to/game.zip
-
-# Additional options
-gmrunner --save-dir ./saves --touch-overlay path/to/game.zip
-gmrunner --sharp-scale path/to/game.zip
-gmrunner --inspect path/to/game.exe
-gmrunner --compile-check path/to/game.exe
-gmrunner --help
+gmrunner [options] [game.exe | game_dir | game.zip]
 ```
 
-`--sharp-scale` uses nearest-neighbor sampling at integer zoom and smooths pixel edges at fractional zoom when presenting the final game image. On the web, use `gmrunner.html?sharp-scale` or `gmrunner.html?game=game.zip&sharp-scale`.
+| Option | Description |
+| :--- | :--- |
+| `-h`, `--help` | Show CLI usage and exit |
+| `--inspect` | Parse executable and print asset/extension summary |
+| `--compile-check` | Compile all GML/D&D scripts and exit |
+| `--save-dir <path>` | Override writable save overlay directory |
+| `--version <80\|81\|82>` | Override auto-detected GM version profile (`8.0`/`8.1`/`8.2` also accepted) |
+| `--codepage <id>` | Windows codepage for GM 8.0 strings (e.g. `936`, `932`; default `1252`) |
+| `--width <px>`, `--height <px>` | Initial window size (default `800` × `608`) |
+| `--fullscreen` | Start in fullscreen mode |
+| `--sharp-scale` | Nearest-neighbor at integer zoom; smooth pixel edges at fractional zoom |
+| `--vsync` / `--no-vsync` | Enable or disable vertical sync (default: enabled) |
+| `--touch-overlay` | Enable on-screen virtual touch controller |
+| `--touch-layout <path>` | Load/save custom virtual touch layout file |
+| `-v`, `--verbose` | Enable debug-level logging |
+| `--trace-events` | Trace runtime event dispatch |
+| `--trace-dll` | Trace external DLL / extension module calls |
+| `--trace-vfs` | Trace virtual filesystem lookups |
+
+On WebAssembly, URL query parameters support `?game=path/to/game.zip`, `?sharp-scale`, and `?codepage=<id>` (e.g. `gmrunner.html?game=game.zip&sharp-scale&codepage=936`).
 
 ## Building
 
@@ -70,6 +80,12 @@ cmake --build --preset <preset> --parallel
 - **Packaging**: `./packaging/linux/package_linux.sh` (Linux tarball) · `./packaging/macos/package_macos.sh` (macOS `.app` + `.dmg`).
 - **WebAssembly**: Serve `build/wasm-release/bin/` over HTTP (e.g. `python3 -m http.server -d build/wasm-release/bin 8080`) and open `gmrunner.html`. Supports dropping a game folder, `.zip`, or `.exe`, or autoloading via `?game=path/to/game.zip`.
 - **Android**: For a full APK with game launcher and SAF `.zip`/`.exe` import, build the Gradle project in [`android/`](android/) via `./gradlew assembleRelease`.
+
+## Extensions
+
+Many GameMaker 8 games depend on 32-bit x86 Windows `.dll` libraries (via `external_define`/`external_call` or embedded `.gex` packages) for audio, shaders, buffers, networking, physics, and system integration. Because those native Win32 binaries cannot run on 64-bit, Linux, macOS, Android, or WebAssembly targets, `gmrunner` executes the extensions' bundled `.gml` scripts unmodified in the VM while routing native DLL calls through cross-platform C++ modules under `src/extensions/modules/`.
+
+Each extension lives in its own self-contained directory and is auto-discovered by CMake—adding support for a new DLL requires no edits to the core engine. See [`src/extensions/modules/README.md`](src/extensions/modules/README.md) for the template and API guide.
 
 ## Architecture
 
