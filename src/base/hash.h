@@ -20,6 +20,9 @@ namespace gm {
 // Standard IEEE CRC-32 (with final XOR 0xFFFFFFFF), used by gm82buf.
 [[nodiscard]] u32 crc32_ieee(std::span<const u8> data) noexcept;
 
+// Standard RFC 1950 Adler-32 checksum (used by UPX pack header verification).
+[[nodiscard]] u32 adler32_bytes(std::span<const u8> data) noexcept;
+
 // Marsaglia Multiply-With-Carry PRNG matching GM 8.1 / 8.2 CStream.LocalRandom.
 struct MarsagliaMwc {
     u32 w = 0; // s1 (passphrase CRC)

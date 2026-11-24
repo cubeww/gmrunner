@@ -1,6 +1,10 @@
 add_library(gm_loader STATIC
     game_data.h
     path.cpp
+    upx_unpack.h
+    upx_unpack.cpp
+    antidecompiler.h
+    antidecompiler.cpp
     crypto.h
     crypto.cpp
     exe_loader.h

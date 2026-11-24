@@ -2,14 +2,22 @@
 
 #include <zlib.h>
 
+#include <algorithm>
 #include <array>
 
 namespace gm {
 
 namespace {
 
-Result<std::vector<u8>> inflate_impl(std::span<const u8> compressed, int window_bits) {
+Result<std::vector<u8>> inflate_impl(
+    std::span<const u8> compressed,
+    int window_bits,
+    bool require_exact,
+    usize max_output_bytes) {
     if (compressed.empty()) {
+        if (require_exact) {
+            return Error{"zlib inflate empty stream"};
+        }
         return std::vector<u8>{};
     }
 
@@ -22,7 +30,10 @@ Result<std::vector<u8>> inflate_impl(std::span<const u8> compressed, int window_
     }
 
     std::vector<u8> out;
-    out.reserve(compressed.size() * 2);
+    const usize initial_cap = compressed.size() <= (max_output_bytes / 2u)
+                                  ? compressed.size() * 2u
+                                  : max_output_bytes;
+    out.reserve(std::min<usize>(initial_cap, 1024u * 1024u));
     std::array<u8, 32768> chunk{};
 
     int ret = Z_OK;
@@ -37,6 +48,10 @@ Result<std::vector<u8>> inflate_impl(std::span<const u8> compressed, int window_
         }
         const usize produced = chunk.size() - strm.avail_out;
         if (produced > 0) {
+            if (produced > max_output_bytes || out.size() > max_output_bytes - produced) {
+                inflateEnd(&strm);
+                return Error{"zlib inflate exceeds maximum output size"};
+            }
             out.insert(out.end(), chunk.data(), chunk.data() + produced);
         }
         if (ret == Z_OK && strm.avail_in == 0 && produced == 0) {
@@ -45,7 +60,11 @@ Result<std::vector<u8>> inflate_impl(std::span<const u8> compressed, int window_
         }
     }
 
+    const uInt unused = strm.avail_in;
     inflateEnd(&strm);
+    if (require_exact && unused != 0u) {
+        return Error{"zlib inflate has unused trailing bytes"};
+    }
     return out;
 }
 
@@ -85,7 +104,13 @@ Result<std::vector<u8>> deflate_impl(std::span<const u8> raw, int level, int win
 } // namespace
 
 Result<std::vector<u8>> zlib_decompress(std::span<const u8> compressed) {
-    return inflate_impl(compressed, MAX_WBITS);
+    return inflate_impl(compressed, MAX_WBITS, false, ~usize{0});
+}
+
+Result<std::vector<u8>> zlib_decompress_exact(
+    std::span<const u8> compressed,
+    usize max_output_bytes) {
+    return inflate_impl(compressed, MAX_WBITS, true, max_output_bytes);
 }
 
 Result<std::vector<u8>> zlib_compress(std::span<const u8> raw, int level) {
@@ -93,7 +118,7 @@ Result<std::vector<u8>> zlib_compress(std::span<const u8> raw, int level) {
 }
 
 Result<std::vector<u8>> raw_inflate(std::span<const u8> compressed) {
-    return inflate_impl(compressed, -MAX_WBITS);
+    return inflate_impl(compressed, -MAX_WBITS, false, ~usize{0});
 }
 
 Result<std::vector<u8>> raw_deflate(std::span<const u8> raw, int level) {

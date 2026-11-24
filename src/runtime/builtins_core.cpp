@@ -879,23 +879,17 @@ void Runner::register_builtins_core() {
     });
     register_builtin("file_text_read_real", [](Runner& r, i32, i32, std::span<const RValue> a) {
         auto* tf = r.get_text_file(arg_i32(a, 0));
-        if (!tf) return RValue(0.0);
-        while (tf->line_idx < tf->lines.size()) {
-            const std::string& line = tf->lines[tf->line_idx];
-            while (tf->col_idx < line.size() && std::isspace(static_cast<unsigned char>(line[tf->col_idx]))) {
-                ++tf->col_idx;
-            }
-            if (tf->col_idx < line.size()) {
-                const char* start = line.c_str() + tf->col_idx;
-                char* end = nullptr;
-                const f64 v = std::strtod(start, &end);
-                tf->col_idx = static_cast<usize>(end - line.c_str());
-                return RValue(std::isfinite(v) ? v : 0.0);
-            }
-            ++tf->line_idx;
-            tf->col_idx = 0;
+        if (!tf || tf->line_idx >= tf->lines.size()) return RValue(0.0);
+        const std::string& line = tf->lines[tf->line_idx];
+        while (tf->col_idx < line.size() && std::isspace(static_cast<unsigned char>(line[tf->col_idx]))) {
+            ++tf->col_idx;
         }
-        return RValue(0.0);
+        // GM leaves the line ending for file_text_readln, even on repeated reads.
+        if (tf->col_idx == line.size()) return RValue(0.0);
+        char* end = nullptr;
+        const f64 v = std::strtod(line.c_str() + tf->col_idx, &end);
+        tf->col_idx = static_cast<usize>(end - line.c_str());
+        return RValue(std::isfinite(v) ? v : 0.0);
     });
     register_builtin("file_text_readln", [](Runner& r, i32, i32, std::span<const RValue> a) {
         auto* tf = r.get_text_file(arg_i32(a, 0));
@@ -909,7 +903,8 @@ void Runner::register_builtins_core() {
     });
     register_builtin("file_text_eof", [](Runner& r, i32, i32, std::span<const RValue> a) {
         auto* tf = r.get_text_file(arg_i32(a, 0));
-        return RValue(!tf || tf->line_idx >= tf->lines.size());
+        return RValue(!tf || tf->line_idx >= tf->lines.size() ||
+                      (tf->line_idx + 1 == tf->lines.size() && tf->col_idx >= tf->lines.back().size()));
     });
     register_builtin("file_text_eoln", [](Runner& r, i32, i32, std::span<const RValue> a) {
         auto* tf = r.get_text_file(arg_i32(a, 0));

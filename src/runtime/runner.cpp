@@ -3039,7 +3039,7 @@ i32 Runner::text_file_open(std::string_view gm_path, i32 mode) {
             if (!line.empty() && line.back() == '\r') line.pop_back();
             tf.lines.push_back(std::move(line));
             pos = nl + 1;
-            if (pos == text.size()) break;
+            // Keep the empty last line after a trailing newline to distinguish EOL from EOF.
         }
     } else if (mode == 2) { // append
         if (auto bytes = vfs_.read_all_bytes(gm_path); bytes) {

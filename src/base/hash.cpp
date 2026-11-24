@@ -187,6 +187,24 @@ u32 crc32_ieee(std::span<const u8> data) noexcept {
     return crc32_gm81(data) ^ 0xFFFFFFFFu;
 }
 
+u32 adler32_bytes(std::span<const u8> data) noexcept {
+    constexpr u32 kModAdler = 65521u;
+    constexpr usize kNmax = 5552u; // Largest n such that 255*n*(n+1)/2 + (n+1)*(kModAdler-1) <= 2^32-1
+    u32 s1 = 1u;
+    u32 s2 = 0u;
+    usize i = 0;
+    while (i < data.size()) {
+        const usize end = (data.size() - i > kNmax) ? (i + kNmax) : data.size();
+        for (; i < end; ++i) {
+            s1 += data[i];
+            s2 += s1;
+        }
+        s1 %= kModAdler;
+        s2 %= kModAdler;
+    }
+    return (s2 << 16u) | s1;
+}
+
 Md5Digest md5_bytes(std::span<const u8> data) noexcept {
     u32 state[4] = {0x67452301u, 0xEFCDAB89u, 0x98BADCFEu, 0x10325476u};
     usize offset = 0;

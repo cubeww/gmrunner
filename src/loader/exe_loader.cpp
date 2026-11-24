@@ -4,7 +4,9 @@
 #include "base/encoding.h"
 #include "base/hash.h"
 #include "base/log.h"
+#include "loader/antidecompiler.h"
 #include "loader/crypto.h"
+#include "loader/upx_unpack.h"
 
 #include <algorithm>
 #include <charconv>
@@ -1522,6 +1524,20 @@ Result<void> read_gmbck(std::span<const u8> bytes, BackgroundData& background) {
 Result<GameData> ExeLoader::load_from_bytes(std::vector<u8> exe_bytes, const LoadOptions& options) {
     GameData game{};
     game.meta.exe_size = exe_bytes.size();
+
+    // Unpack optional UPX PE32 wrapper before reading runner resources or inspecting stubs.
+    if (is_upx_packed_pe(exe_bytes)) {
+        auto unpacked = unpack_upx_pe(exe_bytes);
+        if (unpacked) {
+            GM_LOG_INFO("loader", "Unpacked UPX PE32 runner (%zu -> %zu bytes)",
+                        exe_bytes.size(), unpacked.value().size());
+            exe_bytes = std::move(unpacked.value());
+        } else {
+            GM_LOG_WARN("loader", "UPX PE32 unpacking failed (%s); continuing with packed bytes",
+                        unpacked.error_message().c_str());
+        }
+    }
+
     game.meta.pe_overlay_offset = find_pe_overlay_offset(exe_bytes);
     if (game.meta.pe_overlay_offset > 0) {
         const auto runner_span = std::span<const u8>(exe_bytes).first(game.meta.pe_overlay_offset);
@@ -1530,6 +1546,7 @@ Result<GameData> ExeLoader::load_from_bytes(std::vector<u8> exe_bytes, const Loa
     }
 
     bool is_gm81_family = false;
+    bool used_antidecompiler = false;
     usize header_pos = 0;
 
     // Step 1: Locate & decrypt outer executable payload.
@@ -1543,6 +1560,14 @@ Result<GameData> ExeLoader::load_from_bytes(std::vector<u8> exe_bytes, const Loa
         is_gm81_family = false;
         header_pos = gm80_off.value();
         game.meta.payload_offset = header_pos;
+    } else if (auto ad_res = try_decrypt_antidecompiler(exe_bytes, game.meta.pe_overlay_offset); ad_res) {
+        used_antidecompiler = true;
+        is_gm81_family = ad_res.value().is_gm81_family;
+        header_pos = ad_res.value().header_offset;
+        game.meta.payload_offset = ad_res.value().payload_offset;
+        GM_LOG_INFO("loader", "Decrypted AntiDecompiler %s payload at 0x%zx",
+                    is_gm81_family ? "GM 8.1" : "GM 8.0",
+                    game.meta.payload_offset);
     } else {
         auto gm81_res = try_decrypt_gm81_wad(exe_bytes, gm81_hint);
         if (!gm81_res) {
@@ -1552,6 +1577,9 @@ Result<GameData> ExeLoader::load_from_bytes(std::vector<u8> exe_bytes, const Loa
         is_gm81_family = true;
         header_pos = gm81_res.value().header_offset;
         game.meta.payload_offset = gm81_res.value().magic_offset;
+        if (gm81_res.value().used_sudalv) {
+            GM_LOG_INFO("loader", "Decrypted GM 8.1 SUDALV WAD at 0x%zx", game.meta.payload_offset);
+        }
     }
 
     BinaryReader outer(exe_bytes);
@@ -1694,8 +1722,10 @@ Result<GameData> ExeLoader::load_from_bytes(std::vector<u8> exe_bytes, const Loa
     }
 
     // Also identify GM 8.2 if PE stub was trimmed (< 3.5 MB) or gm82* extensions are embedded.
+    // AntiDecompiler strips .reloc and moves .rsrc below 3.5 MB on GM 8.1, so skip trimmed_stub for it.
     if (is_gm81_family && game.meta.detected_version == VersionMode::GM81) {
-        const bool trimmed_stub = (game.meta.pe_overlay_offset > 0 && game.meta.pe_overlay_offset < 3500000u);
+        const bool trimmed_stub = !used_antidecompiler &&
+                                  (game.meta.pe_overlay_offset > 0 && game.meta.pe_overlay_offset < 3500000u);
         bool has_gm82_ext = false;
         for (const auto& ext : game.extensions) {
             if (ascii_to_lower(ext.folder) == "gm82") {
