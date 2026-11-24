@@ -3,6 +3,7 @@
 #include "base/types.h"
 
 #include <array>
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -11,6 +12,7 @@
 
 struct SDL_Window;
 struct SDL_GLContextState;
+struct SDL_Cursor;
 
 namespace gm {
 
@@ -37,6 +39,7 @@ struct InputState {
     std::array<bool, 256> key_down{};
     std::array<bool, 256> key_pressed{};
     std::array<bool, 256> key_released{};
+    std::array<i32, 256> key_map{};
     u8 last_key = 0;
     u8 current_key = 0;
     std::string last_char;
@@ -56,6 +59,25 @@ struct InputState {
     bool touch_seen = false;
 
     std::vector<std::string> dropped_files;
+
+    InputState() { reset_key_map(); }
+
+    void reset_key_map() noexcept {
+        for (i32 i = 0; i < 256; ++i) {
+            key_map[static_cast<usize>(i)] = i;
+        }
+    }
+    void set_key_map(i32 key1, i32 key2) noexcept {
+        if (key1 >= 0 && key1 < 256) {
+            key_map[static_cast<usize>(key1)] = key2;
+        }
+    }
+    [[nodiscard]] i32 get_key_map(i32 key) const noexcept {
+        if (key >= 0 && key < 256) {
+            return key_map[static_cast<usize>(key)];
+        }
+        return key;
+    }
 
     void begin_frame();
     void clear_all();
@@ -102,6 +124,10 @@ struct ModalInputFrame {
     bool left_pressed = false;
     bool left_released = false;
     bool left_double_click = false;
+    bool right_pressed = false;
+    bool middle_pressed = false;
+    bool any_mouse_pressed = false;
+    f32 wheel_y = 0.0f;
     bool pointer_is_touch = false;
 };
 
@@ -129,6 +155,8 @@ public:
     void set_vsync(bool enabled);
     void set_cursor_visible(bool visible);
     [[nodiscard]] bool is_cursor_visible() const noexcept { return cursor_visible_; }
+    void set_cursor(i32 gm_cursor);
+    [[nodiscard]] i32 cursor() const noexcept { return current_cursor_; }
     [[nodiscard]] f32 display_scale() const noexcept;
     void set_borderless(bool borderless);
     [[nodiscard]] bool is_borderless() const noexcept { return borderless_; }
@@ -187,6 +215,18 @@ public:
     void show_message(std::string_view title, std::string_view message) const;
     [[nodiscard]] bool show_question(std::string_view title, std::string_view message) const;
     [[nodiscard]] std::string prompt_string(std::string_view prompt, std::string_view default_val) const;
+    [[nodiscard]] std::string open_file_dialog(
+        std::string_view gm_filter,
+        std::string_view default_location,
+        const std::function<void()>& on_idle = {});
+    [[nodiscard]] std::string save_file_dialog(
+        std::string_view gm_filter,
+        std::string_view default_location,
+        const std::function<void()>& on_idle = {});
+    [[nodiscard]] std::string open_folder_dialog(
+        std::string_view title,
+        std::string_view default_location,
+        const std::function<void()>& on_idle = {});
     void set_text_input(bool enabled);
     [[nodiscard]] bool is_text_input_active() const noexcept;
     void set_text_input_area(i32 x, i32 y, i32 w, i32 h, i32 cursor_offset = 0);
@@ -215,6 +255,8 @@ private:
     bool resizable_ = true;
     bool visible_ = true;
     bool cursor_visible_ = true;
+    i32 current_cursor_ = 0;
+    std::array<SDL_Cursor*, 24> system_cursors_{};
     bool has_focus_ = true;
     bool modal_left_down_ = false;
     bool modal_pointer_is_touch_ = false;

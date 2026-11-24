@@ -82,6 +82,8 @@ Result<void> Runner::init(GameData game, CompiledProgram program, std::vector<st
     next_instance_id_ = std::max(100001, game_.room_max_id + 1);
     next_tile_id_ = std::max(10000001, game_.room_max_tile_id + 1);
     window_color_ = game_.options.window_color;
+    window_cursor_ = game_.options.show_cursor ? 0 : -1;
+    window_.set_cursor(window_cursor_);
     window_.set_show_icons(!game_.options.no_buttons);
     window_region_scale_ = game_.options.scale / 100.0;
     sync_vsync_ = (game_.options.sync_vertex != 0);
@@ -97,6 +99,9 @@ Result<void> Runner::init(GameData game, CompiledProgram program, std::vector<st
     }
     if (auto res = message_dialog_.init(gfx_, game_); !res) {
         GM_LOG_WARN("gfx", "Message dialog init failed: %s", res.error_message().c_str());
+    }
+    if (auto res = modal_dialogs_.init(gfx_); !res) {
+        GM_LOG_WARN("gfx", "Modal dialogs init failed: %s", res.error_message().c_str());
     }
     if (PlatformWindow::is_mobile_touch_platform()) {
         touch_overlay_.set_enabled(true);
@@ -328,6 +333,7 @@ void Runner::shutdown() noexcept {
     extensions_.reset(this);
     cancel_room_transition();
     audio_.shutdown();
+    modal_dialogs_.shutdown();
     message_dialog_.shutdown();
     touch_overlay_.shutdown();
     renderer_.shutdown();
@@ -370,6 +376,7 @@ void Runner::start_game() {
     lives_ = -1.0;
     health_ = 100.0;
     cursor_sprite_ = -1;
+    cursor_subimg_ = 0;
     transition_kind_ = 0;
     no_more_lives_armed_ = false;
     no_more_health_armed_ = false;
@@ -842,6 +849,7 @@ void Runner::finish_room_transition() {
                     (void)renderer_.reload_gpu_resources(game_);
                     (void)touch_overlay_.reload_gpu_resources();
                     (void)message_dialog_.reload_gpu_resources();
+                    (void)modal_dialogs_.reload_gpu_resources();
                 }
                 context_lost_aborted = true;
                 aborted = true;
@@ -1033,6 +1041,7 @@ void Runner::tick_frame() {
             (void)renderer_.reload_gpu_resources(game_);
             (void)touch_overlay_.reload_gpu_resources();
             (void)message_dialog_.reload_gpu_resources();
+            (void)modal_dialogs_.reload_gpu_resources();
         }
     }
 #if defined(__EMSCRIPTEN__)
@@ -1071,6 +1080,10 @@ void Runner::tick_frame() {
     const InputState& inp = window_.input();
 
     // Standard GM8 default hotkeys (respecting GameOptions).
+    if (game_.options.help_key && inp.key_pressed[112]) { // F1 Game Information
+        show_info_dialog();
+        return;
+    }
     if (game_.options.quit_key && inp.key_pressed[27]) { // ESC
         running_ = false;
         return;
@@ -1191,6 +1204,7 @@ void Runner::tick_frame() {
     remove_marked_instances();
     if (pending_action_ == PendingRoomAction::None) {
         step_animations();
+        ++cursor_subimg_; // gm82.exe.c:sub_60756C (++*off_688A0C)
     }
     if (pending_action_ != PendingRoomAction::None) {
         process_pending_room_action();
@@ -2003,7 +2017,7 @@ void Runner::render_view(i32 /*view_idx*/, f32 vx, f32 vy, f32 vw, f32 vh, f32 a
     if (cursor_sprite_ >= 0) {
         if (renderer_.d3d_active()) renderer_.d3d_set_depth(-13000.0f);
         renderer_.draw_sprite_ext(
-            game_, cursor_sprite_, 0,
+            game_, cursor_sprite_, cursor_subimg_,
             static_cast<f32>(mouse_x_), static_cast<f32>(mouse_y_),
             1.0f, 1.0f, 0.0f, 0xFFFFFFu, 1.0f);
     }
@@ -3375,9 +3389,9 @@ void Runner::run_message_dialog_modal(bool with_input) {
         return;
     }
 
-    const bool prev_cursor = window_.is_cursor_visible();
+    const i32 prev_cursor = window_.cursor();
     const bool prev_text_input = window_.is_text_input_active();
-    window_.set_cursor_visible(true);
+    window_.set_cursor(0);
     if (with_input) {
         window_.set_text_input(true);
     }
@@ -3410,6 +3424,7 @@ void Runner::run_message_dialog_modal(bool with_input) {
                 (void)renderer_.reload_gpu_resources(game_);
                 (void)touch_overlay_.reload_gpu_resources();
                 (void)message_dialog_.reload_gpu_resources();
+                (void)modal_dialogs_.reload_gpu_resources();
             }
         }
 #if defined(__EMSCRIPTEN__)
@@ -3503,7 +3518,7 @@ void Runner::run_message_dialog_modal(bool with_input) {
     if (with_input && !prev_text_input) {
         window_.set_text_input(false);
     }
-    window_.set_cursor_visible(prev_cursor);
+    window_.set_cursor(prev_cursor);
 
     // Match GM8 sub_5F6964: clear all keyboard/mouse state so dismissing the dialog
     // never leaks clicks or key presses into the next game step.
@@ -3601,6 +3616,476 @@ f64 Runner::get_integer_dialog(std::string_view text, f64 def) {
         value = value * base + digit;
     }
     return static_cast<f64>(negative ? -value : value);
+}
+
+// ---------------------------------------------------------------------------
+// Native File & Directory Picker Dialogs (SDL3)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+std::string resolve_dialog_default_location(const Vfs& vfs, std::string_view raw_path, u32 codepage, bool is_dir) {
+    if (raw_path.empty()) {
+        std::string dir = Vfs::path_to_utf8(vfs.resolve_for_read("."));
+        if (!dir.empty() && dir.back() != '/' && dir.back() != '\\') {
+#if defined(_WIN32)
+            dir.push_back('\\');
+#else
+            dir.push_back('/');
+#endif
+        }
+        return dir;
+    }
+
+    const std::string utf8_in = codepage_to_utf8(raw_path, codepage);
+    const std::filesystem::path p = Vfs::path_from_utf8(utf8_in);
+    if (p.is_absolute()) {
+        return utf8_in;
+    }
+
+    std::string resolved = Vfs::path_to_utf8(is_dir ? vfs.resolve_for_read(raw_path) : vfs.resolve_for_write(raw_path));
+    if (is_dir && !resolved.empty() && resolved.back() != '/' && resolved.back() != '\\') {
+#if defined(_WIN32)
+        resolved.push_back('\\');
+#else
+        resolved.push_back('/');
+#endif
+    }
+    return resolved;
+}
+
+} // namespace
+
+std::string Runner::get_open_filename_dialog(std::string_view filter, std::string_view fname) {
+    const u32 cp = game_.meta.string_codepage();
+    const std::string filter_utf8 = codepage_to_utf8(filter, cp);
+    const std::string def_loc = resolve_dialog_default_location(vfs_, fname, cp, false);
+
+    const i32 prev_cursor = window_.cursor();
+    window_.set_cursor(0);
+    renderer_.flush();
+    std::string selected = window_.open_file_dialog(filter_utf8, def_loc);
+    window_.set_cursor(prev_cursor);
+    window_.input_mut().clear_all();
+    mouse_button_ = 0;
+    mouse_lastbutton_ = 0;
+
+    if (selected.empty()) return {};
+    return (game_.meta.encoding == EncodingMode::Utf8) ? selected : utf8_to_codepage(selected, cp);
+}
+
+std::string Runner::get_save_filename_dialog(std::string_view filter, std::string_view fname) {
+    const u32 cp = game_.meta.string_codepage();
+    const std::string filter_utf8 = codepage_to_utf8(filter, cp);
+    const std::string def_loc = resolve_dialog_default_location(vfs_, fname, cp, false);
+
+    const i32 prev_cursor = window_.cursor();
+    window_.set_cursor(0);
+    renderer_.flush();
+    std::string selected = window_.save_file_dialog(filter_utf8, def_loc);
+    window_.set_cursor(prev_cursor);
+    window_.input_mut().clear_all();
+    mouse_button_ = 0;
+    mouse_lastbutton_ = 0;
+
+    if (selected.empty()) return {};
+    return (game_.meta.encoding == EncodingMode::Utf8) ? selected : utf8_to_codepage(selected, cp);
+}
+
+std::string Runner::get_directory_dialog(std::string_view dname) {
+    const u32 cp = game_.meta.string_codepage();
+    const std::string def_loc = resolve_dialog_default_location(vfs_, dname, cp, true);
+
+    const i32 prev_cursor = window_.cursor();
+    window_.set_cursor(0);
+    renderer_.flush();
+    std::string selected = window_.open_folder_dialog({}, def_loc);
+    window_.set_cursor(prev_cursor);
+    window_.input_mut().clear_all();
+    mouse_button_ = 0;
+    mouse_lastbutton_ = 0;
+
+    if (selected.empty()) return {};
+    return (game_.meta.encoding == EncodingMode::Utf8) ? selected : utf8_to_codepage(selected, cp);
+}
+
+std::string Runner::get_directory_alt_dialog(std::string_view capt, std::string_view root) {
+    const u32 cp = game_.meta.string_codepage();
+    const std::string capt_utf8 = codepage_to_utf8(capt, cp);
+    const std::string def_loc = resolve_dialog_default_location(vfs_, root, cp, true);
+
+    const i32 prev_cursor = window_.cursor();
+    window_.set_cursor(0);
+    renderer_.flush();
+    std::string selected = window_.open_folder_dialog(capt_utf8, def_loc);
+    window_.set_cursor(prev_cursor);
+    window_.input_mut().clear_all();
+    mouse_button_ = 0;
+    mouse_lastbutton_ = 0;
+
+    if (selected.empty()) return {};
+    return (game_.meta.encoding == EncodingMode::Utf8) ? selected : utf8_to_codepage(selected, cp);
+}
+
+// ---------------------------------------------------------------------------
+// Self-Drawn GM8 Modal Dialogs (Highscore, Menu, ColorPicker, Splash, Info)
+// ---------------------------------------------------------------------------
+
+void Runner::run_ui_dialog_modal(bool show_cursor) {
+    if (!window_.is_open()) {
+        return;
+    }
+
+    const i32 prev_cursor = window_.cursor();
+    const bool prev_text_input = window_.is_text_input_active();
+    const bool wants_text = modal_dialogs_.wants_text_input();
+    window_.set_cursor(show_cursor ? 0 : -1);
+    if (wants_text) {
+        window_.set_text_input(true);
+    }
+    window_.reset_modal_input_state();
+    renderer_.flush();
+
+    const bool mobile_touch = PlatformWindow::is_mobile_touch_platform();
+    ModalInputFrame minput{};
+
+    while (!host_stop_requested_) {
+        const u64 frame_start = Clock::now_us();
+        window_.poll_modal_events(minput);
+        const auto& wev = minput.window_events;
+
+        if (wev.entered_background) {
+            paused_in_background_ = true;
+            audio_.suspend();
+            vfs_.notify_persist_write();
+        }
+        if (wev.entered_foreground) {
+            paused_in_background_ = false;
+            audio_.resume();
+        }
+        if (wev.context_lost) {
+            if (auto res = gfx_.reinit_after_context_loss(&PlatformWindow::gl_get_proc_address); res) {
+                (void)renderer_.reload_gpu_resources(game_);
+                (void)touch_overlay_.reload_gpu_resources();
+                (void)message_dialog_.reload_gpu_resources();
+                (void)modal_dialogs_.reload_gpu_resources();
+            }
+        }
+#if defined(__EMSCRIPTEN__)
+        if (wev.any_user_gesture && !web_audio_unlocked_) {
+            web_audio_unlocked_ = true;
+            web_unlock_audio();
+            audio_.resume();
+        }
+#endif
+        if (wev.quit_requested) {
+            running_ = false;
+            pending_action_ = PendingRoomAction::EndGame;
+            break;
+        }
+
+        const i32 ww = std::max(1, window_.width());
+        const i32 wh = std::max(1, window_.height());
+        const i32 dw = std::max(1, window_.drawable_width());
+        const i32 dh = std::max(1, window_.drawable_height());
+
+        if (wev.resized) {
+            i32 vx = 0, vy = 0, vw = 1, vh = 1, cw = 1, ch = 1;
+            compute_canvas_viewport(vx, vy, vw, vh, cw, ch);
+            const i32 bw = requested_backbuffer_w_ > 0 ? requested_backbuffer_w_ : cw;
+            const i32 bh = requested_backbuffer_h_ > 0 ? requested_backbuffer_h_ : ch;
+            renderer_.set_screen_region(dw, dh, bw, bh, ViewportRect{vx, vy, vw, vh});
+        }
+
+        const i32 wx = window_.x();
+        const i32 wy = window_.y();
+        const f32 dscale = window_.display_scale();
+
+        const bool keep_open = modal_dialogs_.update(
+            minput, ww, wh, dw, dh, wx, wy, dscale, mobile_touch, frame_start);
+
+        if (!paused_in_background_) {
+            if (renderer_.has_screen_frame()) {
+                renderer_.present_screen(window_color_);
+            } else {
+                const auto saved = gfx_.save_render_state();
+                gfx_.bind_framebuffer(FramebufferHandle{});
+                gfx_.set_scissor(false);
+                gfx_.set_viewport(ViewportRect{0, 0, dw, dh});
+                const ColorRGBA c = gm_bgr_to_rgba(window_color_, 255);
+                gfx_.clear(true, false, false,
+                           static_cast<f32>(c.r) / 255.0f,
+                           static_cast<f32>(c.g) / 255.0f,
+                           static_cast<f32>(c.b) / 255.0f,
+                           1.0f);
+                gfx_.restore_render_state(saved);
+            }
+            if (keep_open) {
+                modal_dialogs_.render(ww, wh, dw, dh, wx, wy, dscale, mobile_touch, frame_start);
+            }
+            window_.swap_buffers();
+            renderer_.end_frame();
+        }
+
+        if (!keep_open) {
+            break;
+        }
+#if defined(__EMSCRIPTEN__)
+        const u64 elapsed_ms = (Clock::now_us() - frame_start) / 1000;
+        Clock::yield_ms(elapsed_ms < 16 ? static_cast<u32>(16 - elapsed_ms) : 1);
+#else
+        Clock::sleep_until_us(frame_start + 16000u);
+#endif
+    }
+
+    if (wants_text && !prev_text_input) {
+        window_.set_text_input(false);
+    }
+    window_.set_cursor(prev_cursor);
+
+    // Match GM8 sub_5F6964: clear all keyboard/mouse state after dismissing any modal dialog.
+    window_.input_mut().clear_all();
+    mouse_button_ = 0;
+    mouse_lastbutton_ = 0;
+}
+
+void Runner::highscore_clear() {
+    for (auto& h : highscores_) {
+        h.name = highscore_nobody_;
+        h.score = 0.0;
+    }
+}
+
+i32 Runner::highscore_add_entry(std::string_view name, f64 score) {
+    const f64 sc = static_cast<f64>(delphi_round(score));
+    for (usize i = 0; i < highscores_.size(); ++i) {
+        if (sc > highscores_[i].score) {
+            for (usize j = highscores_.size() - 1; j > i; --j) {
+                highscores_[j] = highscores_[j - 1];
+            }
+            highscores_[i] = HighscoreEntry{std::string(name), sc};
+            return static_cast<i32>(i);
+        }
+    }
+    return -1;
+}
+
+void Runner::highscore_show_dialog(f64 score_val) {
+    const u32 cp = game_.meta.string_codepage();
+    const i64 rounded = delphi_round(score_val);
+    i32 edit_rank = -1;
+    if (rounded >= 0 && static_cast<f64>(rounded) > highscores_.back().score) {
+        edit_rank = highscore_add_entry("", static_cast<f64>(rounded));
+    }
+
+    HighscoreDialogParams params{};
+    params.edit_rank = edit_rank;
+    params.show_border = highscore_border_;
+    params.col_back_bgr = highscore_col_back_ & 0xFFFFFFu;
+    params.col_new_bgr = highscore_col_new_ & 0xFFFFFFu;
+    params.col_other_bgr = highscore_col_other_ & 0xFFFFFFu;
+    params.font_name = codepage_to_utf8(highscore_font_name_, cp);
+    params.font_size = highscore_font_size_;
+    params.font_style = highscore_font_style_;
+    params.caption_utf8 = codepage_to_utf8(highscore_caption_, cp);
+    params.escape_text_utf8 = codepage_to_utf8(highscore_escape_, cp);
+
+    if (highscore_bg_ >= 0 && static_cast<usize>(highscore_bg_) < game_.backgrounds.size() &&
+        game_.backgrounds[static_cast<usize>(highscore_bg_)].exists) {
+        params.bg_bitmap = game_.backgrounds[static_cast<usize>(highscore_bg_)].bitmap;
+    }
+    for (usize i = 0; i < highscores_.size(); ++i) {
+        const std::string& raw_name = highscores_[i].name.empty() ? highscore_nobody_ : highscores_[i].name;
+        params.rows[i].name_utf8 = codepage_to_utf8(raw_name, cp);
+        params.rows[i].score = delphi_round(highscores_[i].score);
+    }
+
+    modal_dialogs_.begin_highscore(params);
+    run_ui_dialog_modal(true);
+
+    if (edit_rank >= 0 && static_cast<usize>(edit_rank) < highscores_.size()) {
+        const std::string entered_utf8 = modal_dialogs_.result_highscore_name_utf8();
+        if (entered_utf8.empty()) {
+            highscores_[static_cast<usize>(edit_rank)].name = highscore_nobody_;
+        } else {
+            highscores_[static_cast<usize>(edit_rank)].name =
+                (game_.meta.encoding == EncodingMode::Utf8) ? entered_utf8 : utf8_to_codepage(entered_utf8, cp);
+        }
+    }
+}
+
+void Runner::highscore_add_current_dialog() {
+    const i64 sc = delphi_round(score_);
+    if (static_cast<f64>(sc) > highscores_.back().score) {
+        const std::string name = get_string_dialog("Enter your name:", "player");
+        (void)highscore_add_entry(name.empty() ? highscore_nobody_ : name, static_cast<f64>(sc));
+    }
+}
+
+RValue Runner::show_menu_dialog(
+    std::string_view items_str,
+    const RValue& default_val,
+    std::optional<std::pair<i32, i32>> screen_pos) {
+    const u32 cp = game_.meta.string_codepage();
+    MenuDialogParams params{};
+
+    // Match GM8 sub_628BB0: split by '|' (char 124); a trailing '|' does not create an extra item.
+    usize pos = 0;
+    while (pos < items_str.size()) {
+        const usize bar = items_str.find('|', pos);
+        const std::string_view seg = (bar == std::string_view::npos)
+            ? items_str.substr(pos)
+            : items_str.substr(pos, bar - pos);
+        params.items_utf8.push_back(codepage_to_utf8(seg, cp));
+        if (bar == std::string_view::npos) break;
+        pos = bar + 1;
+    }
+    if (params.items_utf8.empty()) {
+        return default_val;
+    }
+
+    if (screen_pos.has_value()) {
+        params.anchor_win_x = screen_pos->first - window_.x();
+        params.anchor_win_y = screen_pos->second - window_.y();
+    } else {
+        params.anchor_win_x = static_cast<i32>(std::round(window_.input().mouse_x));
+        params.anchor_win_y = static_cast<i32>(std::round(window_.input().mouse_y));
+    }
+
+    modal_dialogs_.begin_menu(params);
+    run_ui_dialog_modal(true);
+    const i32 chosen = modal_dialogs_.result_menu_index();
+    return (chosen >= 0) ? RValue(chosen) : default_val;
+}
+
+i32 Runner::get_color_dialog(i32 def_col) {
+    ColorPickerParams params{};
+    params.initial_color_bgr = static_cast<u32>(def_col) & 0xFFFFFFu;
+    modal_dialogs_.begin_color_picker(params);
+    run_ui_dialog_modal(true);
+    // Exact GM8 sub_644820 behavior: return -1 when cancelled.
+    if (!modal_dialogs_.result_color_accepted()) {
+        return -1;
+    }
+    return static_cast<i32>(modal_dialogs_.result_color_bgr());
+}
+
+bool Runner::splash_show_image_dialog(std::string_view fname, i32 delay_ms) {
+    auto bytes = vfs_.read_all_bytes(fname);
+    if (!bytes) {
+        GM_LOG_WARN("runtime", "splash_show_image: Image file not found: %.*s",
+                    static_cast<int>(fname.size()), fname.data());
+        return false;
+    }
+    auto bmp = Renderer2D::decode_image_to_bgra(bytes.value());
+    if (!bmp) {
+        GM_LOG_WARN("runtime", "splash_show_image: Failed to decode image: %.*s",
+                    static_cast<int>(fname.size()), fname.data());
+        return false;
+    }
+
+    const u32 cp = game_.meta.string_codepage();
+    SplashDialogParams params{};
+    params.is_image = true;
+    params.image_bitmap = std::move(bmp.value());
+    params.delay_ms = delay_ms;
+    params.bg_color_bgr = splash_color_ & 0xFFFFFFu;
+    params.scale = splash_scale_;
+    params.in_main_window = splash_main_;
+    params.fullscreen = splash_fullscreen_;
+    params.show_border = splash_border_;
+    params.caption_utf8 = codepage_to_utf8(splash_caption_, cp);
+    params.size_w = splash_size_w_ > 0 ? splash_size_w_ : 640;
+    params.size_h = splash_size_h_ > 0 ? splash_size_h_ : 480;
+    params.pos_x = splash_pos_x_;
+    params.pos_y = splash_pos_y_;
+    params.adapt = splash_adapt_;
+    params.stop_key = splash_stop_key_;
+    params.stop_mouse = splash_stop_mouse_;
+    params.close_button = splash_close_button_;
+
+    modal_dialogs_.begin_splash(params, Clock::now_us());
+    run_ui_dialog_modal(splash_cursor_);
+    return true;
+}
+
+bool Runner::splash_show_text_dialog(std::string_view fname, i32 delay_ms) {
+    auto bytes = vfs_.read_all_bytes(fname);
+    if (!bytes) {
+        GM_LOG_WARN("runtime", "splash_show_text: Text file not found: %.*s",
+                    static_cast<int>(fname.size()), fname.data());
+        return false;
+    }
+
+    const u32 cp = game_.meta.string_codepage();
+    const u32 bg_bgr = splash_color_ & 0xFFFFFFu;
+    const u32 r = bg_bgr & 0xFFu;
+    const u32 g = (bg_bgr >> 8u) & 0xFFu;
+    const u32 b = (bg_bgr >> 16u) & 0xFFu;
+    const u32 luma = (r * 77u + g * 150u + b * 29u) >> 8u;
+    const u32 default_fg_bgr = (luma < 128u) ? 0xFFFFFFu : 0x000000u;
+
+    const std::string_view raw(reinterpret_cast<const char*>(bytes.value().data()), bytes.value().size());
+    SplashDialogParams params{};
+    params.is_image = false;
+    params.text_doc = parse_rtf_or_plain_text(raw, cp, default_fg_bgr);
+    params.delay_ms = delay_ms;
+    params.bg_color_bgr = bg_bgr;
+    params.scale = splash_scale_;
+    params.in_main_window = splash_main_;
+    params.fullscreen = splash_fullscreen_;
+    params.show_border = splash_border_;
+    params.caption_utf8 = codepage_to_utf8(splash_caption_, cp);
+    params.size_w = splash_size_w_ > 0 ? splash_size_w_ : 640;
+    params.size_h = splash_size_h_ > 0 ? splash_size_h_ : 480;
+    params.pos_x = splash_pos_x_;
+    params.pos_y = splash_pos_y_;
+    params.adapt = splash_adapt_;
+    params.stop_key = splash_stop_key_;
+    params.stop_mouse = splash_stop_mouse_;
+    params.close_button = splash_close_button_;
+
+    modal_dialogs_.begin_splash(params, Clock::now_us());
+    run_ui_dialog_modal(splash_cursor_);
+    return true;
+}
+
+bool Runner::load_info_file(std::string_view fname) {
+    auto bytes = vfs_.read_all_bytes(fname);
+    if (!bytes) {
+        GM_LOG_WARN("runtime", "load_info: File not found: %.*s",
+                    static_cast<int>(fname.size()), fname.data());
+        return false;
+    }
+    game_.help.rtf_text.assign(reinterpret_cast<const char*>(bytes.value().data()), bytes.value().size());
+    return true;
+}
+
+void Runner::show_info_dialog() {
+    const u32 cp = game_.meta.string_codepage();
+    const u32 bg_bgr = game_.help.bg_color & 0xFFFFFFu;
+    const u32 r = bg_bgr & 0xFFu;
+    const u32 g = (bg_bgr >> 8u) & 0xFFu;
+    const u32 b = (bg_bgr >> 16u) & 0xFFu;
+    const u32 luma = (r * 77u + g * 150u + b * 29u) >> 8u;
+    const u32 default_fg_bgr = (luma < 128u) ? 0xFFFFFFu : 0x000000u;
+
+    GameInfoDialogParams params{};
+    params.doc = parse_rtf_or_plain_text(game_.help.rtf_text, cp, default_fg_bgr);
+    params.bg_color_bgr = bg_bgr;
+    params.caption_utf8 = game_.help.caption.empty()
+        ? std::string("Game Information")
+        : codepage_to_utf8(game_.help.caption, cp);
+    params.left = game_.help.left;
+    params.top = game_.help.top;
+    params.width = game_.help.width > 0 ? game_.help.width : 600;
+    params.height = game_.help.height > 0 ? game_.help.height : 400;
+    params.border = game_.help.border;
+    params.sizable = game_.help.sizable;
+    params.mimic = game_.help.mimic;
+
+    modal_dialogs_.begin_game_info(params);
+    run_ui_dialog_modal(true);
 }
 
 // ---------------------------------------------------------------------------

@@ -13,8 +13,14 @@ add_library(gm_graphics STATIC
     renderer2d.h
     renderer2d.cpp
     builtin_font.h
+    font_rasterizer.h
+    font_rasterizer.cpp
+    rtf_document.h
+    rtf_document.cpp
     message_dialog.h
     message_dialog.cpp
+    ui_dialogs.h
+    ui_dialogs.cpp
     touch_overlay.h
     touch_overlay.cpp
 )

@@ -15,7 +15,7 @@ namespace {
 
 inline constexpr u32 kSaveMagic = 0x56415347u; // "GSAV"
 inline constexpr i32 kGmSaveVersion = 540;     // Original GM 8.0 / 8.1 / 8.2 save version
-inline constexpr u32 kSaveFormatRev = 1u;      // Runner serialization revision
+inline constexpr u32 kSaveFormatRev = 2u;      // Runner serialization revision (rev 2 adds cursor_subimg)
 inline constexpr i32 kGlobalsMarker = 700;     // Original GM8 globals stream marker
 inline constexpr i32 kRoomMarker = 540;        // Original GM8 CRoom stream marker
 
@@ -628,6 +628,7 @@ bool Runner::save_game(std::string_view path) {
     w.write_bool(no_more_lives_armed_);
     w.write_bool(no_more_health_armed_);
     w.write_i32(cursor_sprite_);
+    w.write_i32(cursor_subimg_);
     w.write_bool(auto_draw_);
 
     // Global variables & globalvar declarations (gm81.exe.c:sub_5725CC).
@@ -723,10 +724,11 @@ bool Runner::load_game(std::string_view path) {
     if (!magic_res || !ver_res || !rev_res ||
         magic_res.value() != kSaveMagic ||
         ver_res.value() != kGmSaveVersion ||
-        rev_res.value() != kSaveFormatRev) {
+        (rev_res.value() != 1u && rev_res.value() != kSaveFormatRev)) {
         report_version_error();
         return false;
     }
+    const u32 file_rev = rev_res.value();
 
     auto gid_res = r.read_i32();
     if (!gid_res) {
@@ -750,6 +752,15 @@ bool Runner::load_game(std::string_view path) {
     auto armed_lives_res = r.read_u8();
     auto armed_health_res = r.read_u8();
     auto cursor_res = r.read_i32();
+    i32 loaded_cursor_subimg = 0;
+    if (file_rev >= 2u) {
+        auto cursor_sub_res = r.read_i32();
+        if (!cursor_sub_res) {
+            report_version_error();
+            return false;
+        }
+        loaded_cursor_subimg = cursor_sub_res.value();
+    }
     auto autodraw_res = r.read_u8();
     if (!cur_room_res || !trans_kind_res || !score_res || !lives_res || !health_res ||
         !armed_lives_res || !armed_health_res || !cursor_res || !autodraw_res) {
@@ -843,6 +854,7 @@ bool Runner::load_game(std::string_view path) {
     no_more_lives_armed_ = armed_lives_res.value() != 0u;
     no_more_health_armed_ = armed_health_res.value() != 0u;
     cursor_sprite_ = cursor_res.value();
+    cursor_subimg_ = loaded_cursor_subimg;
     auto_draw_ = autodraw_res.value() != 0u;
 
     instances_.clear();

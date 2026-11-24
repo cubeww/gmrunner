@@ -9,6 +9,7 @@
 #include "graphics/message_dialog.h"
 #include "graphics/renderer2d.h"
 #include "graphics/touch_overlay.h"
+#include "graphics/ui_dialogs.h"
 #include "loader/game_data.h"
 #include "platform/vfs.h"
 #include "platform/window.h"
@@ -313,6 +314,27 @@ public:
     [[nodiscard]] std::string get_string_dialog(std::string_view text, std::string_view def);
     [[nodiscard]] f64 get_integer_dialog(std::string_view text, f64 def);
 
+    // Native file & directory picker dialogs (SDL3)
+    [[nodiscard]] std::string get_open_filename_dialog(std::string_view filter, std::string_view fname);
+    [[nodiscard]] std::string get_save_filename_dialog(std::string_view filter, std::string_view fname);
+    [[nodiscard]] std::string get_directory_dialog(std::string_view dname);
+    [[nodiscard]] std::string get_directory_alt_dialog(std::string_view capt, std::string_view root);
+
+    // Self-drawn GM8 modal dialogs (Highscore, Menu, ColorPicker, Splash, GameInfo)
+    void highscore_clear();
+    i32 highscore_add_entry(std::string_view name, f64 score);
+    void highscore_show_dialog(f64 score_val);
+    void highscore_add_current_dialog();
+    [[nodiscard]] RValue show_menu_dialog(
+        std::string_view items_str,
+        const RValue& default_val,
+        std::optional<std::pair<i32, i32>> screen_pos = std::nullopt);
+    [[nodiscard]] i32 get_color_dialog(i32 def_col);
+    bool splash_show_image_dialog(std::string_view fname, i32 delay_ms);
+    bool splash_show_text_dialog(std::string_view fname, i32 delay_ms);
+    void show_info_dialog();
+    bool load_info_file(std::string_view fname);
+
     // Dynamic asset & event mutation helpers
     static void apply_removeback_and_smooth(Bitmap32& bmp, bool removeback, bool smooth);
     static void rebuild_sprite_masks(SpriteData& sp, i32 alpha_tolerance = 0, i32 bbox_mode = 0,
@@ -418,6 +440,7 @@ public:
     i32 transition_kind_ = 0;
     i32 transition_steps_ = 80;
     i32 cursor_sprite_ = -1;
+    i32 cursor_subimg_ = 0;
     i32 window_cursor_ = 0;
     u32 window_color_ = 0;
     bool auto_draw_ = true;
@@ -462,16 +485,16 @@ public:
     std::string highscore_font_name_ = "Arial";
     i32 highscore_font_size_ = 12;
     i32 highscore_font_style_ = 0;
-    std::string highscore_caption_ = "Highscores";
+    std::string highscore_caption_ = "Top Ten Players";
     std::string highscore_nobody_ = "<nobody>";
-    std::string highscore_escape_ = "Press <Escape> to close";
+    std::string highscore_escape_ = "press <Escape> to close";
 
     // Splash screen settings
     std::string splash_caption_;
     bool splash_fullscreen_ = false;
     bool splash_border_ = true;
-    i32 splash_size_w_ = 0;
-    i32 splash_size_h_ = 0;
+    i32 splash_size_w_ = 640;
+    i32 splash_size_h_ = 480;
     i32 splash_pos_x_ = -1;
     i32 splash_pos_y_ = -1;
     bool splash_adapt_ = true;
@@ -582,6 +605,7 @@ private:
     }
     void render_view(i32 view_idx, f32 vx, f32 vy, f32 vw, f32 vh, f32 angle, i32 px, i32 py, i32 pw, i32 ph);
     void run_message_dialog_modal(bool with_input);
+    void run_ui_dialog_modal(bool show_cursor);
     [[nodiscard]] std::string decode_dialog_string(std::string_view raw, u8 charset) const;
     [[nodiscard]] std::string encode_dialog_string(std::string_view utf8, u8 charset) const;
 
@@ -599,6 +623,7 @@ private:
     std::unique_ptr<GmlVm> vm_;
     Renderer2D renderer_;
     MessageDialog message_dialog_;
+    GmModalDialogs modal_dialogs_;
     TouchOverlay touch_overlay_;
     AudioEngine audio_;
     ExtensionRegistry extensions_;

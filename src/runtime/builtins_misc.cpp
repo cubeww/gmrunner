@@ -35,16 +35,7 @@ void Runner::register_builtins_misc() {
     // Highscore Configuration & Legacy Dialogs
     // -----------------------------------------------------------------------
     register_builtin("highscore_add_current", [](Runner& r, i32, i32, std::span<const RValue>) {
-        const f64 sc = r.score_;
-        for (usize i = 0; i < r.highscores_.size(); ++i) {
-            if (sc > r.highscores_[i].score) {
-                for (usize j = r.highscores_.size() - 1; j > i; --j) {
-                    r.highscores_[j] = r.highscores_[j - 1];
-                }
-                r.highscores_[i] = HighscoreEntry{"Player", sc};
-                break;
-            }
-        }
+        r.highscore_add_current_dialog();
         return RValue(0.0);
     });
     register_builtin("highscore_set_background", [](Runner& r, i32, i32, std::span<const RValue> a) {
@@ -73,40 +64,59 @@ void Runner::register_builtins_misc() {
         r.highscore_escape_ = std::string(arg_str(a, 2));
         return RValue(0.0);
     });
-    register_builtin("highscore_show_ext", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
+    register_builtin("highscore_show_ext", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        // Exact GM8 gm81.exe.c:sub_643958: update style fields then show table for numb.
+        const f64 numb = arg_real(a, 0, -1.0);
+        r.highscore_bg_ = arg_i32(a, 1, -1);
+        r.highscore_border_ = arg_bool(a, 2, true);
+        r.highscore_col_new_ = static_cast<u32>(arg_i32(a, 3)) & 0xFFFFFFu;
+        r.highscore_col_other_ = static_cast<u32>(arg_i32(a, 4)) & 0xFFFFFFu;
+        r.highscore_font_name_ = std::string(arg_str(a, 5));
+        r.highscore_font_size_ = arg_i32(a, 6, 12);
+        r.highscore_show_dialog(numb);
+        return RValue(0.0);
+    });
 
     register_builtin("message_text_charset", [](Runner& r, i32, i32, std::span<const RValue> a) {
         r.message_dialog().set_charset(arg_i32(a, 0, 0), static_cast<u8>(arg_i32(a, 1, 1) & 0xFF));
         return RValue(0.0);
     });
-    register_builtin("show_menu", [](Runner&, i32, i32, std::span<const RValue> a) {
-        return RValue(arg_i32(a, 1, 0));
+    register_builtin("show_menu", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        const RValue def = (a.size() > 1) ? a[1] : RValue(0.0);
+        return r.show_menu_dialog(arg_str(a, 0), def, std::nullopt);
     });
-    register_builtin("show_menu_pos", [](Runner&, i32, i32, std::span<const RValue> a) {
-        return RValue(arg_i32(a, 3, 0));
+    register_builtin("show_menu_pos", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        const RValue def = (a.size() > 3) ? a[3] : RValue(0.0);
+        return r.show_menu_dialog(arg_str(a, 2), def, std::make_pair(arg_i32(a, 0), arg_i32(a, 1)));
     });
-    register_builtin("get_color", [](Runner&, i32, i32, std::span<const RValue> a) {
-        return RValue(arg_i32(a, 0, 0));
+    register_builtin("get_color", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        return RValue(r.get_color_dialog(arg_i32(a, 0, 0)));
     });
-    register_builtin("get_open_filename", [](Runner&, i32, i32, std::span<const RValue>) {
-        return RValue(std::string{});
+    register_builtin("get_open_filename", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        return RValue(r.get_open_filename_dialog(arg_str(a, 0), arg_str(a, 1)));
     });
-    register_builtin("get_save_filename", [](Runner&, i32, i32, std::span<const RValue>) {
-        return RValue(std::string{});
+    register_builtin("get_save_filename", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        return RValue(r.get_save_filename_dialog(arg_str(a, 0), arg_str(a, 1)));
     });
-    register_builtin("get_directory", [](Runner&, i32, i32, std::span<const RValue>) {
-        return RValue(std::string{});
+    register_builtin("get_directory", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        return RValue(r.get_directory_dialog(arg_str(a, 0)));
     });
-    register_builtin("get_directory_alt", [](Runner&, i32, i32, std::span<const RValue>) {
-        return RValue(std::string{});
+    register_builtin("get_directory_alt", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        return RValue(r.get_directory_alt_dialog(arg_str(a, 0), arg_str(a, 1)));
     });
 
     // -----------------------------------------------------------------------
     // Splash Screens & Legacy Media Helpers
     // -----------------------------------------------------------------------
     register_builtin("splash_show_video", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
-    register_builtin("splash_show_text", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
-    register_builtin("splash_show_image", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
+    register_builtin("splash_show_text", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        (void)r.splash_show_text_dialog(arg_str(a, 0), arg_i32(a, 1, 0));
+        return RValue(0.0);
+    });
+    register_builtin("splash_show_image", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        (void)r.splash_show_image_dialog(arg_str(a, 0), arg_i32(a, 1, 0));
+        return RValue(0.0);
+    });
     register_builtin("splash_show_web", [](Runner&, i32, i32, std::span<const RValue> a) {
         (void)PlatformWindow::open_url(arg_str(a, 0));
         return RValue(0.0);
@@ -126,9 +136,22 @@ void Runner::register_builtins_misc() {
     register_builtin("splash_set_stop_key", [](Runner& r, i32, i32, std::span<const RValue> a) { r.splash_stop_key_ = arg_bool(a, 0, true); return RValue(0.0); });
     register_builtin("splash_set_stop_mouse", [](Runner& r, i32, i32, std::span<const RValue> a) { r.splash_stop_mouse_ = arg_bool(a, 0, true); return RValue(0.0); });
     register_builtin("splash_set_close_button", [](Runner& r, i32, i32, std::span<const RValue> a) { r.splash_close_button_ = arg_bool(a, 0, true); return RValue(0.0); });
-    register_builtin("show_image", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
+    register_builtin("show_image", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        // Exact GM8 gm81.exe.c:sub_643238: show_image(fname, full, delay)
+        r.splash_fullscreen_ = (arg_i32(a, 1, 0) != 0);
+        r.splash_main_ = !r.splash_fullscreen_;
+        (void)r.splash_show_image_dialog(arg_str(a, 0), arg_i32(a, 2, 0));
+        return RValue(0.0);
+    });
     register_builtin("show_video", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
-    register_builtin("show_text", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
+    register_builtin("show_text", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        // Exact GM8 gm81.exe.c:sub_643420: show_text(fname, full, backcol, delay)
+        r.splash_fullscreen_ = (arg_i32(a, 1, 0) != 0);
+        r.splash_main_ = !r.splash_fullscreen_;
+        r.splash_color_ = static_cast<u32>(arg_i32(a, 2, 0)) & 0xFFFFFFu;
+        (void)r.splash_show_text_dialog(arg_str(a, 0), arg_i32(a, 3, 0));
+        return RValue(0.0);
+    });
 
     // -----------------------------------------------------------------------
     // Legacy DirectPlay Multiplayer (mplay_*)

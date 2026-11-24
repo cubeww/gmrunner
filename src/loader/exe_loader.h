@@ -24,6 +24,10 @@ struct SpriteMaskSettings {
 // Once the compressed stream opens, even an unsupported version clears the old sprite.
 [[nodiscard]] Result<SpriteMaskSettings> read_gmspr(std::span<const u8> bytes, SpriteData& sprite);
 
+// External GM8 background (.gmbck) container loader (gm81.exe.c:CBackground.LoadFromBackgroundFile).
+// Once the compressed stream opens, even an unsupported version clears the old background.
+[[nodiscard]] Result<void> read_gmbck(std::span<const u8> bytes, BackgroundData& background);
+
 class ExeLoader {
 public:
     [[nodiscard]] static Result<GameData> load_from_bytes(

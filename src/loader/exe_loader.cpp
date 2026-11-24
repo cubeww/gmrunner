@@ -1401,6 +1401,22 @@ usize count_existing(const std::vector<T>& items) noexcept {
     return n;
 }
 
+// GM borrows adjacent RGB for transparent texels so filtering preserves edge colors (gm81.exe.c:sub_56E4F8).
+void bleed_transparent_rgb(Bitmap32& bmp) noexcept {
+    if (bmp.width <= 0 || bmp.height <= 0 || bmp.bgra.empty()) return;
+    const usize stride = static_cast<usize>(bmp.width) * 4u;
+    for (usize p = 0; p + 3u < bmp.bgra.size(); p += 4u) {
+        if (bmp.bgra[p + 3] != 0) continue;
+        const usize col = p % stride;
+        usize neighbor = p;
+        if (col > 0 && bmp.bgra[p - 1] != 0) neighbor = p - 4;
+        else if (col + 4 < stride && bmp.bgra[p + 7] != 0) neighbor = p + 4;
+        else if (p >= stride && bmp.bgra[p - stride + 3] != 0) neighbor = p - stride;
+        else if (p + stride < bmp.bgra.size() && bmp.bgra[p + stride + 3] != 0) neighbor = p + stride;
+        if (neighbor != p) std::copy_n(bmp.bgra.data() + neighbor, 3, bmp.bgra.data() + p);
+    }
+}
+
 } // namespace
 
 Result<SpriteMaskSettings> read_gmspr(std::span<const u8> bytes, SpriteData& sprite) {
@@ -1431,20 +1447,8 @@ Result<SpriteMaskSettings> read_gmspr(std::span<const u8> bytes, SpriteData& spr
         if (!bitmap_version || bitmap_version.value() != 800) return Error{"Invalid GMSPR bitmap version"};
         auto frame = read_bitmap32_v800(r);
         if (!frame) return frame.error();
-        auto& bmp = frame.value();
-        // GM borrows adjacent RGB for transparent texels so filtering preserves edge colors.
-        const usize stride = static_cast<usize>(bmp.width) * 4u;
-        for (usize p = 0; p < bmp.bgra.size(); p += 4u) {
-            if (bmp.bgra[p + 3] != 0) continue;
-            const usize col = p % stride;
-            usize neighbor = p;
-            if (col > 0 && bmp.bgra[p - 1] != 0) neighbor = p - 4;
-            else if (col + 4 < stride && bmp.bgra[p + 7] != 0) neighbor = p + 4;
-            else if (p >= stride && bmp.bgra[p - stride + 3] != 0) neighbor = p - stride;
-            else if (p + stride < bmp.bgra.size() && bmp.bgra[p + stride + 3] != 0) neighbor = p + stride;
-            if (neighbor != p) std::copy_n(bmp.bgra.data() + neighbor, 3, bmp.bgra.data() + p);
-        }
-        frames.push_back(std::move(bmp));
+        bleed_transparent_rgb(frame.value());
+        frames.push_back(std::move(frame.value()));
     }
     auto shape = r.read_i32();
     auto tolerance = r.read_i32();
@@ -1471,6 +1475,48 @@ Result<SpriteMaskSettings> read_gmspr(std::span<const u8> bytes, SpriteData& spr
     sprite.bbox_top = top.value();
     sprite.bbox_bottom = bottom.value();
     return SpriteMaskSettings{tolerance.value(), mode.value()};
+}
+
+Result<void> read_gmbck(std::span<const u8> bytes, BackgroundData& background) {
+    BinaryReader outer(bytes);
+    auto magic = outer.read_u32();
+    if (!magic || magic.value() != 1234321u) return Error{"Invalid GMBCK header"};
+    auto data = outer.read_compressed_stream();
+    if (!data) return data.error();
+
+    BackgroundData empty{};
+    empty.exists = true;
+    empty.name = std::move(background.name);
+    background = std::move(empty);
+
+    BinaryReader r(data.value());
+    auto version = r.read_i32();
+    if (!version || version.value() != 710) return Error{"Unsupported GMBCK version"};
+
+    auto is_tileset = r.read_bool32();
+    auto tile_w = r.read_i32();
+    auto tile_h = r.read_i32();
+    auto tile_hoff = r.read_i32();
+    auto tile_voff = r.read_i32();
+    auto tile_hsep = r.read_i32();
+    auto tile_vsep = r.read_i32();
+    if (!is_tileset || !tile_w || !tile_h || !tile_hoff || !tile_voff || !tile_hsep || !tile_vsep) {
+        return Error{"Truncated GMBCK header"};
+    }
+
+    auto bitmap_version = r.read_i32();
+    if (!bitmap_version || bitmap_version.value() != 800) {
+        return Error{"Invalid GMBCK bitmap version"};
+    }
+    auto bmp = read_bitmap32_v800(r);
+    if (!bmp) return bmp.error();
+    bleed_transparent_rgb(bmp.value());
+
+    background.is_tileset = is_tileset.value();
+    background.width = bmp.value().width;
+    background.height = bmp.value().height;
+    background.bitmap = std::move(bmp.value());
+    return Result<void>::success();
 }
 
 Result<GameData> ExeLoader::load_from_bytes(std::vector<u8> exe_bytes, const LoadOptions& options) {

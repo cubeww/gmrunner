@@ -1015,7 +1015,7 @@ void Runner::register_builtins_graphics() {
     });
     register_builtin("window_set_cursor", [](Runner& r, i32, i32, std::span<const RValue> a) {
         r.window_cursor_ = arg_i32(a, 0, 0);
-        r.window().set_cursor_visible(r.window_cursor_ != -1);
+        r.window().set_cursor(r.window_cursor_);
         return RValue(0.0);
     });
     register_builtin("window_get_cursor", [](Runner& r, i32, i32, std::span<const RValue>) { return RValue(r.window_cursor_); });

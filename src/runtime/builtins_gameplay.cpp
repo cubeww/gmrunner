@@ -2,6 +2,7 @@
 
 #include "base/log.h"
 #include "base/math.h"
+#include "graphics/font_rasterizer.h"
 #include "loader/exe_loader.h"
 #include "runtime/collision.h"
 
@@ -1185,9 +1186,17 @@ void Runner::register_builtins_gameplay() {
     register_builtin("keyboard_set_numlock", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
     register_builtin("keyboard_set_capslock", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
     register_builtin("keyboard_set_scrolllock", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
-    register_builtin("keyboard_set_map", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
-    register_builtin("keyboard_get_map", [](Runner&, i32, i32, std::span<const RValue> a) { return RValue(arg_i32(a, 0)); });
-    register_builtin("keyboard_unset_map", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
+    register_builtin("keyboard_set_map", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        r.window().input_mut().set_key_map(arg_i32(a, 0), arg_i32(a, 1));
+        return RValue(0.0);
+    });
+    register_builtin("keyboard_get_map", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        return RValue(r.window().input().get_key_map(arg_i32(a, 0)));
+    });
+    register_builtin("keyboard_unset_map", [](Runner& r, i32, i32, std::span<const RValue>) {
+        r.window().input_mut().reset_key_map();
+        return RValue(0.0);
+    });
     register_builtin("mouse_check_button", [](Runner& r, i32, i32, std::span<const RValue> a) {
         return RValue(check_mouse_array(r.window().input().mouse_down, arg_i32(a, 0)));
     });
@@ -2235,24 +2244,30 @@ void Runner::register_builtins_gameplay() {
     register_builtin("background_add_background", [](Runner& r, i32, i32, std::span<const RValue> a) {
         auto bytes = r.vfs().read_all_bytes(arg_str(a, 0));
         if (!bytes) return RValue(-1);
-        auto bmp = Renderer2D::decode_image_to_bgra(bytes.value());
-        if (!bmp) return RValue(-1);
-        return RValue(r.create_background_from_bitmap(std::move(bmp.value()), false, false));
+        BackgroundData bg{};
+        if (!read_gmbck(bytes.value(), bg)) return RValue(-1);
+        const usize id = r.game().backgrounds.size();
+        bg.name = "__newbackground" + std::to_string(id);
+        r.game().backgrounds.push_back(std::move(bg));
+        r.renderer().upload_background(id, r.game().backgrounds[id]);
+        return RValue(static_cast<i32>(id));
     });
-    register_builtin("background_replace_background", [](Runner& r, i32, i32, std::span<const RValue> a) {
+    register_builtin("background_replace_background", [](Runner& r, i32, i32, std::span<const RValue> a) -> Result<RValue> {
         const i32 id = arg_i32(a, 0, -1);
-        if (id < 0 || static_cast<usize>(id) >= r.game().backgrounds.size()) return RValue(false);
+        auto& backgrounds = r.game().backgrounds;
+        if (id < 0 || static_cast<usize>(id) >= backgrounds.size() || !backgrounds[static_cast<usize>(id)].exists) {
+            return Error{"Trying to replace non-existing background."};
+        }
         auto bytes = r.vfs().read_all_bytes(arg_str(a, 1));
         if (!bytes) return RValue(false);
-        auto bmp = Renderer2D::decode_image_to_bgra(bytes.value());
-        if (!bmp) return RValue(false);
-        auto& bg = r.game().backgrounds[static_cast<usize>(id)];
-        bg.exists = true;
-        bg.width = bmp.value().width;
-        bg.height = bmp.value().height;
-        bg.bitmap = std::move(bmp.value());
-        r.renderer().upload_background(static_cast<usize>(id), bg);
-        return RValue(true);
+        auto& bg = backgrounds[static_cast<usize>(id)];
+        const bool had_bitmap = !bg.bitmap.bgra.empty();
+        const bool loaded = static_cast<bool>(read_gmbck(bytes.value(), bg));
+        if (loaded || (had_bitmap && bg.bitmap.bgra.empty())) {
+            r.renderer().flush();
+            r.renderer().upload_background(static_cast<usize>(id), bg);
+        }
+        return RValue(loaded);
     });
     register_builtin("background_set_alpha_from_background", [](Runner& r, i32, i32, std::span<const RValue> a) {
         const i32 dst = arg_i32(a, 0, -1), src = arg_i32(a, 1, -1);
@@ -2330,29 +2345,40 @@ void Runner::register_builtins_gameplay() {
     register_builtin("font_add", [](Runner& r, i32, i32, std::span<const RValue> a) {
         FontData f{};
         f.exists = true;
+        const usize id = r.game().fonts.size();
+        f.name = "__newfont" + std::to_string(id);
         f.font_name = std::string(arg_str(a, 0));
         f.size = std::max(1, arg_i32(a, 1, 12));
         f.bold = arg_bool(a, 2, false);
         f.italic = arg_bool(a, 3, false);
-        f.first = arg_i32(a, 4, 32);
-        f.last = arg_i32(a, 5, 127);
-        const usize id = r.game().fonts.size();
+        f.first = std::clamp(arg_i32(a, 4, 32), 0, 255);
+        f.last = std::clamp(arg_i32(a, 5, 127), 0, 255);
+        f.charset = 1;
+        f.antialias = 3;
+        (void)rasterize_gm_font(f, r.game().meta.string_codepage());
         r.game().fonts.push_back(std::move(f));
+        r.renderer().upload_font(id, r.game().fonts[id], r.version_mode());
         return RValue(static_cast<i32>(id));
     });
-    register_builtin("font_replace", [](Runner& r, i32, i32, std::span<const RValue> a) {
+    register_builtin("font_replace", [](Runner& r, i32, i32, std::span<const RValue> a) -> Result<RValue> {
         const i32 id = arg_i32(a, 0, -1);
-        if (id >= 0 && static_cast<usize>(id) < r.game().fonts.size()) {
-            auto& f = r.game().fonts[static_cast<usize>(id)];
-            f.exists = true;
-            f.font_name = std::string(arg_str(a, 1));
-            f.size = std::max(1, arg_i32(a, 2, 12));
-            f.bold = arg_bool(a, 3, false);
-            f.italic = arg_bool(a, 4, false);
-            f.first = arg_i32(a, 5, 32);
-            f.last = arg_i32(a, 6, 127);
+        if (id < 0 || static_cast<usize>(id) >= r.game().fonts.size() || !r.game().fonts[static_cast<usize>(id)].exists) {
+            return Error{"Trying to replace non-existing font."};
         }
-        return RValue(0.0);
+        auto& f = r.game().fonts[static_cast<usize>(id)];
+        f.exists = true;
+        f.font_name = std::string(arg_str(a, 1));
+        f.size = std::max(1, arg_i32(a, 2, 12));
+        f.bold = arg_bool(a, 3, false);
+        f.italic = arg_bool(a, 4, false);
+        f.first = std::clamp(arg_i32(a, 5, 32), 0, 255);
+        f.last = std::clamp(arg_i32(a, 6, 127), 0, 255);
+        f.charset = 1;
+        f.antialias = 3;
+        (void)rasterize_gm_font(f, r.game().meta.string_codepage());
+        r.renderer().flush();
+        r.renderer().upload_font(static_cast<usize>(id), f, r.version_mode());
+        return RValue(true);
     });
     register_builtin("font_add_sprite", [](Runner& r, i32, i32, std::span<const RValue> a) {
         FontData f{};

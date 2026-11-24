@@ -703,8 +703,8 @@ void Renderer2D::upload_font(usize font_idx, const FontData& font, VersionMode v
     }
     if (fonts_[font_idx].texture.valid()) {
         device_->destroy_texture(fonts_[font_idx].texture);
-        fonts_[font_idx] = {};
     }
+    fonts_[font_idx] = {};
 
     auto& fg = fonts_[font_idx];
     fg.tex_width = font.tex_width;

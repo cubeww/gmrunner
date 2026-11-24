@@ -6,6 +6,9 @@
 #include <SDL3/SDL.h>
 
 #include <algorithm>
+#include <atomic>
+#include <filesystem>
+#include <mutex>
 
 #if defined(__EMSCRIPTEN__)
 #include <emscripten/emscripten.h>
@@ -134,7 +137,7 @@ Result<void> PlatformWindow::create(const WindowConfig& config) {
     stay_on_top_ = false;
     visible_ = true;
     set_vsync(config.vsync);
-    set_cursor_visible(config.show_cursor);
+    set_cursor(config.show_cursor ? 0 : -1);
 #if !defined(__ANDROID__)
     // Enable UTF-8 text input events for keyboard_string / keyboard_lastchar on desktop & web.
     SDL_StartTextInput(window_);
@@ -148,6 +151,13 @@ Result<void> PlatformWindow::create(const WindowConfig& config) {
 void PlatformWindow::destroy() noexcept {
     pending_windowed_size_.reset();
     pending_windowed_position_.reset();
+    for (SDL_Cursor*& cur : system_cursors_) {
+        if (cur) {
+            SDL_DestroyCursor(cur);
+            cur = nullptr;
+        }
+    }
+    current_cursor_ = 0;
     if (gl_context_) {
         SDL_GL_DestroyContext(gl_context_);
         gl_context_ = nullptr;
@@ -246,10 +256,32 @@ WindowEvents PlatformWindow::poll_events_impl(bool clear_edges) {
         input_.begin_frame();
     }
 
-    auto update_aggregate_modifiers = [this]() {
-        input_.key_down[16] = input_.key_down[160] || input_.key_down[161]; // vk_shift
-        input_.key_down[17] = input_.key_down[162] || input_.key_down[163]; // vk_control
-        input_.key_down[18] = input_.key_down[164] || input_.key_down[165]; // vk_alt
+    auto update_aggregate_modifiers = [this](u8 vk, bool pressed) {
+        if (vk == 160 || vk == 161) {
+            if (pressed) {
+                if (!input_.key_down[16]) input_.key_pressed[16] = true;
+                input_.key_down[16] = true;
+            } else if (!input_.key_down[160] && !input_.key_down[161] && input_.key_down[16]) {
+                input_.key_down[16] = false;
+                input_.key_released[16] = true;
+            }
+        } else if (vk == 162 || vk == 163) {
+            if (pressed) {
+                if (!input_.key_down[17]) input_.key_pressed[17] = true;
+                input_.key_down[17] = true;
+            } else if (!input_.key_down[162] && !input_.key_down[163] && input_.key_down[17]) {
+                input_.key_down[17] = false;
+                input_.key_released[17] = true;
+            }
+        } else if (vk == 164 || vk == 165) {
+            if (pressed) {
+                if (!input_.key_down[18]) input_.key_pressed[18] = true;
+                input_.key_down[18] = true;
+            } else if (!input_.key_down[164] && !input_.key_down[165] && input_.key_down[18]) {
+                input_.key_down[18] = false;
+                input_.key_released[18] = true;
+            }
+        }
     };
 
 #if defined(__EMSCRIPTEN__)
@@ -324,42 +356,40 @@ WindowEvents PlatformWindow::poll_events_impl(bool clear_edges) {
 
             case SDL_EVENT_KEY_DOWN: {
                 out.any_user_gesture = true;
-                const u8 vk = sdl_scancode_to_gm_vk(static_cast<i32>(ev.key.scancode));
-                if (vk != 0 && !ev.key.repeat) {
-                    if (!input_.key_down[vk]) {
-                        input_.key_pressed[vk] = true;
-                    }
-                    input_.key_down[vk] = true;
-                    input_.last_key = vk;
-                    input_.current_key = vk;
+                const u8 raw_vk = sdl_scancode_to_gm_vk(static_cast<i32>(ev.key.scancode));
+                if (raw_vk != 0 && !ev.key.repeat) {
+                    const i32 mapped = input_.get_key_map(raw_vk);
+                    if (mapped >= 0 && mapped < 256) {
+                        const u8 vk = static_cast<u8>(mapped);
+                        if (!input_.key_down[vk]) {
+                            input_.key_pressed[vk] = true;
+                        }
+                        input_.key_down[vk] = true;
+                        input_.last_key = vk;
+                        input_.current_key = vk;
 
-                    // Mirror aggregate modifier press edges (vk_shift=16, vk_control=17, vk_alt=18).
-                    if (vk == 160 || vk == 161) input_.key_pressed[16] = true;
-                    if (vk == 162 || vk == 163) input_.key_pressed[17] = true;
-                    if (vk == 164 || vk == 165) input_.key_pressed[18] = true;
-                    update_aggregate_modifiers();
+                        // Mirror aggregate modifier press edges (vk_shift=16, vk_control=17, vk_alt=18).
+                        update_aggregate_modifiers(vk, true);
+                    }
                 }
                 break;
             }
 
             case SDL_EVENT_KEY_UP: {
-                const u8 vk = sdl_scancode_to_gm_vk(static_cast<i32>(ev.key.scancode));
-                if (vk != 0) {
-                    if (input_.key_down[vk]) {
-                        input_.key_released[vk] = true;
+                const u8 raw_vk = sdl_scancode_to_gm_vk(static_cast<i32>(ev.key.scancode));
+                if (raw_vk != 0) {
+                    const i32 mapped = input_.get_key_map(raw_vk);
+                    if (mapped >= 0 && mapped < 256) {
+                        const u8 vk = static_cast<u8>(mapped);
+                        if (input_.key_down[vk]) {
+                            input_.key_released[vk] = true;
+                        }
+                        input_.key_down[vk] = false;
+                        if (input_.current_key == vk) {
+                            input_.current_key = 0;
+                        }
+                        update_aggregate_modifiers(vk, false);
                     }
-                    input_.key_down[vk] = false;
-                    if (input_.current_key == vk) {
-                        input_.current_key = 0;
-                    }
-
-                    const bool prev_shift = input_.key_down[16];
-                    const bool prev_ctrl = input_.key_down[17];
-                    const bool prev_alt = input_.key_down[18];
-                    update_aggregate_modifiers();
-                    if (prev_shift && !input_.key_down[16]) input_.key_released[16] = true;
-                    if (prev_ctrl && !input_.key_down[17]) input_.key_released[17] = true;
-                    if (prev_alt && !input_.key_down[18]) input_.key_released[18] = true;
                 }
                 break;
             }
@@ -606,6 +636,7 @@ void PlatformWindow::poll_modal_events(ModalInputFrame& out) {
                 out.mouse_x = modal_mouse_x_;
                 out.mouse_y = modal_mouse_y_;
                 out.pointer_is_touch = modal_pointer_is_touch_;
+                out.any_mouse_pressed = true;
                 if (ev.button.button == SDL_BUTTON_LEFT) {
                     modal_left_down_ = true;
                     out.left_down = true;
@@ -613,6 +644,10 @@ void PlatformWindow::poll_modal_events(ModalInputFrame& out) {
                     if (ev.button.clicks >= 2) {
                         out.left_double_click = true;
                     }
+                } else if (ev.button.button == SDL_BUTTON_RIGHT) {
+                    out.right_pressed = true;
+                } else if (ev.button.button == SDL_BUTTON_MIDDLE) {
+                    out.middle_pressed = true;
                 }
                 break;
 
@@ -630,6 +665,10 @@ void PlatformWindow::poll_modal_events(ModalInputFrame& out) {
                 }
                 break;
 
+            case SDL_EVENT_MOUSE_WHEEL:
+                out.wheel_y += ev.wheel.y;
+                break;
+
             case SDL_EVENT_FINGER_DOWN: {
                 out.window_events.any_user_gesture = true;
                 const i64 fid = static_cast<i64>(ev.tfinger.fingerID);
@@ -644,6 +683,7 @@ void PlatformWindow::poll_modal_events(ModalInputFrame& out) {
                     out.mouse_moved = true;
                     out.left_down = true;
                     out.left_pressed = true;
+                    out.any_mouse_pressed = true;
                     out.pointer_is_touch = true;
                 }
                 break;
@@ -772,6 +812,79 @@ void PlatformWindow::set_cursor_visible(bool visible) {
     } else {
         SDL_HideCursor();
     }
+}
+
+void PlatformWindow::set_cursor(i32 gm_cursor) {
+    current_cursor_ = gm_cursor;
+    if (gm_cursor == -1) { // cr_none
+        set_cursor_visible(false);
+        return;
+    }
+
+    SDL_SystemCursor sys_id = SDL_SYSTEM_CURSOR_DEFAULT;
+    switch (gm_cursor) {
+        case 0:   // cr_default
+        case -2:  // cr_arrow / cr_arrrow
+        case -12: // cr_drag
+        case -16: // cr_multidrag
+        case -20: // cr_help
+            sys_id = SDL_SYSTEM_CURSOR_DEFAULT;
+            break;
+        case -3:  // cr_cross
+            sys_id = SDL_SYSTEM_CURSOR_CROSSHAIR;
+            break;
+        case -4:  // cr_beam
+            sys_id = SDL_SYSTEM_CURSOR_TEXT;
+            break;
+        case -6:  // cr_size_nesw
+            sys_id = SDL_SYSTEM_CURSOR_NESW_RESIZE;
+            break;
+        case -7:  // cr_size_ns
+        case -14: // cr_hsplit
+            sys_id = SDL_SYSTEM_CURSOR_NS_RESIZE;
+            break;
+        case -8:  // cr_size_nwse
+            sys_id = SDL_SYSTEM_CURSOR_NWSE_RESIZE;
+            break;
+        case -9:  // cr_size_we
+        case -15: // cr_vsplit
+            sys_id = SDL_SYSTEM_CURSOR_EW_RESIZE;
+            break;
+        case -10: // cr_uparrow
+            sys_id = SDL_SYSTEM_CURSOR_N_RESIZE;
+            break;
+        case -11: // cr_hourglass
+        case -17: // cr_sqlwait
+            sys_id = SDL_SYSTEM_CURSOR_WAIT;
+            break;
+        case -13: // cr_nodrop
+        case -18: // cr_no
+            sys_id = SDL_SYSTEM_CURSOR_NOT_ALLOWED;
+            break;
+        case -19: // cr_appstart
+            sys_id = SDL_SYSTEM_CURSOR_PROGRESS;
+            break;
+        case -21: // cr_handpoint
+            sys_id = SDL_SYSTEM_CURSOR_POINTER;
+            break;
+        case -22: // cr_size_all
+            sys_id = SDL_SYSTEM_CURSOR_MOVE;
+            break;
+        default:
+            sys_id = SDL_SYSTEM_CURSOR_DEFAULT;
+            break;
+    }
+
+    const usize slot = static_cast<usize>(sys_id);
+    if (slot < system_cursors_.size()) {
+        if (!system_cursors_[slot]) {
+            system_cursors_[slot] = SDL_CreateSystemCursor(sys_id);
+        }
+        if (system_cursors_[slot]) {
+            SDL_SetCursor(system_cursors_[slot]);
+        }
+    }
+    set_cursor_visible(true);
 }
 
 f32 PlatformWindow::display_scale() const noexcept {
@@ -1179,6 +1292,195 @@ std::string PlatformWindow::prompt_string(std::string_view prompt, std::string_v
     (void)prompt;
     return std::string(default_val);
 #endif
+}
+
+namespace {
+
+#if !defined(__EMSCRIPTEN__)
+struct ParsedFileFilters {
+    std::vector<std::pair<std::string, std::string>> owned;
+    std::vector<SDL_DialogFileFilter> sdl;
+};
+
+std::string sanitize_gm_mask_to_sdl_pattern(std::string_view mask) {
+    std::string out;
+    usize pos = 0;
+    while (pos <= mask.size()) {
+        const usize sep = mask.find(';', pos);
+        std::string_view tok = (sep == std::string_view::npos) ? mask.substr(pos) : mask.substr(pos, sep - pos);
+        while (!tok.empty() && (tok.front() == ' ' || tok.front() == '\t')) tok.remove_prefix(1);
+        while (!tok.empty() && (tok.back() == ' ' || tok.back() == '\t')) tok.remove_suffix(1);
+
+        if (tok == "*" || tok == "*.*" || tok.ends_with(".*")) {
+            return "*";
+        }
+        if (tok.starts_with("*.")) {
+            tok.remove_prefix(2);
+        } else if (tok.starts_with('.')) {
+            tok.remove_prefix(1);
+        } else if (const usize dot = tok.rfind('.'); dot != std::string_view::npos) {
+            tok.remove_prefix(dot + 1);
+        }
+
+        std::string ext;
+        for (char c : tok) {
+            const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                            (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.';
+            if (ok) ext.push_back(c);
+        }
+        while (!ext.empty() && ext.front() == '.') ext.erase(ext.begin());
+        if (!ext.empty()) {
+            if (!out.empty()) out.push_back(';');
+            out += ext;
+        }
+
+        if (sep == std::string_view::npos) break;
+        pos = sep + 1;
+    }
+    return out.empty() ? std::string("*") : out;
+}
+
+ParsedFileFilters parse_gm_file_filters(std::string_view gm_filter) {
+    ParsedFileFilters res{};
+    if (gm_filter.empty()) return res;
+
+    std::vector<std::string_view> parts;
+    usize pos = 0;
+    while (pos <= gm_filter.size()) {
+        const usize bar = gm_filter.find('|', pos);
+        if (bar == std::string_view::npos) {
+            parts.push_back(gm_filter.substr(pos));
+            break;
+        }
+        parts.push_back(gm_filter.substr(pos, bar - pos));
+        pos = bar + 1;
+    }
+
+    for (usize i = 0; i + 1 < parts.size(); i += 2) {
+        std::string name(parts[i]);
+        std::string pattern = sanitize_gm_mask_to_sdl_pattern(parts[i + 1]);
+        if (name.empty()) name = pattern;
+        res.owned.emplace_back(std::move(name), std::move(pattern));
+    }
+    res.sdl.reserve(res.owned.size());
+    for (const auto& [name, pattern] : res.owned) {
+        res.sdl.push_back(SDL_DialogFileFilter{name.c_str(), pattern.c_str()});
+    }
+    return res;
+}
+
+struct SdlFileDialogResult {
+    std::mutex mutex;
+    std::atomic<bool> done{false};
+    std::string selected_path;
+};
+
+void SDLCALL sdl_file_dialog_callback(void* userdata, const char* const* filelist, int /*filter*/) {
+    auto* st = static_cast<SdlFileDialogResult*>(userdata);
+    if (!st) return;
+    {
+        std::lock_guard<std::mutex> lock(st->mutex);
+        if (filelist && filelist[0] && filelist[0][0] != '\0') {
+            st->selected_path = filelist[0];
+        } else {
+            st->selected_path.clear();
+        }
+    }
+    st->done.store(true, std::memory_order_release);
+}
+#endif // !defined(__EMSCRIPTEN__)
+
+std::string run_sdl_file_dialog(
+    SDL_Window* window,
+    SDL_FileDialogType type,
+    std::string_view gm_filter,
+    std::string_view default_location,
+    std::string_view title,
+    const std::function<void()>& on_idle) {
+#if defined(__EMSCRIPTEN__)
+    (void)window;
+    (void)type;
+    (void)gm_filter;
+    (void)default_location;
+    (void)title;
+    (void)on_idle;
+    return {};
+#else
+    std::error_code cwd_ec;
+    const auto saved_cwd = std::filesystem::current_path(cwd_ec);
+
+    const ParsedFileFilters filters = (type == SDL_FILEDIALOG_OPENFOLDER)
+        ? ParsedFileFilters{}
+        : parse_gm_file_filters(gm_filter);
+    const std::string default_loc(default_location);
+    const std::string title_str(title);
+
+    SDL_PropertiesID props = SDL_CreateProperties();
+    if (props == 0) return {};
+
+    if (window) {
+        SDL_SetPointerProperty(props, SDL_PROP_FILE_DIALOG_WINDOW_POINTER, window);
+    }
+    if (!filters.sdl.empty()) {
+        SDL_SetPointerProperty(props, SDL_PROP_FILE_DIALOG_FILTERS_POINTER,
+                               const_cast<SDL_DialogFileFilter*>(filters.sdl.data()));
+        SDL_SetNumberProperty(props, SDL_PROP_FILE_DIALOG_NFILTERS_NUMBER,
+                              static_cast<Sint64>(filters.sdl.size()));
+    }
+    if (!default_loc.empty()) {
+        SDL_SetStringProperty(props, SDL_PROP_FILE_DIALOG_LOCATION_STRING, default_loc.c_str());
+    }
+    if (!title_str.empty()) {
+        SDL_SetStringProperty(props, SDL_PROP_FILE_DIALOG_TITLE_STRING, title_str.c_str());
+    }
+    SDL_SetBooleanProperty(props, SDL_PROP_FILE_DIALOG_MANY_BOOLEAN, false);
+
+    SdlFileDialogResult state{};
+    SDL_ShowFileDialogWithProperties(type, sdl_file_dialog_callback, &state, props);
+    SDL_DestroyProperties(props);
+
+    while (!state.done.load(std::memory_order_acquire)) {
+        SDL_Event ev{};
+        while (SDL_PollEvent(&ev)) {
+            // Drain SDL queue so platform portals/window messages stay responsive.
+        }
+        if (on_idle) {
+            on_idle();
+        }
+        SDL_Delay(10);
+    }
+
+    if (!cwd_ec && !saved_cwd.empty()) {
+        std::error_code restore_ec;
+        std::filesystem::current_path(saved_cwd, restore_ec);
+    }
+
+    std::lock_guard<std::mutex> lock(state.mutex);
+    return state.selected_path;
+#endif
+}
+
+} // namespace
+
+std::string PlatformWindow::open_file_dialog(
+    std::string_view gm_filter,
+    std::string_view default_location,
+    const std::function<void()>& on_idle) {
+    return run_sdl_file_dialog(window_, SDL_FILEDIALOG_OPENFILE, gm_filter, default_location, {}, on_idle);
+}
+
+std::string PlatformWindow::save_file_dialog(
+    std::string_view gm_filter,
+    std::string_view default_location,
+    const std::function<void()>& on_idle) {
+    return run_sdl_file_dialog(window_, SDL_FILEDIALOG_SAVEFILE, gm_filter, default_location, {}, on_idle);
+}
+
+std::string PlatformWindow::open_folder_dialog(
+    std::string_view title,
+    std::string_view default_location,
+    const std::function<void()>& on_idle) {
+    return run_sdl_file_dialog(window_, SDL_FILEDIALOG_OPENFOLDER, {}, default_location, title, on_idle);
 }
 
 void PlatformWindow::set_text_input(bool enabled) {

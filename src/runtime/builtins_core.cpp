@@ -1508,8 +1508,13 @@ void Runner::register_builtins_core() {
         const std::string s = a.empty() ? std::string{} : (a[0].is_string() ? a[0].as_string() : format_gm_real(a[0].as_real()));
         return RValue(r.show_message_ext_dialog(s, arg_str(a, 1), arg_str(a, 2), arg_str(a, 3)));
     });
-    register_builtin("show_info", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
-    register_builtin("load_info", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
+    register_builtin("show_info", [](Runner& r, i32, i32, std::span<const RValue>) {
+        r.show_info_dialog();
+        return RValue(0.0);
+    });
+    register_builtin("load_info", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        return RValue(r.load_info_file(arg_str(a, 0)));
+    });
     register_builtin("message_background", [](Runner& r, i32, i32, std::span<const RValue> a) {
         const i32 bg_id = arg_i32(a, 0, -1);
         if (bg_id >= 0 && static_cast<usize>(bg_id) < r.game().backgrounds.size() &&
@@ -1815,21 +1820,11 @@ void Runner::register_builtins_core() {
         return RValue(0.0);
     });
     register_builtin("highscore_clear", [](Runner& r, i32, i32, std::span<const RValue>) {
-        for (auto& h : r.highscores_) h = HighscoreEntry{};
+        r.highscore_clear();
         return RValue(0.0);
     });
     register_builtin("highscore_add", [](Runner& r, i32, i32, std::span<const RValue> a) {
-        const std::string name(arg_str(a, 0));
-        const f64 sc = arg_real(a, 1);
-        for (usize i = 0; i < r.highscores_.size(); ++i) {
-            if (sc > r.highscores_[i].score) {
-                for (usize j = r.highscores_.size() - 1; j > i; --j) {
-                    r.highscores_[j] = r.highscores_[j - 1];
-                }
-                r.highscores_[i] = HighscoreEntry{name, sc};
-                break;
-            }
-        }
+        (void)r.highscore_add_entry(arg_str(a, 0), arg_real(a, 1));
         return RValue(0.0);
     });
     register_builtin("highscore_value", [](Runner& r, i32, i32, std::span<const RValue> a) {
@@ -1842,7 +1837,10 @@ void Runner::register_builtins_core() {
         if (p < 0 || p >= 10) return RValue(std::string{});
         return RValue(r.highscores_[static_cast<usize>(p)].name);
     });
-    register_builtin("highscore_show", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
+    register_builtin("highscore_show", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        r.highscore_show_dialog(arg_real(a, 0, -1.0));
+        return RValue(0.0);
+    });
     register_builtin("game_save", [](Runner& r, i32, i32, std::span<const RValue> a) {
         (void)r.save_game(arg_str(a, 0));
         return RValue(0.0);

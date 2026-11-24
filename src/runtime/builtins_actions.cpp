@@ -668,12 +668,81 @@ void Runner::register_builtins_actions() {
         return RValue(0.0);
     });
     register_builtin("action_highscore_clear", [](Runner& r, i32, i32, std::span<const RValue>) {
-        for (auto& h : r.highscores_) h = HighscoreEntry{};
+        r.highscore_clear();
         return RValue(0.0);
     });
-    register_builtin("action_highscore_show", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
-    register_builtin("action_highscore", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
-    register_builtin("action_show_info", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
+    register_builtin("action_highscore_show", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        // Exact GM8 gm82.exe.c:sub_62F744 & sub_5613FC
+        r.highscore_bg_ = arg_i32(a, 0, -1);
+        r.highscore_border_ = (arg_i32(a, 1, 1) == 1);
+        r.highscore_col_new_ = static_cast<u32>(arg_i32(a, 2)) & 0xFFFFFFu;
+        r.highscore_col_other_ = static_cast<u32>(arg_i32(a, 3)) & 0xFFFFFFu;
+
+        // Parse Delphi TStringList.CommaText font string: "Name,Size,Color,Bold,Italic,Underline,StrikeOut"
+        const std::string_view font_csv = arg_str(a, 4);
+        if (!font_csv.empty()) {
+            std::vector<std::string> fields;
+            usize pos = 0;
+            while (pos < font_csv.size()) {
+                while (pos < font_csv.size() && font_csv[pos] == ' ') ++pos;
+                std::string tok;
+                if (pos < font_csv.size() && font_csv[pos] == '"') {
+                    ++pos;
+                    while (pos < font_csv.size()) {
+                        if (font_csv[pos] == '"') {
+                            if (pos + 1 < font_csv.size() && font_csv[pos + 1] == '"') {
+                                tok.push_back('"');
+                                pos += 2;
+                            } else {
+                                ++pos;
+                                break;
+                            }
+                        } else {
+                            tok.push_back(font_csv[pos++]);
+                        }
+                    }
+                    while (pos < font_csv.size() && font_csv[pos] != ',') ++pos;
+                    if (pos < font_csv.size() && font_csv[pos] == ',') ++pos;
+                } else {
+                    const usize comma = font_csv.find(',', pos);
+                    if (comma == std::string_view::npos) {
+                        tok = std::string(font_csv.substr(pos));
+                        pos = font_csv.size();
+                    } else {
+                        tok = std::string(font_csv.substr(pos, comma - pos));
+                        pos = comma + 1;
+                    }
+                }
+                fields.push_back(std::move(tok));
+            }
+            if (!fields.empty() && !fields[0].empty()) {
+                r.highscore_font_name_ = fields[0];
+            }
+            if (fields.size() >= 2) {
+                try {
+                    const i32 sz = std::stoi(fields[1]);
+                    if (sz > 0) r.highscore_font_size_ = sz;
+                } catch (...) {}
+            }
+            i32 style = 0;
+            if (fields.size() >= 4 && fields[3] == "1") style |= 1;
+            if (fields.size() >= 5 && fields[4] == "1") style |= 2;
+            if (fields.size() >= 6 && fields[5] == "1") style |= 4;
+            if (fields.size() >= 7 && fields[6] == "1") style |= 8;
+            r.highscore_font_style_ = style;
+        }
+
+        r.highscore_show_dialog(r.score_);
+        return RValue(0.0);
+    });
+    register_builtin("action_highscore", [](Runner&, i32, i32, std::span<const RValue>) {
+        // Legacy no-op in GM8 (gm82.exe.c:sub_62CDDC).
+        return RValue(0.0);
+    });
+    register_builtin("action_show_info", [](Runner& r, i32, i32, std::span<const RValue>) {
+        r.show_info_dialog();
+        return RValue(0.0);
+    });
     register_builtin("action_save_game", [](Runner& r, i32, i32, std::span<const RValue> a) {
         (void)r.save_game(arg_str(a, 0));
         return RValue(0.0);
@@ -995,16 +1064,27 @@ void Runner::register_builtins_actions() {
     });
     register_builtin("action_show_video", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
     register_builtin("action_splash_video", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
-    register_builtin("action_splash_text", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
-    register_builtin("action_splash_image", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
+    register_builtin("action_splash_text", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        (void)r.splash_show_text_dialog(arg_str(a, 0), 0);
+        return RValue(0.0);
+    });
+    register_builtin("action_splash_image", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        (void)r.splash_show_image_dialog(arg_str(a, 0), 0);
+        return RValue(0.0);
+    });
     register_builtin("action_splash_web", [](Runner&, i32, i32, std::span<const RValue> a) {
         (void)PlatformWindow::open_url(arg_str(a, 0));
         return RValue(0.0);
     });
     register_builtin("action_splash_settings", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        // Exact GM8 gm82.exe.c:sub_62E674: (caption, mode[0=main,1=window,2=fullscreen], close_btn, stop_key, stop_mouse)
         r.splash_caption_ = std::string(arg_str(a, 0));
-        r.splash_fullscreen_ = arg_bool(a, 1, false);
-        r.splash_border_ = arg_bool(a, 2, true);
+        const i32 mode = arg_i32(a, 1, 0);
+        r.splash_fullscreen_ = (mode == 2);
+        r.splash_main_ = (mode == 0);
+        r.splash_close_button_ = (arg_i32(a, 2, 0) == 0);
+        r.splash_stop_key_ = (arg_i32(a, 3, 0) == 0);
+        r.splash_stop_mouse_ = (arg_i32(a, 4, 0) == 0);
         return RValue(0.0);
     });
     register_builtin("action_cd_play", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
