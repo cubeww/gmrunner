@@ -1843,8 +1843,14 @@ void Runner::register_builtins_core() {
         return RValue(r.highscores_[static_cast<usize>(p)].name);
     });
     register_builtin("highscore_show", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
-    register_builtin("game_save", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
-    register_builtin("game_load", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
+    register_builtin("game_save", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        (void)r.save_game(arg_str(a, 0));
+        return RValue(0.0);
+    });
+    register_builtin("game_load", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        r.request_game_load(arg_str(a, 0));
+        return RValue(0.0);
+    });
 }
 
 } // namespace gm

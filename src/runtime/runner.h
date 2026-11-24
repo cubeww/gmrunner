@@ -106,6 +106,13 @@ enum class PendingRoomAction : u8 {
     RestartRoom,
     RestartGame,
     EndGame,
+    LoadGame,
+};
+
+struct TransitionScript {
+    CallableKind kind = CallableKind::Script;
+    u32 id = 0;
+    std::string name;
 };
 
 class Runner : public IVmHost, public IExtensionHost, public NonCopyable {
@@ -182,6 +189,7 @@ public:
     void ext_room_goto_cancel() noexcept override {
         pending_action_ = PendingRoomAction::None;
         pending_room_id_ = -1;
+        pending_load_path_.clear();
     }
     void ext_game_end() noexcept override { request_game_end(); }
     [[nodiscard]] i32 ext_var_name_count() const noexcept override {
@@ -323,11 +331,18 @@ public:
     void request_room_restart();
     void request_game_restart();
     void request_game_end();
+    void request_game_load(std::string_view path);
+    bool save_game(std::string_view path);
+    bool load_game(std::string_view path);
     void request_host_stop() { host_stop_requested_ = true; request_game_end(); }
     [[nodiscard]] i32 room_order_index(i32 room_id) const noexcept;
     [[nodiscard]] i32 room_next_id(i32 room_id) const noexcept;
     [[nodiscard]] i32 room_previous_id(i32 room_id) const noexcept;
     [[nodiscard]] bool room_exists(i32 room_id) const noexcept;
+
+    // Room transitions (GM 8.0 / 8.1 / 8.2)
+    bool transition_define(i32 kind, std::string_view script_name);
+    [[nodiscard]] bool transition_exists(i32 kind) const noexcept;
 
     // RNG helpers
     void set_random_seed(u32 seed) noexcept;
@@ -436,7 +451,7 @@ public:
     i32 window_region_h_ = 0;
     i32 requested_backbuffer_w_ = 0;
     i32 requested_backbuffer_h_ = 0;
-    std::unordered_map<i32, i32> transition_scripts_;
+    std::unordered_map<i32, TransitionScript> transition_scripts_;
 
     // Highscore appearance state
     i32 highscore_bg_ = -1;
@@ -514,6 +529,13 @@ private:
     bool execute_instance_event(i32 inst_id, i32 obj_idx, i32 cat, i32 sub, i32 other_id);
     void start_room(i32 room_id, bool is_game_start);
     void process_pending_room_action();
+    void sync_room_screen_region();
+    void prepare_room_transition(i32 kind);
+    void finish_room_transition();
+    void cancel_room_transition() noexcept;
+    void execute_custom_transition_script(const TransitionScript& script,
+                                          i32 surf_old, i32 surf_new,
+                                          i32 width, i32 height, f64 fraction);
 
     void update_window_caption();
     void room_canvas_size(i32& width, i32& height) const noexcept;
@@ -606,6 +628,10 @@ private:
     bool host_stop_requested_ = false;
     PendingRoomAction pending_action_ = PendingRoomAction::None;
     i32 pending_room_id_ = -1;
+    std::string pending_load_path_;
+    i32 active_transition_kind_ = -1;
+    i32 transition_surf_old_ = -1;
+    i32 transition_surf_new_ = -1;
     struct RenderItem {
         f64 depth = 0.0;
         u8 kind = 0; // 0 = tile, 1 = instance, 2 = particles

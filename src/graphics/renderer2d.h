@@ -163,6 +163,9 @@ public:
     bool surface_set_target_ext(i32 target, i32 surf_id);
     bool surface_set_depth(i32 surf_id);
     bool surface_reset_target();
+    void surface_fill_alpha_opaque(i32 id);
+    void draw_builtin_transition(i32 kind, i32 surf_old, i32 surf_new,
+                                 i32 width, i32 height, i32 steps, f64 fraction);
     [[nodiscard]] i32 current_surface_target() const noexcept { return active_surface_id_; }
     [[nodiscard]] bool rendering_to_fbo() const noexcept { return active_surface_id_ >= 0 || using_screen_fbo_; }
     void draw_surface_ext(i32 id, f32 x, f32 y, f32 xscale, f32 yscale, f32 rot_deg, u32 color_bgr, f32 alpha);

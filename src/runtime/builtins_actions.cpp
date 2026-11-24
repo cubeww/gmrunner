@@ -674,8 +674,14 @@ void Runner::register_builtins_actions() {
     register_builtin("action_highscore_show", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
     register_builtin("action_highscore", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
     register_builtin("action_show_info", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
-    register_builtin("action_save_game", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
-    register_builtin("action_load_game", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
+    register_builtin("action_save_game", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        (void)r.save_game(arg_str(a, 0));
+        return RValue(0.0);
+    });
+    register_builtin("action_load_game", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        r.request_game_load(arg_str(a, 0));
+        return RValue(0.0);
+    });
 
     // Remaining D&D actions (movement, drawing, particles, resources, splash, CD)
     register_builtin("action_path_old", [](Runner& r, i32 self_id, i32, std::span<const RValue> a) {

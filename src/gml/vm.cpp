@@ -125,6 +125,10 @@ void VariableTable::clear() {
     if (map_) map_->clear();
 }
 
+void VariableTable::set_slot(u32 var_id, VarSlot slot) {
+    find_or_create_slot(var_id) = std::move(slot);
+}
+
 std::vector<u32> VariableTable::all_var_ids() const {
     std::vector<u32> ids;
     if (map_) {
@@ -152,8 +156,18 @@ GmlVm::GmlVm(CompiledProgram& program, IVmHost* host)
 }
 
 bool GmlVm::is_declared_global(u32 var_id) const noexcept {
+    if (var_id < kUserVarIdBase) return false;
     const u32 index = var_id - kUserVarIdBase;
     return index < declared_globals_.size() && declared_globals_[index];
+}
+
+void GmlVm::declare_global(u32 var_id) {
+    if (var_id < kUserVarIdBase) return;
+    const u32 index = var_id - kUserVarIdBase;
+    if (index >= declared_globals_.size()) {
+        declared_globals_.resize(index + 1u);
+    }
+    declared_globals_[index] = true;
 }
 
 void GmlVm::reset_globals() {

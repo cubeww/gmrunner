@@ -1597,6 +1597,257 @@ bool Renderer2D::surface_reset_target() {
     return true;
 }
 
+void Renderer2D::surface_fill_alpha_opaque(i32 id) {
+    const auto it = surfaces_.find(id);
+    if (it == surfaces_.end() || !device_) return;
+    flush();
+    const auto saved = device_->save_render_state();
+    device_->bind_framebuffer(it->second.fbo);
+    device_->set_scissor(false);
+    device_->set_viewport(ViewportRect{0, 0, it->second.width, it->second.height});
+    device_->set_color_mask(false, false, false, true);
+    device_->clear(true, false, false, 0.0f, 0.0f, 0.0f, 1.0f);
+    device_->restore_render_state(saved);
+}
+
+void Renderer2D::draw_builtin_transition(
+    i32 kind, i32 surf_old, i32 surf_new,
+    i32 width, i32 height, i32 steps, f64 fraction) {
+    if (!device_ || width <= 0 || height <= 0) return;
+    flush();
+
+    const ViewportRect saved_viewport = active_viewport_;
+    const bool saved_scissor = device_->scissor_enabled();
+    const ViewportRect saved_scissor_rect = device_->scissor_rect();
+    const bool saved_alpha_test = alpha_test_explicit_;
+    const bool saved_d3d_active = d3d_active_;
+    const bool saved_d3d_hidden = d3d_hidden_;
+    const bool saved_lighting = d3d_lighting_;
+    const bool saved_flat = d3d_flat_shading_;
+    const i32 saved_fill_mode = device_->polygon_mode();
+    const bool saved_tex_blending = tex_blending_;
+    const i32 saved_texcoord_mode = texcoord_mode_;
+    const D3dFogState saved_fog = fog_;
+    const BlendState saved_blend = blend_state_;
+    const bool saved_sep_alpha = separate_alpha_blend_;
+    const f32 saved_draw_z = current_draw_z_;
+    const i32 saved_dx9_vs = dx9_.active_vertex_shader();
+    const i32 saved_dx9_ps = dx9_.active_pixel_shader();
+    f32 saved_world[16], saved_view[16], saved_proj[16];
+    std::memcpy(saved_world, world_matrix_, sizeof(saved_world));
+    std::memcpy(saved_view, view_matrix_, sizeof(saved_view));
+    std::memcpy(saved_proj, proj_matrix_, sizeof(saved_proj));
+
+    dx9_.set_active_shaders_raw(0, 0);
+    device_->set_scissor(false);
+    device_->set_depth_state(DepthState{false, false, CompareFunc::Always});
+    device_->set_cull_mode(CullMode::None);
+    device_->set_polygon_mode(2);
+    device_->set_color_mask(true, true, true, true);
+
+    alpha_test_explicit_ = false;
+    d3d_active_ = false;
+    d3d_hidden_ = false;
+    d3d_lighting_ = false;
+    d3d_flat_shading_ = false;
+    tex_blending_ = true;
+    texcoord_mode_ = 0;
+    fog_.mode = 0;
+    current_draw_z_ = 0.0f;
+    separate_alpha_blend_ = false;
+    blend_state_ = BlendState{
+        true,
+        BlendFactor::SrcAlpha,
+        BlendFactor::InvSrcAlpha,
+        BlendFactor::SrcAlpha,
+        BlendFactor::InvSrcAlpha,
+        BlendOp::Add,
+        BlendOp::Add,
+    };
+    device_->set_blend_state(blend_state_);
+    mat4_identity(world_matrix_);
+
+    const ViewportRect port = using_screen_fbo_ ? ViewportRect{0, 0, screen_w_, screen_h_} : screen_viewport_;
+    set_projection_ortho(0.0f, 0.0f, static_cast<f32>(width), static_cast<f32>(height), 0.0f,
+                         port.x, port.y, port.width, port.height);
+
+    const f64 t = std::clamp(fraction, 0.0, 1.0);
+    const i32 clamped_steps = std::max(1, steps);
+
+    auto draw_create_edge = [&](i32 dx, i32 dy, f64 frac) {
+        draw_surface_ext(surf_old, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0xFFFFFFu, 1.0f);
+        i32 left = 0;
+        i32 rw = width;
+        if (dx == 1) {
+            left = 0;
+            rw = static_cast<i32>(delphi_round(static_cast<f64>(width) * frac));
+        } else if (dx == -1) {
+            rw = static_cast<i32>(delphi_round(static_cast<f64>(width) * frac));
+            left = width - rw;
+        }
+        i32 top = 0;
+        i32 rh = height;
+        if (dy == 1) {
+            top = 0;
+            rh = static_cast<i32>(delphi_round(static_cast<f64>(height) * frac));
+        } else if (dy == -1) {
+            rh = static_cast<i32>(delphi_round(static_cast<f64>(height) * frac));
+            top = height - rh;
+        }
+        if (rw > 0 && rh > 0) {
+            draw_surface_part_ext(surf_new,
+                                  static_cast<f32>(left), static_cast<f32>(top),
+                                  static_cast<f32>(rw), static_cast<f32>(rh),
+                                  static_cast<f32>(left), static_cast<f32>(top),
+                                  1.0f, 1.0f, 0xFFFFFFu, 1.0f);
+        }
+    };
+
+    auto draw_shift_edge = [&](i32 dx, i32 dy, f64 frac) {
+        draw_surface_ext(surf_old, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0xFFFFFFu, 1.0f);
+        const f32 x = static_cast<f32>(dx * (static_cast<i32>(delphi_round(static_cast<f64>(width) * frac)) - width));
+        const f32 y = static_cast<f32>(dy * (static_cast<i32>(delphi_round(static_cast<f64>(height) * frac)) - height));
+        draw_surface_ext(surf_new, x, y, 1.0f, 1.0f, 0.0f, 0xFFFFFFu, 1.0f);
+    };
+
+    auto draw_push_edge = [&](i32 dx, i32 dy, f64 frac) {
+        const i32 ox = static_cast<i32>(delphi_round(static_cast<f64>(width) * frac));
+        const i32 oy = static_cast<i32>(delphi_round(static_cast<f64>(height) * frac));
+        draw_surface_ext(surf_old, static_cast<f32>(dx * ox), static_cast<f32>(dy * oy),
+                         1.0f, 1.0f, 0.0f, 0xFFFFFFu, 1.0f);
+        draw_surface_ext(surf_new, static_cast<f32>(dx * (ox - width)), static_cast<f32>(dy * (oy - height)),
+                         1.0f, 1.0f, 0.0f, 0xFFFFFFu, 1.0f);
+    };
+
+    auto draw_interlaced = [&](i32 dx, i32 dy) {
+        const i32 cur_step = static_cast<i32>(delphi_round(static_cast<f64>(clamped_steps) * t));
+        if (cur_step >= clamped_steps) {
+            draw_surface_ext(surf_new, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0xFFFFFFu, 1.0f);
+            return;
+        }
+        const i32 half = clamped_steps / 2;
+        if (cur_step <= half) {
+            draw_surface_ext(surf_old, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0xFFFFFFu, 1.0f);
+        } else {
+            draw_create_edge(dx, dy, static_cast<f64>(cur_step - half) / static_cast<f64>(std::max(1, half)));
+        }
+        for (i32 k = 0; k <= half; ++k) {
+            if ((dx > 0 && k <= cur_step) || (dx < 0 && k >= half - cur_step)) {
+                const f32 sx = static_cast<f32>(delphi_round(static_cast<f64>(width) / static_cast<f64>(clamped_steps) * static_cast<f64>(2 * k)));
+                const f32 sw = static_cast<f32>(delphi_round(static_cast<f64>(width) / static_cast<f64>(clamped_steps)));
+                if (sw > 0.0f) {
+                    draw_surface_part_ext(surf_new, sx, 0.0f, sw, static_cast<f32>(height),
+                                          sx, 0.0f, 1.0f, 1.0f, 0xFFFFFFu, 1.0f);
+                }
+            }
+            if ((dy > 0 && k <= cur_step) || (dy < 0 && k >= half - cur_step)) {
+                const f32 sy = static_cast<f32>(delphi_round(static_cast<f64>(height) / static_cast<f64>(clamped_steps) * static_cast<f64>(2 * k)));
+                const f32 sh = static_cast<f32>(delphi_round(static_cast<f64>(height) / static_cast<f64>(clamped_steps)));
+                if (sh > 0.0f) {
+                    draw_surface_part_ext(surf_new, 0.0f, sy, static_cast<f32>(width), sh,
+                                          0.0f, sy, 1.0f, 1.0f, 0xFFFFFFu, 1.0f);
+                }
+            }
+        }
+    };
+
+    auto draw_rotate = [&](bool clockwise) {
+        draw_surface_ext(surf_old, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0xFFFFFFu, 1.0f);
+        if (t <= 0.0) return;
+        f64 angle_rad = std::sqrt(t) * (2.0 * kPi);
+        if (clockwise) angle_rad = -angle_rad;
+        const f64 c = std::cos(angle_rad);
+        const f64 sn = std::sin(angle_rad);
+        const f64 hw = static_cast<f64>(width) * 0.5;
+        const f64 hh = static_cast<f64>(height) * 0.5;
+        const f32 px = static_cast<f32>(hw - sn * t * hh - c * t * hw);
+        const f32 py = static_cast<f32>(hh - c * t * hh + sn * t * hw);
+        const f32 rot_deg = static_cast<f32>(angle_rad * kRadToDeg);
+        draw_surface_ext(surf_new, px, py, static_cast<f32>(t), static_cast<f32>(t),
+                         rot_deg, 0xFFFFFFu, 1.0f);
+    };
+
+    clear_color(0x000000u, 1.0f);
+
+    // Exact GM 8.0 / 8.1 / 8.2 transition_kind dispatch (gm80.exe.c:sub_51E708 / gm81.exe.c:sub_5F8FD0).
+    switch (kind) {
+        case 1:  draw_create_edge(1, 0, t); break;   // Create from left
+        case 2:  draw_create_edge(-1, 0, t); break;  // Create from right
+        case 3:  draw_create_edge(0, 1, t); break;   // Create from top
+        case 4:  draw_create_edge(0, -1, t); break;  // Create from bottom
+        case 5: {                                    // Create from center
+            draw_surface_ext(surf_old, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0xFFFFFFu, 1.0f);
+            const i32 left = static_cast<i32>(delphi_round((static_cast<f64>(width) - static_cast<f64>(width) * t) * 0.5));
+            const i32 rw = static_cast<i32>(delphi_round(static_cast<f64>(width) * t));
+            const i32 top = static_cast<i32>(delphi_round((static_cast<f64>(height) - static_cast<f64>(height) * t) * 0.5));
+            const i32 rh = static_cast<i32>(delphi_round(static_cast<f64>(height) * t));
+            if (rw > 0 && rh > 0) {
+                draw_surface_part_ext(surf_new,
+                                      static_cast<f32>(left), static_cast<f32>(top),
+                                      static_cast<f32>(rw), static_cast<f32>(rh),
+                                      static_cast<f32>(left), static_cast<f32>(top),
+                                      1.0f, 1.0f, 0xFFFFFFu, 1.0f);
+            }
+            break;
+        }
+        case 6:  draw_shift_edge(1, 0, t); break;    // Shift from left
+        case 7:  draw_shift_edge(-1, 0, t); break;   // Shift from right
+        case 8:  draw_shift_edge(0, 1, t); break;    // Shift from top
+        case 9:  draw_shift_edge(0, -1, t); break;   // Shift from bottom
+        case 10: draw_interlaced(1, 0); break;       // Interlaced from left
+        case 11: draw_interlaced(-1, 0); break;      // Interlaced from right
+        case 12: draw_interlaced(0, 1); break;       // Interlaced from top
+        case 13: draw_interlaced(0, -1); break;      // Interlaced from bottom
+        case 14: draw_push_edge(1, 0, t); break;     // Push from left
+        case 15: draw_push_edge(-1, 0, t); break;    // Push from right
+        case 16: draw_push_edge(0, 1, t); break;     // Push from top
+        case 17: draw_push_edge(0, -1, t); break;    // Push from bottom
+        case 18: draw_rotate(false); break;          // Rotate from left
+        case 19: draw_rotate(true); break;           // Rotate from right
+        case 20:                                     // Blend
+            draw_surface_ext(surf_old, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0xFFFFFFu, 1.0f);
+            draw_surface_ext(surf_new, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0xFFFFFFu, static_cast<f32>(t));
+            break;
+        case 21:                                     // Fade out and in
+            if (t > 0.5) {
+                draw_surface_ext(surf_new, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0xFFFFFFu,
+                                 static_cast<f32>(std::clamp(2.0 * t - 1.0, 0.0, 1.0)));
+            } else {
+                draw_surface_ext(surf_old, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0xFFFFFFu,
+                                 static_cast<f32>(std::clamp(1.0 - 2.0 * t, 0.0, 1.0)));
+            }
+            break;
+        default:
+            draw_surface_ext(surf_new, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0xFFFFFFu, 1.0f);
+            break;
+    }
+
+    flush();
+
+    std::memcpy(world_matrix_, saved_world, sizeof(saved_world));
+    std::memcpy(view_matrix_, saved_view, sizeof(saved_view));
+    std::memcpy(proj_matrix_, saved_proj, sizeof(saved_proj));
+    current_draw_z_ = saved_draw_z;
+    separate_alpha_blend_ = saved_sep_alpha;
+    blend_state_ = saved_blend;
+    fog_ = saved_fog;
+    tex_blending_ = saved_tex_blending;
+    texcoord_mode_ = saved_texcoord_mode;
+    d3d_flat_shading_ = saved_flat;
+    d3d_lighting_ = saved_lighting;
+    d3d_hidden_ = saved_d3d_hidden;
+    d3d_active_ = saved_d3d_active;
+    alpha_test_explicit_ = saved_alpha_test;
+    active_viewport_ = saved_viewport;
+    device_->set_viewport(saved_viewport);
+    device_->set_scissor(saved_scissor, saved_scissor_rect);
+    dx9_.set_active_shaders_raw(saved_dx9_vs, saved_dx9_ps);
+    device_->set_color_mask(color_mask_[0], color_mask_[1], color_mask_[2], color_mask_[3]);
+    device_->set_polygon_mode(saved_fill_mode);
+    device_->set_blend_state(blend_state_);
+    apply_d3d_depth_cull();
+}
+
 void Renderer2D::apply_screen_projection() {
     // GM8 restores the whole logical screen even if a view was active before the surface.
     const ViewportRect port = using_screen_fbo_ ? ViewportRect{0, 0, screen_w_, screen_h_} : screen_viewport_;

@@ -326,6 +326,7 @@ void Runner::shutdown() noexcept {
     mp_grids_.destroy_all();
 
     extensions_.reset(this);
+    cancel_room_transition();
     audio_.shutdown();
     message_dialog_.shutdown();
     touch_overlay_.shutdown();
@@ -368,11 +369,15 @@ void Runner::start_game() {
     score_ = 0.0;
     lives_ = -1.0;
     health_ = 100.0;
+    cursor_sprite_ = -1;
+    transition_kind_ = 0;
     no_more_lives_armed_ = false;
     no_more_health_armed_ = false;
     current_room_ = -1;
     pending_action_ = PendingRoomAction::None;
     pending_room_id_ = -1;
+    pending_load_path_.clear();
+    cancel_room_transition();
 
     if (game_.room_order.empty()) {
         GM_LOG_WARN("runtime", "Game has no rooms in room_order");
@@ -393,6 +398,9 @@ void Runner::start_room(i32 room_id, bool is_game_start) {
 
     // 1. Leave previous room (if any)
     if (!is_game_start && current_room_ >= 0) {
+        // GM8 prepares the room transition before Room End (gm81.exe.c:sub_606E94 -> sub_5F96B4).
+        prepare_room_transition(transition_kind_);
+
         broadcast_event(7, 5); // ev_other, ev_room_end
         remove_marked_instances();
         if (io_roomend_clear_) {
@@ -410,6 +418,7 @@ void Runner::start_room(i32 room_id, bool is_game_start) {
             state.width = room_width_;
             state.height = room_height_;
             state.speed = room_speed_;
+            state.persistent = room_persistent_;
             state.caption = room_caption_;
 
         }
@@ -448,7 +457,7 @@ void Runner::start_room(i32 room_id, bool is_game_start) {
         room_width_ = state.width;
         room_height_ = state.height;
         room_speed_ = state.speed;
-        room_persistent_ = rm.persistent;
+        room_persistent_ = state.persistent;
         room_caption_ = state.caption;
         bg_color_ = state.background_color;
         bg_showcolor_ = state.background_showcolor;
@@ -536,26 +545,7 @@ void Runner::start_room(i32 room_id, bool is_game_start) {
     }
 
     // GM8 sets the room's screen region before instance creation code, including on re-entry.
-    i32 vx, vy, vw, vh, cw, ch;
-    room_canvas_size(cw, ch);
-    // On phones the logical game region can be larger than the display in either axis.
-    // Keep its dimensions intact and fit it when presenting to the drawable.
-    if (!PlatformWindow::is_mobile_touch_platform()) {
-        cw = std::min(cw, window_.display_width());
-        ch = std::min(ch, window_.display_height());
-    }
-    if (!window_fixed_ && (cw != window_region_w_ || ch != window_region_h_)) {
-        window_region_w_ = cw;
-        window_region_h_ = ch;
-        window_default();
-        requested_backbuffer_w_ = cw;
-        requested_backbuffer_h_ = ch;
-    }
-    compute_canvas_viewport(vx, vy, vw, vh, cw, ch);
-    renderer_.set_screen_region(window_.drawable_width(), window_.drawable_height(),
-                                requested_backbuffer_w_ > 0 ? requested_backbuffer_w_ : cw,
-                                requested_backbuffer_h_ > 0 ? requested_backbuffer_h_ : ch,
-                                ViewportRect{vx, vy, vw, vh});
+    sync_room_screen_region();
 
     if (!restored_from_save) {
         // First allocate all room instances so creation codes can reference each other by ID.
@@ -637,11 +627,293 @@ void Runner::start_room(i32 room_id, bool is_game_start) {
 
     remove_marked_instances();
     if (pending_action_ == PendingRoomAction::None && auto_draw_) {
-        // Room Start draws the initial image before the new room's first step.
+        if (active_transition_kind_ > 0 && transition_surf_old_ >= 0) {
+            finish_room_transition();
+        } else {
+            cancel_room_transition();
+            // Room Start draws the initial image before the new room's first step.
+            render_current_frame();
+            present_current_frame();
+        }
+        transition_kind_ = 0;
+    } else {
+        cancel_room_transition();
+        update_view_following();
+    }
+}
+
+void Runner::sync_room_screen_region() {
+    i32 vx = 0, vy = 0, vw = 1, vh = 1, cw = 1, ch = 1;
+    room_canvas_size(cw, ch);
+    // On phones the logical game region can be larger than the display in either axis.
+    // Keep its dimensions intact and fit it when presenting to the drawable.
+    if (!PlatformWindow::is_mobile_touch_platform()) {
+        cw = std::min(cw, window_.display_width());
+        ch = std::min(ch, window_.display_height());
+    }
+    if (!window_fixed_ && (cw != window_region_w_ || ch != window_region_h_)) {
+        window_region_w_ = cw;
+        window_region_h_ = ch;
+        window_default();
+        requested_backbuffer_w_ = cw;
+        requested_backbuffer_h_ = ch;
+    }
+    compute_canvas_viewport(vx, vy, vw, vh, cw, ch);
+    renderer_.set_screen_region(window_.drawable_width(), window_.drawable_height(),
+                                requested_backbuffer_w_ > 0 ? requested_backbuffer_w_ : cw,
+                                requested_backbuffer_h_ > 0 ? requested_backbuffer_h_ : ch,
+                                ViewportRect{vx, vy, vw, vh});
+}
+
+bool Runner::transition_define(i32 kind, std::string_view script_name) {
+    if (kind <= 0 || script_name.empty()) {
+        return false;
+    }
+    const auto* target = program_.symbols.find_callable(script_name);
+    if (!target || (target->kind != CallableKind::Script && target->kind != CallableKind::ExtensionGml)) {
+        return false;
+    }
+    transition_scripts_[kind] = TransitionScript{target->kind, target->id, std::string(script_name)};
+    return true;
+}
+
+bool Runner::transition_exists(i32 kind) const noexcept {
+    if (kind <= 0) return false;
+    return (kind >= 1 && kind <= 21) || transition_scripts_.contains(kind);
+}
+
+void Runner::cancel_room_transition() noexcept {
+    if (transition_surf_new_ >= 0) {
+        if (renderer_.current_surface_target() == transition_surf_new_) {
+            renderer_.surface_reset_target();
+        }
+        renderer_.surface_free(transition_surf_new_);
+        transition_surf_new_ = -1;
+    }
+    if (transition_surf_old_ >= 0) {
+        if (renderer_.current_surface_target() == transition_surf_old_) {
+            renderer_.surface_reset_target();
+        }
+        renderer_.surface_free(transition_surf_old_);
+        transition_surf_old_ = -1;
+    }
+    active_transition_kind_ = -1;
+}
+
+void Runner::prepare_room_transition(i32 kind) {
+    cancel_room_transition();
+    if (!transition_exists(kind) || !window_.is_open()) {
+        return;
+    }
+
+    i32 vx = 0, vy = 0, vw = 1, vh = 1, cw = 1, ch = 1;
+    compute_canvas_viewport(vx, vy, vw, vh, cw, ch);
+    const i32 bw = std::max(1, requested_backbuffer_w_ > 0 ? requested_backbuffer_w_ : cw);
+    const i32 bh = std::max(1, requested_backbuffer_h_ > 0 ? requested_backbuffer_h_ : ch);
+
+    if (renderer_.current_surface_target() >= 0) {
+        renderer_.surface_reset_target();
+    }
+
+    const i32 surf_old = renderer_.surface_create(bw, bh);
+    if (surf_old < 0) {
+        return;
+    }
+
+    active_transition_kind_ = kind;
+    transition_surf_old_ = surf_old;
+
+    renderer_.surface_set_target(surf_old);
+    renderer_.clear_color(window_color_, 1.0f);
+
+    // Match gm81.exe.c:sub_5F96B4: temporarily clear pending state so Draw events run while capturing the old room.
+    const PendingRoomAction saved_action = pending_action_;
+    const i32 saved_room_id = pending_room_id_;
+    const std::string saved_load_path = pending_load_path_;
+    pending_action_ = PendingRoomAction::None;
+    pending_room_id_ = -1;
+    pending_load_path_.clear();
+
+    render_current_frame();
+
+    pending_action_ = saved_action;
+    pending_room_id_ = saved_room_id;
+    pending_load_path_ = saved_load_path;
+
+    renderer_.surface_fill_alpha_opaque(surf_old);
+    if (renderer_.current_surface_target() == surf_old) {
+        renderer_.surface_reset_target();
+    }
+}
+
+void Runner::execute_custom_transition_script(
+    const TransitionScript& script,
+    i32 surf_old, i32 surf_new,
+    i32 width, i32 height, f64 fraction) {
+    if (!vm_) return;
+    // Match gm81.exe.c:sub_5F93B0: run with a temporary object-0 context instance and 5 arguments.
+    Instance ctx{};
+    set_instance_object(ctx, 0);
+    ctx.timeline_running = false;
+    register_instance_handle(ctx);
+
+    const std::array<RValue, 5> args{
+        RValue(surf_old),
+        RValue(surf_new),
+        RValue(width),
+        RValue(height),
+        RValue(fraction),
+    };
+
+    Result<RValue> res = (script.kind == CallableKind::ExtensionGml)
+        ? vm_->execute_ext_gml(script.id, ctx.handle, ctx.handle, args)
+        : vm_->execute_script(script.id, ctx.handle, ctx.handle, args);
+
+    inst_by_id_.erase(ctx.handle);
+    if (!res) {
+        GM_LOG_WARN("runtime", "Transition script '%s' error: %s",
+                    script.name.c_str(), res.error_message().c_str());
+    }
+}
+
+void Runner::finish_room_transition() {
+    const i32 kind = active_transition_kind_;
+    if (kind <= 0 || transition_surf_old_ < 0 || !renderer_.surface_exists(transition_surf_old_) ||
+        !transition_exists(kind) || !window_.is_open()) {
+        cancel_room_transition();
         render_current_frame();
         present_current_frame();
-    } else {
-        update_view_following();
+        return;
+    }
+
+    i32 vx = 0, vy = 0, vw = 1, vh = 1, cw = 1, ch = 1;
+    compute_canvas_viewport(vx, vy, vw, vh, cw, ch);
+    i32 bw = std::max(1, requested_backbuffer_w_ > 0 ? requested_backbuffer_w_ : cw);
+    i32 bh = std::max(1, requested_backbuffer_h_ > 0 ? requested_backbuffer_h_ : ch);
+
+    if (renderer_.current_surface_target() >= 0) {
+        renderer_.surface_reset_target();
+    }
+
+    transition_surf_new_ = renderer_.surface_create(bw, bh);
+    if (transition_surf_new_ < 0) {
+        cancel_room_transition();
+        render_current_frame();
+        present_current_frame();
+        return;
+    }
+
+    renderer_.surface_set_target(transition_surf_new_);
+    renderer_.clear_color(window_color_, 1.0f);
+    render_current_frame();
+    renderer_.surface_fill_alpha_opaque(transition_surf_new_);
+    if (renderer_.current_surface_target() == transition_surf_new_) {
+        renderer_.surface_reset_target();
+    }
+
+    std::optional<TransitionScript> custom_script;
+    if (const auto it = transition_scripts_.find(kind); it != transition_scripts_.end()) {
+        custom_script = it->second;
+    }
+
+    const i32 steps = std::max(1, transition_steps_);
+    ModalInputFrame minput{};
+    bool context_lost_aborted = false;
+
+    for (i32 step = 0; step <= steps && running_ && !host_stop_requested_; ++step) {
+        const u64 frame_start = Clock::now_us();
+
+        bool aborted = false;
+        while (true) {
+            window_.poll_modal_events(minput);
+            const auto& wev = minput.window_events;
+
+            if (wev.entered_background) {
+                paused_in_background_ = true;
+                audio_.suspend();
+                vfs_.notify_persist_write();
+            }
+            if (wev.entered_foreground) {
+                paused_in_background_ = false;
+                audio_.resume();
+            }
+            if (wev.context_lost) {
+                if (auto res = gfx_.reinit_after_context_loss(&PlatformWindow::gl_get_proc_address); res) {
+                    (void)renderer_.reload_gpu_resources(game_);
+                    (void)touch_overlay_.reload_gpu_resources();
+                    (void)message_dialog_.reload_gpu_resources();
+                }
+                context_lost_aborted = true;
+                aborted = true;
+                break;
+            }
+#if defined(__EMSCRIPTEN__)
+            if (wev.any_user_gesture && !web_audio_unlocked_) {
+                web_audio_unlocked_ = true;
+                web_unlock_audio();
+                audio_.resume();
+            }
+#endif
+            if (host_stop_requested_ || wev.quit_requested) {
+                running_ = false;
+                pending_action_ = PendingRoomAction::EndGame;
+                aborted = true;
+                break;
+            }
+            if (!paused_in_background_) {
+                break;
+            }
+#if defined(__EMSCRIPTEN__)
+            Clock::yield_ms(16);
+#else
+            Clock::sleep_until_us(Clock::now_us() + 16000u);
+#endif
+        }
+        if (aborted) break;
+
+        const i32 dw = std::max(1, window_.drawable_width());
+        const i32 dh = std::max(1, window_.drawable_height());
+        compute_canvas_viewport(vx, vy, vw, vh, cw, ch);
+        bw = std::max(1, requested_backbuffer_w_ > 0 ? requested_backbuffer_w_ : cw);
+        bh = std::max(1, requested_backbuffer_h_ > 0 ? requested_backbuffer_h_ : ch);
+        renderer_.set_screen_region(dw, dh, bw, bh, ViewportRect{vx, vy, vw, vh});
+
+        renderer_.begin_frame(dw, dh);
+        renderer_.begin_screen_pass(bw, bh, dw, dh, ViewportRect{vx, vy, vw, vh});
+
+        const f64 fraction = static_cast<f64>(step) / static_cast<f64>(steps);
+        if (custom_script.has_value()) {
+            const bool to_screen_fbo = renderer_.rendering_to_fbo();
+            const ViewportRect port = to_screen_fbo ? ViewportRect{0, 0, bw, bh} : ViewportRect{vx, vy, vw, vh};
+            gfx_.set_scissor(false);
+            renderer_.set_projection_ortho(0.0f, 0.0f, static_cast<f32>(bw), static_cast<f32>(bh),
+                                           0.0f, port.x, port.y, port.width, port.height);
+            execute_custom_transition_script(*custom_script, transition_surf_old_, transition_surf_new_,
+                                             bw, bh, fraction);
+            if (renderer_.current_surface_target() >= 0) {
+                renderer_.surface_reset_target();
+            }
+        } else {
+            renderer_.draw_builtin_transition(kind, transition_surf_old_, transition_surf_new_,
+                                              bw, bh, steps, fraction);
+        }
+
+        present_current_frame();
+
+        if (step < steps && running_ && !host_stop_requested_) {
+#if defined(__EMSCRIPTEN__)
+            const u64 elapsed_ms = (Clock::now_us() - frame_start) / 1000u;
+            Clock::yield_ms(elapsed_ms < 16u ? static_cast<u32>(16u - elapsed_ms) : 1u);
+#else
+            Clock::sleep_until_us(frame_start + 16667u);
+#endif
+        }
+    }
+
+    cancel_room_transition();
+    if (context_lost_aborted && running_ && !host_stop_requested_) {
+        render_current_frame();
+        present_current_frame();
     }
 }
 
@@ -649,8 +921,10 @@ void Runner::process_pending_room_action() {
     for (int guard = 0; guard < 32 && pending_action_ != PendingRoomAction::None; ++guard) {
         const PendingRoomAction act = pending_action_;
         const i32 target = pending_room_id_;
+        const std::string load_path = std::move(pending_load_path_);
         pending_action_ = PendingRoomAction::None;
         pending_room_id_ = -1;
+        pending_load_path_.clear();
 
         switch (act) {
             case PendingRoomAction::None:
@@ -668,6 +942,13 @@ void Runner::process_pending_room_action() {
                 return;
             case PendingRoomAction::EndGame:
                 running_ = false;
+                return;
+            case PendingRoomAction::LoadGame:
+                // Match gm81.exe.c:sub_60714C: clear IO before executing deferred game_load.
+                window_.input_mut().clear_all();
+                mouse_button_ = 0;
+                mouse_lastbutton_ = 0;
+                (void)load_game(load_path);
                 return;
         }
     }
@@ -691,6 +972,12 @@ void Runner::request_game_restart() {
 
 void Runner::request_game_end() {
     pending_action_ = PendingRoomAction::EndGame;
+}
+
+void Runner::request_game_load(std::string_view path) {
+    pending_load_path_ = std::string(path);
+    pending_action_ = PendingRoomAction::LoadGame;
+    pending_room_id_ = -1;
 }
 
 bool Runner::room_exists(i32 room_id) const noexcept {
@@ -790,6 +1077,18 @@ void Runner::tick_frame() {
     }
     if (game_.options.screen_key && inp.key_pressed[115]) { // F4 fullscreen toggle
         window_.set_fullscreen(!window_.is_fullscreen());
+    }
+    if (game_.options.save_key && inp.key_pressed[116]) { // F5 quick-save (gm81.exe.c:sub_6065A0)
+        (void)save_game("_save" + std::to_string(game_.meta.game_id) + ".sav");
+    }
+    if (game_.options.save_key && inp.key_pressed[117]) { // F6 quick-load (gm81.exe.c:sub_6065A0)
+        const std::string quick_path = "_save" + std::to_string(game_.meta.game_id) + ".sav";
+        window_.input_mut().clear_all();
+        mouse_button_ = 0;
+        mouse_lastbutton_ = 0;
+        if (load_game(quick_path)) {
+            return;
+        }
     }
     if (game_.options.screenshot_key && inp.key_pressed[120]) { // F9 screenshot
         (void)renderer_.screen_save("screenshot.png");
@@ -2402,7 +2701,7 @@ Result<void> Runner::set_builtin_global(u32 var_id, i32 idx, bool has_idx, RValu
             return Result<void>::success();
         case 19u: request_room_goto(value.as_i32()); return Result<void>::success();
         case 22u: transition_kind_ = value.as_i32(); return Result<void>::success();
-        case 23u: transition_steps_ = value.as_i32(); return Result<void>::success();
+        case 23u: transition_steps_ = std::max(1, value.as_i32()); return Result<void>::success();
         case 24u:
             score_ = value.as_real();
             return Result<void>::success();
@@ -2637,6 +2936,7 @@ i32 Runner::ext_game_get_state() const noexcept {
         case PendingRoomAction::None:        return -1; // gs_running
         case PendingRoomAction::EndGame:     return -100;
         case PendingRoomAction::RestartGame: return -200;
+        case PendingRoomAction::LoadGame:    return -300;
         case PendingRoomAction::RestartRoom: return current_room_;
         case PendingRoomAction::Goto:        return pending_room_id_;
     }

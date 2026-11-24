@@ -147,6 +147,7 @@ struct SavedRoomState {
     i32 width = 640;
     i32 height = 480;
     i32 speed = 30;
+    bool persistent = false;
     std::string caption;
 };
 

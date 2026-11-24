@@ -73,10 +73,12 @@ public:
     [[nodiscard]] Result<void> set_array(u32 var_id, i32 i0, i32 i1, u8 dims, RValue value);
 
     void clear();
+    [[nodiscard]] usize size() const noexcept { return map_ ? map_->size() : flat_.size(); }
     [[nodiscard]] std::vector<u32> all_var_ids() const;
+    [[nodiscard]] const VarSlot* find_slot(u32 var_id) const noexcept;
+    void set_slot(u32 var_id, VarSlot slot);
 
 private:
-    [[nodiscard]] const VarSlot* find_slot(u32 var_id) const noexcept;
     [[nodiscard]] VarSlot& find_or_create_slot(u32 var_id);
     void promote_to_map();
 
@@ -120,6 +122,9 @@ public:
     void set_host(IVmHost* host) noexcept { host_ = host; }
     [[nodiscard]] VariableTable& globals() noexcept { return globals_; }
     [[nodiscard]] const VariableTable& globals() const noexcept { return globals_; }
+    [[nodiscard]] const std::vector<bool>& declared_globals() const noexcept { return declared_globals_; }
+    void clear_declared_globals() { declared_globals_.clear(); }
+    void declare_global(u32 var_id);
     void reset_globals();
 
     // Evaluates all expression constants once at game startup.

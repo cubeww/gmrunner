@@ -8,6 +8,7 @@ add_library(gm_runtime STATIC
     particles.cpp
     runner.h
     runner.cpp
+    save_load.cpp
     builtins_core.cpp
     builtins_gameplay.cpp
     builtins_graphics.cpp

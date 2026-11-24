@@ -766,12 +766,10 @@ void Runner::register_builtins_gameplay() {
         return RValue(inst ? inst->sprite_index : -1);
     });
     register_builtin("transition_define", [](Runner& r, i32, i32, std::span<const RValue> a) {
-        r.transition_scripts_[arg_i32(a, 0)] = arg_i32(a, 1, -1);
-        return RValue(0.0);
+        return RValue(r.transition_define(arg_i32(a, 0), arg_str(a, 1)));
     });
     register_builtin("transition_exists", [](Runner& r, i32, i32, std::span<const RValue> a) {
-        const i32 k = arg_i32(a, 0);
-        return RValue((k >= 0 && k <= 21) || r.transition_scripts_.contains(k));
+        return RValue(r.transition_exists(arg_i32(a, 0)));
     });
 
     // MP Step, Potential & Grid
