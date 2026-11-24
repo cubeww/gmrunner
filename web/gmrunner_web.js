@@ -532,8 +532,13 @@
         }
     }
 
+    const launchParams = new URLSearchParams(window.location.search);
+    const launchArgs = launchParams.has("sharp-scale") ? ["--sharp-scale"] : [];
+    const codepage = launchParams.get("codepage");
+    if (codepage && /^\d{1,5}$/.test(codepage)) launchArgs.push("--codepage", codepage);
+
     window.Module = {
-        arguments: new URLSearchParams(window.location.search).has("sharp-scale") ? ["--sharp-scale"] : [],
+        arguments: launchArgs,
         canvas: (function () {
             return document.getElementById("canvas");
         })(),

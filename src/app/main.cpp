@@ -40,6 +40,7 @@ struct AppState {
     std::unique_ptr<gm::Runner> runner;
     bool running = true;
     bool sharp_scale = false;
+    gm::LoadOptions load_options{};
     bool loop_active = false;
     bool web_busy = false;
     bool stop_requested = false;
@@ -455,9 +456,8 @@ int gmrunner_web_launch(const char* mode_cstr, const char* path_cstr, const char
     }
 
     gm::web_report_status("Loading " + exe_lookup_path + "...");
-    gm::LoadOptions load_opts{};
     const gm::u64 t0 = gm::Clock::now_us();
-    auto game_res = gm::ExeLoader::load_from_vfs(app.vfs, exe_lookup_path, load_opts);
+    auto game_res = gm::ExeLoader::load_from_vfs(app.vfs, exe_lookup_path, app.load_options);
     if (!game_res) {
         GM_LOG_ERROR("loader", "Failed to load '%s': %s", exe_lookup_path.c_str(), game_res.error_message().c_str());
         gm::web_report_status("Load failed: " + game_res.error_message());
@@ -548,6 +548,7 @@ int main(int argc, char** argv) {
 
     g_web_app = std::make_unique<AppState>();
     g_web_app->sharp_scale = opts.sharp_scale;
+    g_web_app->load_options.codepage_override = opts.codepage;
     if (auto res = g_web_app->vfs.init_temp_dir(); !res) {
         GM_LOG_WARN("app", "%s", res.error_message().c_str());
     }
