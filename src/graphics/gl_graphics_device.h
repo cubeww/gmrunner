@@ -40,6 +40,7 @@ public:
     void destroy_texture(TextureHandle tex) override;
 
     [[nodiscard]] Result<FramebufferHandle> create_framebuffer(std::span<const TextureHandle> color_targets, bool with_depth_stencil = true) override;
+    void copy_framebuffer_to_texture(TextureHandle dst, i32 x, i32 y, i32 xs, i32 ys, i32 w, i32 h);
     void bind_framebuffer(FramebufferHandle fbo) override;
     void set_framebuffer_mrt_target(FramebufferHandle fbo, u32 slot, TextureHandle tex);
     bool set_framebuffer_depth_from(FramebufferHandle dst_fbo, FramebufferHandle src_fbo);

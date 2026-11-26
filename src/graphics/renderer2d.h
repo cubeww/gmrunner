@@ -92,10 +92,13 @@ public:
     // Ensures internal logical screen FBO exists and binds it (unless a user surface target is active).
     void begin_screen_pass(i32 canvas_w, i32 canvas_h, i32 backbuffer_w, i32 backbuffer_h, const ViewportRect& present_viewport);
     // Presents the internal screen FBO onto the window backbuffer with letterbox border color.
-    void present_screen(u32 border_color_bgr);
+    void present_screen(u32 border_color_bgr, std::optional<u32> color_key);
     [[nodiscard]] bool has_screen_frame() const noexcept { return screen_fbo_tex_.valid(); }
     // Startup option, set before init() so the default shader stays unchanged.
     void set_sharp_scale(bool enabled) noexcept { sharp_scale_ = enabled; }
+    // Mirrors __gm82dx9_setalphabuffer (D3DFMT_A8R8G8B8 vs D3DFMT_X8R8G8B8 backbuffer).
+    void set_alpha_buffer(bool enabled) noexcept { window_alpha_buffer_ = enabled; }
+    [[nodiscard]] bool alpha_buffer_enabled() const noexcept { return window_alpha_buffer_; }
     void end_frame();
     void flush();
 
@@ -185,7 +188,7 @@ public:
     bool screen_read_pixels_bgra(i32 x, i32 y, i32 w, i32 h, std::vector<u8>& out_bgra);
     [[nodiscard]] u32 surface_getpixel(i32 id, i32 x, i32 y);
     [[nodiscard]] u32 screen_getpixel(i32 x, i32 y);
-    void surface_copy_part(i32 dst_id, f32 x, f32 y, i32 src_id, f32 xs, f32 ys, f32 ws, f32 hs);
+    void surface_copy_part(i32 dst_id, i32 x, i32 y, i32 src_id, i32 xs, i32 ys, i32 ws, i32 hs);
     [[nodiscard]] static bool save_bitmap_bgra(const Bitmap32& bmp, std::string_view host_path);
 
     // Sprites, Backgrounds & Tiles
@@ -416,6 +419,7 @@ private:
     i32 loc_model_tint_ = -1;
     i32 loc_tex_ = -1;
     i32 loc_sharp_factor_ = -1;
+    i32 loc_window_color_key_ = -1;
     i32 loc_tex_blending_ = -1;
     i32 loc_texcoord_mode_ = -1;
     i32 loc_alpha_test_ = -1;
@@ -488,6 +492,7 @@ private:
     i32 screen_fbo_w_ = 0;
     i32 screen_fbo_h_ = 0;
     bool using_screen_fbo_ = false;
+    bool window_alpha_buffer_ = false;
 
     u32 draw_color_ = 0x000000u; // GM8 default draw color is c_black (0)
     f32 draw_alpha_ = 1.0f;

@@ -521,6 +521,15 @@ Result<TextureHandle> GlGraphicsDevice::create_texture(const TextureDesc& desc, 
     return TextureHandle{id};
 }
 
+void GlGraphicsDevice::copy_framebuffer_to_texture(TextureHandle dst, i32 x, i32 y, i32 xs, i32 ys, i32 w, i32 h) {
+    glActiveTexture(GL_TEXTURE0);
+    cache_.active_unit = 0;
+    glBindTexture(GL_TEXTURE_2D, dst.id);
+    glCopyTexSubImage2D(GL_TEXTURE_2D, 0, x, y, xs, ys, w, h);
+    cache_.bound_tex[0] = dst.id;
+    cache_.bound_tex_valid[0] = true;
+}
+
 void GlGraphicsDevice::update_texture(TextureHandle tex, i32 x, i32 y, i32 w, i32 h, TextureFormat format, std::span<const u8> pixels) {
     if (!tex.valid() || pixels.empty()) {
         return;
@@ -593,7 +602,7 @@ void GlGraphicsDevice::set_texture_sampler_ext(u32 slot, TextureFilter filter, i
 }
 
 void GlGraphicsDevice::bind_texture(u32 slot, TextureHandle tex) {
-    const u32 gl_id = tex.valid() ? tex.id : white_texture_id_;
+    const u32 gl_id = (tex.valid() && textures_.contains(tex.id)) ? tex.id : white_texture_id_;
     if (slot < cache_.bound_tex.size() && cache_.bound_tex_valid[slot] && cache_.bound_tex[slot] == gl_id) {
         return;
     }

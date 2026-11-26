@@ -139,6 +139,7 @@ public:
     void set_audio_muted(bool muted) noexcept { audio_.set_output_muted(muted); }
     [[nodiscard]] bool is_paused_in_background() const noexcept { return paused_in_background_; }
     [[nodiscard]] i32 current_fps() const noexcept { return fps_; }
+    void record_frame_time(u64 frame_end_us);
 
     [[nodiscard]] bool is_running() const noexcept { return running_; }
     [[nodiscard]] i32 room_speed() const noexcept {
@@ -456,7 +457,7 @@ public:
     i32 mouse_button_ = 0;
     i32 mouse_lastbutton_ = 0;
 
-    i32 fps_ = 60;
+    i32 fps_ = 0;
     u64 start_time_us_ = 0;
     std::vector<std::string> cmd_args_;
     std::array<HighscoreEntry, 10> highscores_{};
@@ -674,7 +675,7 @@ private:
     bool no_more_health_armed_ = false;
 
     u32 fps_frame_accum_ = 0;
-    u64 fps_last_sample_us_ = 0;
+    u64 fps_next_second_us_ = 0;
 
     std::array<BuiltinFn, 1282> builtins_{};
     std::array<bool, 1282> warned_unimpl_{};

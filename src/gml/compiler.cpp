@@ -337,6 +337,16 @@ private:
         return Result<void>::success();
     }
 
+    bool has_next_declared_name() {
+        if (match(TokenKind::Comma)) return true;
+        // GM accepts adjacent names. With no semicolon, an identifier can also
+        // start the next statement, e.g. "var tmp obj.x = 1".
+        if (!at(TokenKind::Identifier)) return false;
+        const TokenKind next = peek(1).kind;
+        return !is_assign_op(next) && next != TokenKind::LParen &&
+               next != TokenKind::LBracket && next != TokenKind::Dot;
+    }
+
     Result<void> parse_var_decl() {
         advance(); // 'var'
         if (!at(TokenKind::Identifier)) {
@@ -355,7 +365,7 @@ private:
                 chunk_.emit(OpCode::SaveResult, 0, 0, static_cast<u16>(tok.line));
                 chunk_.emit(OpCode::StoreLocal, var_id, 0, static_cast<u16>(tok.line));
             }
-            if (!match(TokenKind::Comma)) {
+            if (!has_next_declared_name()) {
                 break;
             }
         }
@@ -375,7 +385,7 @@ private:
             const Token tok = advance();
             const u32 vid = symbols_.intern_user_var(tok.text);
             chunk_.emit(OpCode::DeclareGlobal, vid, 0, static_cast<u16>(tok.line));
-            if (!match(TokenKind::Comma)) {
+            if (!has_next_declared_name()) {
                 break;
             }
         }

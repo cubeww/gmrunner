@@ -212,8 +212,13 @@ void build_perspective_lh(f32 proj[16], f32 w, f32 h, f32 zn, f32 zf) noexcept {
 // D3DXMatrixPerspectiveFovLH mapped to OpenGL NDC Z [-1, +1] (unflipped Y).
 void build_perspective_fov_lh(f32 proj[16], f32 fov_deg, f32 aspect, f32 zn, f32 zf) noexcept {
     std::memset(proj, 0, sizeof(f32) * 16u);
-    const f32 fov = static_cast<f32>(deg_to_rad(std::clamp(fov_deg, 0.1f, 179.9f)));
-    const f32 yscale = 1.0f / std::tan(fov * 0.5f);
+    // Match D3DXMatrixPerspectiveFovLH verbatim without clamping fov_deg to [0, 180]:
+    // GM8 / gm82dx9 (e.g. d3d_set_projection_simple) passes negative or wrapped angles
+    // such as -40 or -630 deg to flip Y or compute perspective from point_direction().
+    const f32 half_fov = static_cast<f32>(deg_to_rad(fov_deg)) * 0.5f;
+    const f32 s = std::sin(half_fov);
+    const f32 c = std::cos(half_fov);
+    const f32 yscale = (std::fabs(s) > 1e-6f) ? (c / s) : (c >= 0.0f ? 1e6f : -1e6f);
     const f32 asp = (std::fabs(aspect) > 1e-6f) ? aspect : 1.0f;
     const f32 dz = (std::fabs(zf - zn) > 1e-6f) ? (zf - zn) : 1.0f;
     proj[0]  = yscale / asp;
@@ -362,6 +367,7 @@ flat in vec4 v_col_flat;
 in vec3 v_view_pos;
 
 uniform sampler2D u_tex;
+uniform vec4 u_window_color_key;
 #ifdef SHARP_SCALE
 uniform float u_sharp_factor;
 #endif
@@ -416,6 +422,11 @@ void main() {
         c.rgb = mix(u_fog_color, c.rgb, f);
     }
 
+    // Apply the Windows color key only to the final presentation quad.
+    if (u_window_color_key.w > 0.0) {
+        if (all(equal(floor(c.rgb * 255.0 + 0.5), u_window_color_key.rgb))) c = vec4(0.0);
+        else if (u_window_color_key.w == 1.0) c.a = 1.0;
+    }
     o_color = c;
 }
 )";
@@ -432,6 +443,7 @@ void main() {
     loc_model_tint_ = glGetUniformLocation(shader_.id, "u_model_tint");
     loc_tex_ = glGetUniformLocation(shader_.id, "u_tex");
     loc_sharp_factor_ = glGetUniformLocation(shader_.id, "u_sharp_factor");
+    loc_window_color_key_ = glGetUniformLocation(shader_.id, "u_window_color_key");
     loc_tex_blending_ = glGetUniformLocation(shader_.id, "u_tex_blending");
     loc_texcoord_mode_ = glGetUniformLocation(shader_.id, "u_texcoord_mode");
     loc_alpha_test_ = glGetUniformLocation(shader_.id, "u_alpha_test");
@@ -530,6 +542,7 @@ void Renderer2D::shutdown() noexcept {
     screen_fbo_w_ = 0;
     screen_fbo_h_ = 0;
     using_screen_fbo_ = false;
+    window_alpha_buffer_ = false;
 
     for (auto& sp : sprites_) {
         for (auto t : sp.subimages) device_->destroy_texture(t);
@@ -664,6 +677,7 @@ void Renderer2D::upload_sprite(usize sprite_idx, const SpriteData& spr) {
 void Renderer2D::free_sprite_textures(usize sprite_idx) {
     if (sprite_idx >= sprites_.size()) return;
     for (auto t : sprites_[sprite_idx].subimages) {
+        dx9_.clear_texture_handle(t);
         device_->destroy_texture(t);
     }
     sprites_[sprite_idx].subimages.clear();
@@ -693,6 +707,7 @@ void Renderer2D::upload_background(usize bg_idx, const BackgroundData& bg) {
 
 void Renderer2D::free_background_texture(usize bg_idx) {
     if (bg_idx >= backgrounds_.size()) return;
+    dx9_.clear_texture_handle(backgrounds_[bg_idx]);
     device_->destroy_texture(backgrounds_[bg_idx]);
     backgrounds_[bg_idx] = {};
 }
@@ -868,7 +883,7 @@ void Renderer2D::begin_screen_pass(i32 canvas_w, i32 canvas_h, i32 backbuffer_w,
     device_->set_blend_state(blend_state_);
 }
 
-void Renderer2D::present_screen(u32 border_color_bgr) {
+void Renderer2D::present_screen(u32 border_color_bgr, std::optional<u32> color_key) {
     flush();
     if (!screen_fbo_tex_.valid() || (!using_screen_fbo_ && active_surface_id_ < 0)) {
         device_->bind_framebuffer(FramebufferHandle{});
@@ -908,7 +923,13 @@ void Renderer2D::present_screen(u32 border_color_bgr) {
     device_->set_polygon_mode(2);
     device_->set_color_mask(true, true, true, true);
     device_->set_viewport(ViewportRect{0, 0, backbuffer_w_, backbuffer_h_});
-    clear_color(border_color_bgr, 1.0f);
+    if (window_alpha_buffer_ || color_key == (border_color_bgr & 0xffffffu)) {
+        device_->clear(true, true, false, 0.0f, 0.0f, 0.0f, 0.0f);
+    } else {
+        clear_color(border_color_bgr, 1.0f);
+        // Match D3DFMT_X8R8G8B8: keep backbuffer alpha opaque when alpha-buffer mode is off.
+        device_->set_color_mask(true, true, true, color_key.has_value());
+    }
 
     alpha_test_explicit_ = false;
     d3d_active_ = false;
@@ -925,6 +946,11 @@ void Renderer2D::present_screen(u32 border_color_bgr) {
                          screen_viewport_.x, screen_viewport_.y, screen_viewport_.width, screen_viewport_.height);
     const ColorRGBA white{255, 255, 255, 255};
     const bool saved_filter = linear_filter_;
+    if (color_key) {
+        const auto key = gm_bgr_to_rgba(*color_key);
+        device_->bind_shader(shader_);
+        glUniform4f(loc_window_color_key_, key.r, key.g, key.b, window_alpha_buffer_ ? 2.0f : 1.0f);
+    }
     if (sharp_scale_) {
         linear_filter_ = screen_viewport_.width % screen_fbo_w_ != 0 ||
                          screen_viewport_.height % screen_fbo_h_ != 0;
@@ -944,6 +970,7 @@ void Renderer2D::present_screen(u32 border_color_bgr) {
     flush();
 
     if (sharp_scale_ && linear_filter_) glUniform1f(loc_sharp_factor_, 0.0f);
+    if (color_key) glUniform4f(loc_window_color_key_, 0, 0, 0, 0);
     linear_filter_ = saved_filter;
     std::memcpy(world_matrix_, saved_world, sizeof(saved_world));
     std::memcpy(view_matrix_, saved_view, sizeof(saved_view));
@@ -1495,6 +1522,7 @@ void Renderer2D::surface_free(i32 id) {
         flush();
     }
     device_->destroy_framebuffer(it->second.fbo);
+    dx9_.clear_texture_handle(it->second.texture);
     device_->destroy_texture(it->second.texture);
     surfaces_.erase(it);
     surface_tokens_.erase(id);
@@ -2073,18 +2101,29 @@ u32 Renderer2D::screen_getpixel(i32 x, i32 y) {
     return static_cast<u32>(bgra[2]) | (static_cast<u32>(bgra[1]) << 8u) | (static_cast<u32>(bgra[0]) << 16u);
 }
 
-void Renderer2D::surface_copy_part(i32 dst_id, f32 x, f32 y, i32 src_id, f32 xs, f32 ys, f32 ws, f32 hs) {
-    if (!surfaces_.contains(dst_id) || !surfaces_.contains(src_id)) return;
-    const i32 prev = active_surface_id_;
-    const BlendState prev_blend = blend_state_;
-    surface_set_target(dst_id);
+void Renderer2D::surface_copy_part(i32 dst_id, i32 x, i32 y, i32 src_id, i32 xs, i32 ys, i32 ws, i32 hs) {
+    auto dst = surfaces_.find(dst_id);
+    auto src = surfaces_.find(src_id);
+    if (dst == surfaces_.end() || src == surfaces_.end()) return;
+
+    // Clip the two rectangles together, preserving the source-to-destination offset.
+    const i64 left = std::max({i64{0}, -i64{x}, -i64{xs}});
+    const i64 top = std::max({i64{0}, -i64{y}, -i64{ys}});
+    const i64 right = std::min({i64{ws}, dst->second.width - i64{x}, src->second.width - i64{xs}});
+    const i64 bottom = std::min({i64{hs}, dst->second.height - i64{y}, src->second.height - i64{ys}});
+    if (right <= left || bottom <= top) return;
+    const i32 w = static_cast<i32>(right - left);
+    const i32 h = static_cast<i32>(bottom - top);
     flush();
-    blend_state_.enabled = false;
-    draw_surface_part_ext(src_id, xs, ys, ws, hs, x, y, 1.0f, 1.0f, 0xFFFFFFu, 1.0f);
-    flush();
-    blend_state_ = prev_blend;
-    if (prev >= 0) surface_set_target(prev);
-    else surface_reset_target();
+    device_->bind_framebuffer(src->second.fbo);
+    if (dst_id == src_id) {
+        std::vector<u8> pixels(static_cast<usize>(w) * h * 4);
+        device_->read_pixels_rgba8(xs + left, ys + top, w, h, pixels);
+        device_->update_texture(dst->second.texture, x + left, y + top, w, h, TextureFormat::RGBA8, pixels);
+    } else {
+        device_->copy_framebuffer_to_texture(dst->second.texture, x + left, y + top, xs + left, ys + top, w, h);
+    }
+    bind_active_target_fbo();
 }
 
 bool Renderer2D::save_bitmap_bgra(const Bitmap32& bmp, std::string_view host_path) {

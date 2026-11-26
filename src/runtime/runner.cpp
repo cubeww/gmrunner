@@ -193,8 +193,6 @@ Result<void> Runner::init(GameData game, CompiledProgram program, std::vector<st
     vm_ = std::make_unique<GmlVm>(program_, this);
 
     start_time_us_ = Clock::now_us();
-    fps_last_sample_us_ = start_time_us_;
-    fps_frame_accum_ = 0;
 
     // Seed PRNG with current time (GM8 randomizes on startup unless fixed by game).
     set_random_seed(static_cast<u32>(start_time_us_ & 0xFFFFFFFFu));
@@ -394,6 +392,9 @@ void Runner::start_game() {
 
     start_room(game_.room_order[0], true);
     process_pending_room_action();
+    fps_ = 0;
+    fps_frame_accum_ = 0;
+    fps_next_second_us_ = Clock::now_us() + 1000000;
 }
 
 void Runner::start_room(i32 room_id, bool is_game_start) {
@@ -1211,18 +1212,23 @@ void Runner::tick_frame() {
         return;
     }
 
-    // Stage 16: Present + FPS measurement
+    // Stage 16: Present
     if (auto_draw_) {
         present_current_frame();
     }
 
-    ++fps_frame_accum_;
-    const u64 now_us = Clock::now_us();
-    if (now_us - fps_last_sample_us_ >= 1000000u) {
-        fps_ = static_cast<i32>(fps_frame_accum_);
+}
+
+void Runner::record_frame_time(u64 frame_end_us) {
+    constexpr u64 second_us = 1000000;
+    // GM publishes the preceding whole second before counting the boundary frame.
+    if (frame_end_us >= fps_next_second_us_) {
+        const u64 missed_seconds = (frame_end_us - fps_next_second_us_) / second_us;
+        fps_ = missed_seconds == 0 ? static_cast<i32>(fps_frame_accum_) : 0;
         fps_frame_accum_ = 0;
-        fps_last_sample_us_ = now_us;
+        fps_next_second_us_ += (missed_seconds + 1) * second_us;
     }
+    ++fps_frame_accum_;
 }
 
 void Runner::invalidate_event_tables() {
@@ -1888,7 +1894,7 @@ void Runner::render_current_frame() {
 }
 
 void Runner::present_current_frame() {
-    renderer_.present_screen(window_color_);
+    renderer_.present_screen(window_color_, window_.window_color_key());
     touch_overlay_.render(window_.drawable_width(), window_.drawable_height());
     window_.swap_buffers();
     renderer_.end_frame();
@@ -3479,7 +3485,7 @@ void Runner::run_message_dialog_modal(bool with_input) {
 
         if (!paused_in_background_) {
             if (renderer_.has_screen_frame()) {
-                renderer_.present_screen(window_color_);
+                renderer_.present_screen(window_color_, window_.window_color_key());
             } else {
                 const auto saved = gfx_.save_render_state();
                 gfx_.bind_framebuffer(FramebufferHandle{});
@@ -3806,7 +3812,7 @@ void Runner::run_ui_dialog_modal(bool show_cursor) {
 
         if (!paused_in_background_) {
             if (renderer_.has_screen_frame()) {
-                renderer_.present_screen(window_color_);
+                renderer_.present_screen(window_color_, window_.window_color_key());
             } else {
                 const auto saved = gfx_.save_render_state();
                 gfx_.bind_framebuffer(FramebufferHandle{});

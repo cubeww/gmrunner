@@ -334,6 +334,9 @@ void gmrunner_web_frame(void* userdata) {
     while (app->accum_us >= threshold_us && steps < 2 && app->running) {
         app->accum_us = (app->accum_us >= step_us) ? (app->accum_us - step_us) : 0u;
         tick_app_frame(*app);
+        if (app->runner && app->running && !app->runner->is_paused_in_background()) {
+            app->runner->record_frame_time(gm::Clock::now_us());
+        }
         ++steps;
     }
     if (app->accum_us > step_us * 2u) {
@@ -748,6 +751,7 @@ int main(int argc, char** argv) {
             next_frame_us = now;
         }
         gm::Clock::sleep_until_us(next_frame_us);
+        if (app.runner) app.runner->record_frame_time(next_frame_us);
     }
 
     if (app.runner) {

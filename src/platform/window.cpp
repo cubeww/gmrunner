@@ -23,6 +23,7 @@
 #endif
 #include <windows.h>
 #include <commctrl.h>
+#include <dwmapi.h>
 #endif
 
 namespace gm {
@@ -136,6 +137,9 @@ Result<void> PlatformWindow::create(const WindowConfig& config) {
     resizable_ = config.resizable;
     stay_on_top_ = false;
     visible_ = true;
+    composite_alpha_ = false;
+    chromakey_enabled_ = false;
+    chromakey_color_ = 0;
     set_vsync(config.vsync);
     set_cursor(config.show_cursor ? 0 : -1);
 #if !defined(__ANDROID__)
@@ -166,6 +170,9 @@ void PlatformWindow::destroy() noexcept {
         SDL_DestroyWindow(window_);
         window_ = nullptr;
     }
+    composite_alpha_ = false;
+    chromakey_enabled_ = false;
+    chromakey_color_ = 0;
 }
 
 u8 PlatformWindow::sdl_scancode_to_gm_vk(i32 scancode) noexcept {
@@ -978,6 +985,45 @@ void PlatformWindow::set_visible(bool visible) {
             SDL_HideWindow(window_);
         }
     }
+}
+
+void PlatformWindow::set_composite_alpha(bool enabled) {
+    if (composite_alpha_ == enabled) return;
+    composite_alpha_ = enabled;
+    update_window_transparency();
+}
+
+void PlatformWindow::set_chromakey(bool enabled, u32 color_bgr) {
+    chromakey_color_ = color_bgr & 0x00FFFFFFu;
+    if (chromakey_enabled_ == enabled) return;
+    chromakey_enabled_ = enabled;
+    update_window_transparency();
+}
+
+void PlatformWindow::update_window_transparency() {
+#if defined(_WIN32)
+    if (!window_) return;
+    const auto hwnd = static_cast<HWND>(SDL_GetPointerProperty(
+        SDL_GetWindowProperties(window_), SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr));
+    if (!hwnd) return;
+    if (composite_alpha_ || chromakey_enabled_) {
+        // Use SDL3/GLFW's Win32 OpenGL DWM transparency technique: empty blur region
+        // tells DWM to composite the framebuffer's alpha channel without glass blur.
+        HRGN rgn = CreateRectRgn(-1, -1, 0, 0);
+        DWM_BLURBEHIND bb{};
+        bb.dwFlags = DWM_BB_ENABLE | DWM_BB_BLURREGION;
+        bb.fEnable = TRUE;
+        bb.hRgnBlur = rgn;
+        bb.fTransitionOnMaximized = FALSE;
+        DwmEnableBlurBehindWindow(hwnd, &bb);
+        if (rgn) DeleteObject(rgn);
+    } else {
+        DWM_BLURBEHIND bb{};
+        bb.dwFlags = DWM_BB_ENABLE;
+        bb.fEnable = FALSE;
+        DwmEnableBlurBehindWindow(hwnd, &bb);
+    }
+#endif
 }
 
 bool PlatformWindow::is_maximized() const noexcept {

@@ -246,11 +246,13 @@ void Runner::register_builtins_actions() {
         const auto* self = r.find_instance(self_id);
         const f64 bx = (r.action_relative_ && self) ? self->x : 0.0;
         const f64 by = (r.action_relative_ && self) ? self->y : 0.0;
-        const i32 nid = r.create_instance(bx + arg_real(a, 1), by + arg_real(a, 2), arg_i32(a, 0, -1), true);
+        const i32 nid = r.create_instance(bx + arg_real(a, 1), by + arg_real(a, 2), arg_i32(a, 0, -1), false);
         if (auto* ni = r.find_instance(nid)) {
             ni->speed = arg_real(a, 3);
             ni->direction = arg_real(a, 4);
             ni->sync_hv_from_polar();
+            // GM applies the action's initial motion before the new instance's Create event.
+            r.perform_event_on_instance(nid, -1, 0, 0, nid);
         }
         return RValue(nid);
     });

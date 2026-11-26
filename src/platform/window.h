@@ -168,6 +168,15 @@ public:
     [[nodiscard]] bool is_resizable() const noexcept { return resizable_; }
     void set_visible(bool visible);
     [[nodiscard]] bool is_visible() const noexcept { return visible_; }
+    void set_composite_alpha(bool enabled);
+    [[nodiscard]] bool is_composite_alpha() const noexcept { return composite_alpha_; }
+    void set_chromakey(bool enabled, u32 color_bgr);
+    [[nodiscard]] std::optional<u32> window_color_key() const noexcept {
+#if defined(_WIN32)
+        if (chromakey_enabled_) return chromakey_color_;
+#endif
+        return std::nullopt;
+    }
     [[nodiscard]] bool is_maximized() const noexcept;
     [[nodiscard]] bool is_minimized() const noexcept;
     void maximize();
@@ -237,6 +246,7 @@ public:
 
 private:
     void apply_pending_windowed_size();
+    void update_window_transparency();
     WindowEvents poll_events_impl(bool clear_edges);
     static u8 sdl_scancode_to_gm_vk(i32 scancode) noexcept;
     static u8 sdl_mouse_button_to_gm(u8 button) noexcept;
@@ -254,6 +264,9 @@ private:
     bool stay_on_top_ = false;
     bool resizable_ = true;
     bool visible_ = true;
+    bool composite_alpha_ = false;
+    bool chromakey_enabled_ = false;
+    u32 chromakey_color_ = 0;
     bool cursor_visible_ = true;
     i32 current_cursor_ = 0;
     std::array<SDL_Cursor*, 24> system_cursors_{};

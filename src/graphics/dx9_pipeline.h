@@ -37,8 +37,8 @@ struct Dx9SamplerState {
     bool has_explicit_tex = false;
     bool linear_filter = false;
     bool has_explicit_filter = false;
-    i32 wrap_u = 3; // D3DTADDRESS_CLAMP
-    i32 wrap_v = 3;
+    i32 wrap_u = 1; // D3DTADDRESS_WRAP (D3D9 default; stage 0 uses global_tex_repeat unless overridden)
+    i32 wrap_v = 1;
     u32 border_bgr = 0;
     bool has_explicit_wrap = false;
 };
@@ -99,6 +99,21 @@ public:
     void clear_stage0_overrides() noexcept;
     void clear_stage0_filter_override() noexcept { ps_samplers_[0].has_explicit_filter = false; }
     void clear_stage0_wrap_override() noexcept { ps_samplers_[0].has_explicit_wrap = false; }
+    void clear_texture_handle(TextureHandle tex) noexcept {
+        if (!tex.valid()) return;
+        for (auto& st : ps_samplers_) {
+            if (st.texture == tex) {
+                st.texture = {};
+                st.has_explicit_tex = false;
+            }
+        }
+        for (auto& st : vs_samplers_) {
+            if (st.texture == tex) {
+                st.texture = {};
+                st.has_explicit_tex = false;
+            }
+        }
+    }
     [[nodiscard]] const Dx9SamplerState& ps_sampler(i32 stage) const noexcept {
         return ps_samplers_[static_cast<usize>(std::clamp(stage, 0, 7))];
     }

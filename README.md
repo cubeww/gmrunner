@@ -22,7 +22,7 @@ Cross-platform C++20 runtime for **GameMaker 8.0 / 8.1 / 8.2** games, targeting 
 - **GM 8.0 / 8.1 / 8.2 Runtime**: Direct PE executable decryption and loading, GML bytecode compiler/VM with D&D action lowering, faithful 17-stage step loop, pixel-accurate/rotated collisions, particles, paths, and data structures.
 - **Unified Graphics & Shaders**: OpenGL 3.3 Core (Desktop), OpenGL ES 3.0 (Android), and WebGL 2.0 (Web) backend with batched 2D, fixed-function D3D8/9 3D, surfaces/MRT, and an in-house D3D9 SM1–SM3 bytecode-to-GLSL transpiler.
 - **Software Audio Mixer**: Cross-platform audio (`miniaudio`, `stb_vorbis`, `TinySoundFont`, tracker playback) with pitch/fade controls, 3D spatialization, and DSP effects.
-- **Modular Native Extensions**: Cross-platform C++ extension registry replacing 32-bit Windows `.gex` and runtime DLLs (`gm82core`, `gm82buf`, `gm82snd`, `gm82joy`, `gm82drag`, `gm82test`, `gm82dx8`/`gm82dx9`, `GMFMODSimple`, `SuperSound`, `MaizeMusic`, `CleanMem`).
+- **Modular Native Extensions**: Cross-platform C++ extension registry replacing 32-bit Windows `.gex` and runtime DLLs (`gm82core`, `gm82buf`, `gm82snd`, `gm82joy`, `gm82drag`, `gm82test`, `gm82alpha`, `gm82gltf`, `gm82dx8`/`gm82dx9`, `GMFMODSimple`, `SuperSound`, `MaizeMusic`, `CleanMem`).
 - **Zero-Extraction Loading & Touch Controls**: Run `.exe` files, game folders, or streamed `.zip` archives directly, with persistent saves (OPFS/IDBFS on Web) and a built-in multi-touch virtual gamepad.
 
 ## Usage

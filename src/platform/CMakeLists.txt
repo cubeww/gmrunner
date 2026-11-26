@@ -24,7 +24,7 @@ target_link_libraries(gm_platform
 )
 
 if(WIN32)
-    target_link_libraries(gm_platform PRIVATE winmm user32 gdi32 comctl32)
+    target_link_libraries(gm_platform PRIVATE winmm user32 gdi32 comctl32 dwmapi)
 endif()
 
 gmrunner_apply_warnings(gm_platform)

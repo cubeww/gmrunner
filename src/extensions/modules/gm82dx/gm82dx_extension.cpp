@@ -89,7 +89,15 @@ public:
         // -------------------------------------------------------------------
         reg.bind_const("dllcheck", 820.0);
         reg.bind_const({"dll_init", "init", "not_xp"}, 1.0);
-        reg.bind_stub({"testfunc", "setalphabuffer", "setpointscale", "setzscale", "getvendor"}, 0.0);
+        reg.bind_stub({"testfunc", "setpointscale", "setzscale", "getvendor"}, 0.0);
+        reg.bind("setalphabuffer", [](const CallContext& ctx) {
+            const bool enable = ctx.real(0, 0.0) >= 0.5;
+            ctx.host.ext_renderer().set_alpha_buffer(enable);
+            if (!enable && ctx.host.ext_window().is_composite_alpha()) {
+                ctx.host.ext_window().set_composite_alpha(false);
+            }
+            return RValue(0.0);
+        });
         reg.bind_const("getvideomem", 1073741824.0);
         reg.bind_const({"getmaxwidth", "getmaxheight"}, 16384.0);
 
@@ -153,12 +161,12 @@ public:
             const i32 w = ctx.i32_arg(2, 0);
             const i32 h = ctx.i32_arg(3, 0);
             if (!buffers_ || w <= 0 || h <= 0) return RValue(-1.0);
-            auto* buf = buffers_->find_by_address(addr);
-            if (!buf) return RValue(-1.0);
+            auto bytes = buffers_->find_read_address(addr);
+            if (!bytes) return RValue(-1.0);
             const usize need = static_cast<usize>(w) * static_cast<usize>(h) * 4;
-            if (buf->data.size() < need) return RValue(-1.0);
+            if (bytes->size() < need) return RValue(-1.0);
             const bool ok = ctx.host.ext_renderer().surface_write_pixels_bgra(
-                surf_id, w, h, std::span<const u8>(buf->data.data(), need));
+                surf_id, w, h, bytes->subspan(0, need));
             return RValue(ok ? 0.0 : -1.0);
         });
         reg.bind("surface_to_buffer", [this](const CallContext& ctx) {
@@ -418,9 +426,9 @@ public:
         reg.bind("set_matrix_from_buffer", [this](const CallContext& ctx) {
             const u32 addr = static_cast<u32>(ctx.real(0, 0.0));
             if (buffers_) {
-                if (auto* buf = buffers_->find_by_address(addr); buf && buf->data.size() >= 64) {
+                if (auto bytes = buffers_->find_read_address(addr); bytes && bytes->size() >= 64) {
                     f32 m[16];
-                    std::memcpy(m, buf->data.data(), 64);
+                    std::memcpy(m, bytes->data(), 64);
                     ctx.host.ext_renderer().d3d_transform_set_matrix(m);
                 }
             }
@@ -631,9 +639,9 @@ public:
             const u32 stride = static_cast<u32>(std::max(1, ctx.i32_arg(2, 1)));
             std::vector<u8> bytes(len, 0);
             if (buffers_ && len > 0) {
-                if (auto* buf = buffers_->find_by_address(addr)) {
-                    const usize n = std::min(len, buf->data.size());
-                    std::memcpy(bytes.data(), buf->data.data(), n);
+                if (auto src = buffers_->find_read_address(addr)) {
+                    const usize n = std::min(len, src->size());
+                    std::memcpy(bytes.data(), src->data(), n);
                 }
             }
             return RValue(static_cast<f64>(ctx.host.ext_renderer().dx9().create_vertex_buffer(bytes, stride)));
@@ -675,9 +683,9 @@ public:
             const i32 fmt = ctx.i32_arg(2, 101);
             std::vector<u8> bytes(len, 0);
             if (buffers_ && len > 0) {
-                if (auto* buf = buffers_->find_by_address(addr)) {
-                    const usize n = std::min(len, buf->data.size());
-                    std::memcpy(bytes.data(), buf->data.data(), n);
+                if (auto src = buffers_->find_read_address(addr)) {
+                    const usize n = std::min(len, src->size());
+                    std::memcpy(bytes.data(), src->data(), n);
                 }
             }
             return RValue(static_cast<f64>(ctx.host.ext_renderer().dx9().create_index_buffer(bytes, fmt)));
@@ -742,9 +750,10 @@ public:
         return std::nullopt;
     }
 
-    void on_unload(IExtensionHost&) override {
+    void on_unload(IExtensionHost& host) override {
         has_started_ = false;
         vx_ = vy_ = vz_ = 0.0f;
+        host.ext_renderer().set_alpha_buffer(false);
     }
 
 private:
@@ -753,10 +762,10 @@ private:
         const u32 addr = static_cast<u32>(ctx.real(0, 0.0));
         const i32 len = ctx.i32_arg(1, 0);
         if (!buffers_) return RValue(-1.0);
-        auto* buf = buffers_->find_by_address(addr);
-        if (!buf) return RValue(-1.0);
-        if (len <= 0 || static_cast<usize>(len) > buf->data.size()) return RValue(-3.0);
-        const std::span<const u8> bytes(buf->data.data(), static_cast<usize>(len));
+        auto src = buffers_->find_read_address(addr);
+        if (!src) return RValue(-1.0);
+        if (len <= 0 || static_cast<usize>(len) > src->size()) return RValue(-3.0);
+        const std::span<const u8> bytes = src->subspan(0, static_cast<usize>(len));
         if (!dx9_shader_bounds_check(bytes)) return RValue(-3.0);
         auto& dx9 = ctx.host.ext_renderer().dx9();
         if constexpr (IsVertex) {
@@ -849,14 +858,14 @@ private:
         const u32 addr = static_cast<u32>(ctx.real(1, 0.0));
         const i32 size = ctx.i32_arg(2, 0);
         if (reg >= 0 && buffers_ && size >= 16) {
-            if (auto* buf = buffers_->find_by_address(addr)) {
-                const usize avail = std::min(static_cast<usize>(size), buf->data.size());
+            if (auto src = buffers_->find_read_address(addr)) {
+                const usize avail = std::min(static_cast<usize>(size), src->size());
                 const u32 count = static_cast<u32>(avail / 16u);
                 if (count > 0) {
                     auto& renderer = ctx.host.ext_renderer();
                     renderer.flush();
                     std::vector<f32> tmp(static_cast<usize>(count) * 4u);
-                    std::memcpy(tmp.data(), buf->data.data(), static_cast<usize>(count) * 16u);
+                    std::memcpy(tmp.data(), src->data(), static_cast<usize>(count) * 16u);
                     if constexpr (IsVertex) renderer.dx9().set_vs_const_f(static_cast<u32>(reg), tmp.data(), count);
                     else                    renderer.dx9().set_ps_const_f(static_cast<u32>(reg), tmp.data(), count);
                 }
@@ -871,14 +880,14 @@ private:
         const u32 addr = static_cast<u32>(ctx.real(1, 0.0));
         const i32 size = ctx.i32_arg(2, 0);
         if (reg >= 0 && buffers_ && size >= 16) {
-            if (auto* buf = buffers_->find_by_address(addr)) {
-                const usize avail = std::min(static_cast<usize>(size), buf->data.size());
+            if (auto src = buffers_->find_read_address(addr)) {
+                const usize avail = std::min(static_cast<usize>(size), src->size());
                 const u32 count = static_cast<u32>(avail / 16u);
                 if (count > 0) {
                     auto& renderer = ctx.host.ext_renderer();
                     renderer.flush();
                     std::vector<i32> tmp(static_cast<usize>(count) * 4u);
-                    std::memcpy(tmp.data(), buf->data.data(), static_cast<usize>(count) * 16u);
+                    std::memcpy(tmp.data(), src->data(), static_cast<usize>(count) * 16u);
                     if constexpr (IsVertex) renderer.dx9().set_vs_const_i(static_cast<u32>(reg), tmp.data(), count);
                     else                    renderer.dx9().set_ps_const_i(static_cast<u32>(reg), tmp.data(), count);
                 }
@@ -893,8 +902,8 @@ private:
         const u32 addr = static_cast<u32>(ctx.real(1, 0.0));
         const i32 size = ctx.i32_arg(2, 0);
         if (reg >= 0 && buffers_ && size >= 16) {
-            if (auto* buf = buffers_->find_by_address(addr)) {
-                const usize avail = std::min(static_cast<usize>(size), buf->data.size());
+            if (auto src = buffers_->find_read_address(addr)) {
+                const usize avail = std::min(static_cast<usize>(size), src->size());
                 const u32 count = std::min<u32>(16u, static_cast<u32>(avail / 16u));
                 if (count > 0) {
                     auto& renderer = ctx.host.ext_renderer();
@@ -902,7 +911,7 @@ private:
                     std::array<bool, 16> tmp{};
                     for (u32 i = 0; i < count; ++i) {
                         u32 raw = 0;
-                        std::memcpy(&raw, buf->data.data() + static_cast<usize>(i) * 4u, 4u);
+                        std::memcpy(&raw, src->data() + static_cast<usize>(i) * 4u, 4u);
                         tmp[i] = (raw != 0u);
                     }
                     if constexpr (IsVertex) renderer.dx9().set_vs_const_b(static_cast<u32>(reg), tmp.data(), count);

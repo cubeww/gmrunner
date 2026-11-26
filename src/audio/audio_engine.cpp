@@ -1037,13 +1037,13 @@ void AudioEngine::play_vanilla_internal(i32 sound_id, bool loop) {
     const auto& snd = vanilla_sounds_[static_cast<usize>(sound_id)];
     if (!snd.exists || !snd.loaded) return;
 
-    // GM8 kind 1 (background music): stop other kind-1 music first.
-    if (snd.gm_kind == 1) {
+    // Background music (1) and multimedia (3) each have one playback slot in GM8.
+    if (snd.gm_kind == 1 || snd.gm_kind == 3) {
         for (auto it = channels_.begin(); it != channels_.end();) {
             if (it->second->is_vanilla &&
                 it->second->sound_id >= 0 &&
                 static_cast<usize>(it->second->sound_id) < vanilla_sounds_.size() &&
-                vanilla_sounds_[static_cast<usize>(it->second->sound_id)].gm_kind == 1) {
+                vanilla_sounds_[static_cast<usize>(it->second->sound_id)].gm_kind == snd.gm_kind) {
                 for (i32 d : it->second->dsp_ids) dsps_.erase(d);
                 it = channels_.erase(it);
             } else {

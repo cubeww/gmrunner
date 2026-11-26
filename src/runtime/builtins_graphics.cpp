@@ -788,19 +788,14 @@ void Runner::register_builtins_graphics() {
     });
     register_builtin("surface_copy", [](Runner& r, i32, i32, std::span<const RValue> a) {
         const i32 dst = arg_i32(a, 0, -1), src = arg_i32(a, 3, -1);
-        const i32 prev = r.renderer().current_surface_target();
-        if (r.renderer().surface_set_target(dst)) {
-            r.renderer().draw_surface_ext(src, static_cast<f32>(arg_real(a, 1)), static_cast<f32>(arg_real(a, 2)), 1.0f, 1.0f, 0.0f, 0xFFFFFFu, 1.0f);
-            if (prev >= 0) r.renderer().surface_set_target(prev);
-            else r.renderer().surface_reset_target();
-        }
+        r.renderer().surface_copy_part(dst, arg_i32(a, 1), arg_i32(a, 2), src, 0, 0,
+                                       r.renderer().surface_width(src), r.renderer().surface_height(src));
         return RValue(0.0);
     });
     register_builtin("surface_copy_part", [](Runner& r, i32, i32, std::span<const RValue> a) {
-        r.renderer().surface_copy_part(
-            arg_i32(a, 0, -1), static_cast<f32>(arg_real(a, 1)), static_cast<f32>(arg_real(a, 2)),
-            arg_i32(a, 3, -1), static_cast<f32>(arg_real(a, 4)), static_cast<f32>(arg_real(a, 5)),
-            static_cast<f32>(arg_real(a, 6)), static_cast<f32>(arg_real(a, 7)));
+        r.renderer().surface_copy_part(arg_i32(a, 0, -1), arg_i32(a, 1), arg_i32(a, 2),
+                                       arg_i32(a, 3, -1), arg_i32(a, 4), arg_i32(a, 5),
+                                       arg_i32(a, 6), arg_i32(a, 7));
         return RValue(0.0);
     });
 
