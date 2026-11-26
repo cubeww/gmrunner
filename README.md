@@ -31,6 +31,8 @@ Cross-platform C++20 runtime for **GameMaker 8.0 / 8.1 / 8.2** games, targeting 
 gmrunner [options] [game.exe | game_dir | game.zip]
 ```
 
+On desktop, place the game EXE and its assets beside the runner (beside `gmrunner.app` on macOS), then double-click the runner. With no game path, it searches that folder first and the current working directory second. Within each folder it tries larger EXEs first and starts the first GameMaker game it can load.
+
 | Option | Description |
 | :--- | :--- |
 | `-h`, `--help` | Show CLI usage and exit |

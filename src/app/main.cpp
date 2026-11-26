@@ -84,25 +84,60 @@ bool is_ignorable_exe(std::string_view lower_name) noexcept {
            lower_name == "crashreporter.exe";
 }
 
-std::string find_exe_in_dir(const std::filesystem::path& dir) {
+struct ExeCandidate {
+    std::filesystem::path path;
+    std::uintmax_t size;
+};
+
+std::vector<ExeCandidate> exe_candidates(const std::filesystem::path& dir) {
+    std::vector<ExeCandidate> candidates;
     std::error_code ec;
-    std::string best_name;
-    gm::u64 best_size = 0;
-    if (!std::filesystem::is_directory(dir, ec) || ec) return {};
-    for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
-        if (ec) break;
-        if (!entry.is_regular_file(ec)) continue;
-        const std::string name = gm::Vfs::path_to_utf8(entry.path().filename());
-        const std::string lower = gm::ascii_to_lower(name);
+    std::filesystem::directory_iterator it(dir, ec), end;
+    for (; !ec && it != end; it.increment(ec)) {
+        const auto& entry = *it;
+        const auto lower = gm::ascii_to_lower(gm::Vfs::path_to_utf8(entry.path().filename()));
         if (!lower.ends_with(".exe") || is_ignorable_exe(lower)) continue;
-        const gm::u64 sz = static_cast<gm::u64>(entry.file_size(ec));
-        if (!ec && (best_name.empty() || sz > best_size)) {
-            best_name = name;
-            best_size = sz;
+        if (!entry.is_regular_file(ec)) continue;
+        const auto size = entry.file_size(ec);
+        if (!ec) candidates.push_back({entry.path(), size});
+    }
+    std::sort(candidates.begin(), candidates.end(), [](const ExeCandidate& a, const ExeCandidate& b) {
+        if (a.size != b.size) return a.size > b.size;
+        return a.path < b.path;
+    });
+    return candidates;
+}
+
+#if !defined(__EMSCRIPTEN__) && !defined(__ANDROID__)
+std::optional<gm::GameData> discover_desktop_game(const char* argv0, const gm::LoadOptions& options,
+                                                  std::string& game_path) {
+    std::vector<std::filesystem::path> dirs;
+    if (const char* base = SDL_GetBasePath()) dirs.push_back(gm::Vfs::path_from_utf8(base));
+    std::error_code ec;
+    const auto cwd = std::filesystem::current_path(ec);
+    if (!ec && (dirs.empty() || !std::filesystem::equivalent(dirs.front(), cwd, ec))) dirs.push_back(cwd);
+
+    auto self = gm::Vfs::path_from_utf8(argv0);
+    if (!self.has_parent_path() && !dirs.empty()) self = dirs.front() / self;
+#if defined(_WIN32)
+    if (!self.has_extension()) self += ".exe";
+#endif
+    for (const auto& dir : dirs) {
+        gm::Vfs source;
+        for (const auto& candidate : exe_candidates(dir)) {
+            if (std::filesystem::equivalent(self, candidate.path, ec)) continue;
+            const auto path = gm::Vfs::path_to_utf8(candidate.path);
+            auto game = gm::ExeLoader::load_from_vfs(source, path, options);
+            if (game) {
+                game_path = path;
+                return std::move(game.value());
+            }
+            GM_LOG_DEBUG("loader", "Skipping '%s': %s", path.c_str(), game.error_message().c_str());
         }
     }
-    return best_name;
+    return std::nullopt;
 }
+#endif
 
 void compute_initial_window_size(const gm::GameData& game, gm::i32& out_w, gm::i32& out_h) {
     if (game.room_order.empty()) return;
@@ -184,10 +219,11 @@ gm::Result<MountedTarget> mount_native_game_target(
             if (auto res = vfs.mount_game_root(game_root); !res) {
                 return res.error();
             }
-            exe_lookup_path = find_exe_in_dir(game_root);
-            if (exe_lookup_path.empty()) {
+            const auto candidates = exe_candidates(game_root);
+            if (candidates.empty()) {
                 return gm::Error{"No GameMaker .exe found in directory: " + target_path};
             }
+            exe_lookup_path = gm::Vfs::path_to_utf8(candidates.front().path.filename());
             game_key = gm::Vfs::path_to_utf8(game_root.filename());
         } else {
             if (fs_path.has_parent_path()) {
@@ -594,7 +630,16 @@ int main(int argc, char** argv) {
         }
     }
 
-    auto mount_res = mount_native_game_target(app.vfs, opts.game_path, opts.save_dir, !headless_cli);
+    const gm::LoadOptions load_opts{opts.version_override, opts.codepage};
+    std::string game_path = opts.game_path;
+    std::optional<gm::GameData> loaded_game;
+    const gm::u64 load_start = gm::Clock::now_us();
+#if !defined(__ANDROID__)
+    if (game_path.empty() && !headless_cli) {
+        loaded_game = discover_desktop_game(argv[0], load_opts, game_path);
+    }
+#endif
+    auto mount_res = mount_native_game_target(app.vfs, game_path, opts.save_dir, !headless_cli);
     if (!mount_res) {
         GM_LOG_FATAL("app", "%s", mount_res.error_message().c_str());
         if (!headless_cli) gm::Platform::shutdown();
@@ -603,25 +648,20 @@ int main(int argc, char** argv) {
     const std::string exe_lookup_path = mount_res.value().exe_lookup_path;
     const std::string game_key = mount_res.value().game_key;
 
-    // Load game executable if provided.
-    std::optional<gm::GameData> loaded_game;
-    if (!exe_lookup_path.empty()) {
-        gm::LoadOptions load_opts{};
-        load_opts.version_override = opts.version_override;
-        load_opts.codepage_override = opts.codepage;
-
-        const gm::u64 t0 = gm::Clock::now_us();
+    if (!loaded_game && !exe_lookup_path.empty()) {
         auto game_res = gm::ExeLoader::load_from_vfs(app.vfs, exe_lookup_path, load_opts);
-        const gm::f64 elapsed_ms = static_cast<gm::f64>(gm::Clock::now_us() - t0) * 1e-3;
         if (!game_res) {
             GM_LOG_FATAL("loader", "Failed to load '%s': %s",
-                         opts.game_path.c_str(), game_res.error_message().c_str());
+                         game_path.c_str(), game_res.error_message().c_str());
             if (!headless_cli) gm::Platform::shutdown();
             return 1;
         }
         loaded_game = std::move(game_res.value());
+    }
+    if (loaded_game) {
+        const gm::f64 elapsed_ms = static_cast<gm::f64>(gm::Clock::now_us() - load_start) * 1e-3;
         GM_LOG_INFO("loader", "Loaded '%s' (GM %.*s) in %.1f ms",
-                    opts.game_path.c_str(),
+                    game_path.c_str(),
                     static_cast<int>(gm::version_mode_name(loaded_game->meta.detected_version).size()),
                     gm::version_mode_name(loaded_game->meta.detected_version).data(),
                     elapsed_ms);

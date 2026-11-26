@@ -22,6 +22,8 @@
     <string>12.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>SDL_FILESYSTEM_BASE_DIR_TYPE</key>
+    <string>parent</string>
     <key>NSSupportsAutomaticGraphicsSwitching</key>
     <true/>
     <key>CFBundleDocumentTypes</key>
