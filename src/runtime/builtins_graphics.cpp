@@ -2,7 +2,7 @@
 
 #include "base/encoding.h"
 #include "base/math.h"
-#include "graphics/renderer2d.h"
+#include "graphics/renderer.h"
 #include "platform/platform.h"
 
 #include <algorithm>

@@ -664,7 +664,7 @@ void ParticleManager::update_all() {
     for (i32 id : ids) update_system(id);
 }
 
-void ParticleManager::draw_system(i32 ps, Renderer2D& renderer, const GameData& game) const {
+void ParticleManager::draw_system(i32 ps, Renderer& renderer, const GameData& game) const {
     const auto sit = systems_.find(ps);
     if (sit == systems_.end()) return;
     const auto& sys = sit->second;

@@ -4,7 +4,7 @@
 #include "base/types.h"
 #include "gml/value.h"
 #include "graphics/gl_graphics_device.h"
-#include "graphics/renderer2d.h"
+#include "graphics/renderer.h"
 #include "loader/game_data.h"
 #include "platform/vfs.h"
 #include "platform/window.h"
@@ -26,7 +26,7 @@ public:
     [[nodiscard]] virtual const GameData& ext_game() const noexcept = 0;
     [[nodiscard]] virtual PlatformWindow& ext_window() noexcept = 0;
     [[nodiscard]] virtual GlGraphicsDevice& ext_gfx() noexcept = 0;
-    [[nodiscard]] virtual Renderer2D& ext_renderer() noexcept = 0;
+    [[nodiscard]] virtual Renderer& ext_renderer() noexcept = 0;
 
     // Helper for FMODSnapShotToDsList / extensions writing into GM ds_list handles.
     virtual void ext_ds_list_add_real(i32 list_id, f64 value) = 0;

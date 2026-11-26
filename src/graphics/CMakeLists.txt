@@ -10,8 +10,8 @@ add_library(gm_graphics STATIC
     dx9_pipeline.cpp
     model3d.h
     model3d.cpp
-    renderer2d.h
-    renderer2d.cpp
+    renderer.h
+    renderer.cpp
     builtin_font.h
     font_rasterizer.h
     font_rasterizer.cpp

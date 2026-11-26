@@ -66,10 +66,10 @@ struct D3dFogState {
     f32 end = 1.0f;
 };
 
-class Renderer2D : public NonCopyable {
+class Renderer : public NonCopyable {
 public:
-    Renderer2D() = default;
-    ~Renderer2D();
+    Renderer() = default;
+    ~Renderer();
 
     [[nodiscard]] Result<void> init(GlGraphicsDevice& device);
     void shutdown() noexcept;

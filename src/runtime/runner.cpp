@@ -3980,7 +3980,7 @@ bool Runner::splash_show_image_dialog(std::string_view fname, i32 delay_ms) {
                     static_cast<int>(fname.size()), fname.data());
         return false;
     }
-    auto bmp = Renderer2D::decode_image_to_bgra(bytes.value());
+    auto bmp = Renderer::decode_image_to_bgra(bytes.value());
     if (!bmp) {
         GM_LOG_WARN("runtime", "splash_show_image: Failed to decode image: %.*s",
                     static_cast<int>(fname.size()), fname.data());

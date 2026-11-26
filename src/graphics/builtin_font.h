@@ -4,7 +4,7 @@
 
 namespace gm {
 
-// Minimal 8x8 ASCII 32..127 bitmap font shared by Renderer2D (GM8 default font -1)
+// Minimal 8x8 ASCII 32..127 bitmap font shared by Renderer (GM8 default font -1)
 // and TouchOverlay (virtual button labels and in-overlay layout editor UI).
 inline constexpr u8 kBuiltinFont8x8[96][8] = {
     {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, // ' '

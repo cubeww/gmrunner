@@ -1861,7 +1861,7 @@ void Runner::register_builtins_gameplay() {
     register_builtin("sprite_add", [](Runner& r, i32, i32, std::span<const RValue> a) {
         auto bytes = r.vfs().read_all_bytes(arg_str(a, 0));
         if (!bytes) return RValue(-1);
-        auto bmp = Renderer2D::decode_image_to_bgra(bytes.value());
+        auto bmp = Renderer::decode_image_to_bgra(bytes.value());
         if (!bmp) return RValue(-1);
         SpriteData sp{};
         if (!build_sprite_from_strip(bmp.value(), arg_i32(a, 1, 1), arg_bool(a, 2, false), arg_i32(a, 4), arg_i32(a, 5), sp)) {
@@ -1877,7 +1877,7 @@ void Runner::register_builtins_gameplay() {
         if (id < 0 || static_cast<usize>(id) >= r.game().sprites.size()) return RValue(false);
         auto bytes = r.vfs().read_all_bytes(arg_str(a, 1));
         if (!bytes) return RValue(false);
-        auto bmp = Renderer2D::decode_image_to_bgra(bytes.value());
+        auto bmp = Renderer::decode_image_to_bgra(bytes.value());
         if (!bmp) return RValue(false);
         SpriteData sp{};
         if (!build_sprite_from_strip(bmp.value(), arg_i32(a, 2, 1), arg_bool(a, 3, false), arg_i32(a, 5), arg_i32(a, 6), sp)) {
@@ -2062,7 +2062,7 @@ void Runner::register_builtins_gameplay() {
         if (sp.images.empty()) return RValue(false);
         const usize idx = static_cast<usize>((sub % static_cast<i32>(sp.images.size()) + static_cast<i32>(sp.images.size())) % static_cast<i32>(sp.images.size()));
         const auto host_path = Vfs::path_to_utf8(r.vfs().resolve_for_write(arg_str(a, 2)));
-        return RValue(Renderer2D::save_bitmap_bgra(sp.images[idx], host_path));
+        return RValue(Renderer::save_bitmap_bgra(sp.images[idx], host_path));
     });
     register_builtin("sprite_save_strip", [](Runner& r, i32, i32, std::span<const RValue> a) {
         const i32 id = arg_i32(a, 0, -1);
@@ -2083,7 +2083,7 @@ void Runner::register_builtins_gameplay() {
             }
         }
         const auto host_path = Vfs::path_to_utf8(r.vfs().resolve_for_write(arg_str(a, 1)));
-        return RValue(Renderer2D::save_bitmap_bgra(strip, host_path));
+        return RValue(Renderer::save_bitmap_bgra(strip, host_path));
     });
     register_builtin("sprite_set_cache_size", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
     register_builtin("sprite_set_cache_size_ext", [](Runner&, i32, i32, std::span<const RValue>) { return RValue(0.0); });
@@ -2113,7 +2113,7 @@ void Runner::register_builtins_gameplay() {
     register_builtin("background_add", [](Runner& r, i32, i32, std::span<const RValue> a) {
         auto bytes = r.vfs().read_all_bytes(arg_str(a, 0));
         if (!bytes) return RValue(-1);
-        auto bmp = Renderer2D::decode_image_to_bgra(bytes.value());
+        auto bmp = Renderer::decode_image_to_bgra(bytes.value());
         if (!bmp) return RValue(-1);
         if (arg_bool(a, 1, false)) remove_bottom_left_bg_color(bmp.value());
         BackgroundData bg{};
@@ -2163,7 +2163,7 @@ void Runner::register_builtins_gameplay() {
         if (id < 0 || static_cast<usize>(id) >= r.game().backgrounds.size()) return RValue(false);
         auto bytes = r.vfs().read_all_bytes(arg_str(a, 1));
         if (!bytes) return RValue(false);
-        auto bmp = Renderer2D::decode_image_to_bgra(bytes.value());
+        auto bmp = Renderer::decode_image_to_bgra(bytes.value());
         if (!bmp) return RValue(false);
         if (arg_bool(a, 2, false)) remove_bottom_left_bg_color(bmp.value());
         auto& bg = r.game().backgrounds[static_cast<usize>(id)];
@@ -2295,7 +2295,7 @@ void Runner::register_builtins_gameplay() {
         const i32 id = arg_i32(a, 0, -1);
         if (id < 0 || static_cast<usize>(id) >= r.game().backgrounds.size() || !r.game().backgrounds[static_cast<usize>(id)].exists) return RValue(false);
         const auto host_path = Vfs::path_to_utf8(r.vfs().resolve_for_write(arg_str(a, 1)));
-        return RValue(Renderer2D::save_bitmap_bgra(r.game().backgrounds[static_cast<usize>(id)].bitmap, host_path));
+        return RValue(Renderer::save_bitmap_bgra(r.game().backgrounds[static_cast<usize>(id)].bitmap, host_path));
     });
 
     // Fonts & Timelines

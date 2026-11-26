@@ -7,7 +7,7 @@
 #include "gml/vm.h"
 #include "graphics/gl_graphics_device.h"
 #include "graphics/message_dialog.h"
-#include "graphics/renderer2d.h"
+#include "graphics/renderer.h"
 #include "graphics/touch_overlay.h"
 #include "graphics/ui_dialogs.h"
 #include "loader/game_data.h"
@@ -179,7 +179,7 @@ public:
     [[nodiscard]] const GameData& ext_game() const noexcept override { return game_; }
     [[nodiscard]] PlatformWindow& ext_window() noexcept override { return window_; }
     [[nodiscard]] GlGraphicsDevice& ext_gfx() noexcept override { return gfx_; }
-    [[nodiscard]] Renderer2D& ext_renderer() noexcept override { return renderer_; }
+    [[nodiscard]] Renderer& ext_renderer() noexcept override { return renderer_; }
     void ext_ds_list_add_real(i32 list_id, f64 value) override { ds_.list_add(list_id, RValue(value)); }
     Result<RValue> ext_call_function(i32 address, i32 self, i32 other, std::span<const RValue> args) override;
     [[nodiscard]] bool ext_error_is_enabled() const noexcept override { return game_.options.display_errors; }
@@ -208,7 +208,7 @@ public:
     [[nodiscard]] Vfs& vfs() noexcept { return vfs_; }
     [[nodiscard]] PlatformWindow& window() noexcept { return window_; }
     [[nodiscard]] GlGraphicsDevice& gfx() noexcept { return gfx_; }
-    [[nodiscard]] Renderer2D& renderer() noexcept { return renderer_; }
+    [[nodiscard]] Renderer& renderer() noexcept { return renderer_; }
     [[nodiscard]] MessageDialog& message_dialog() noexcept { return message_dialog_; }
     [[nodiscard]] AudioEngine& audio() noexcept { return audio_; }
     [[nodiscard]] ExtensionRegistry& extensions() noexcept { return extensions_; }
@@ -622,7 +622,7 @@ private:
     std::optional<Gm82EventTables> generated_event_tables_;
     bool use_precomputed_events_ = true;
     std::unique_ptr<GmlVm> vm_;
-    Renderer2D renderer_;
+    Renderer renderer_;
     MessageDialog message_dialog_;
     GmModalDialogs modal_dialogs_;
     TouchOverlay touch_overlay_;

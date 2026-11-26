@@ -1,4 +1,4 @@
-#include "graphics/renderer2d.h"
+#include "graphics/renderer.h"
 
 #include "base/encoding.h"
 #include "base/log.h"
@@ -257,11 +257,11 @@ bool write_rgba_to_file(const u8* rgba, i32 w, i32 h, std::string_view host_path
 
 } // namespace
 
-Renderer2D::~Renderer2D() {
+Renderer::~Renderer() {
     shutdown();
 }
 
-Result<void> Renderer2D::init(GlGraphicsDevice& device) {
+Result<void> Renderer::init(GlGraphicsDevice& device) {
     if (initialized_) {
         return Result<void>::success();
     }
@@ -496,8 +496,8 @@ void main() {
     return Result<void>::success();
 }
 
-Result<void> Renderer2D::reload_gpu_resources(const GameData& game) {
-    if (!device_) return Error{"Renderer2D::reload_gpu_resources called without device"};
+Result<void> Renderer::reload_gpu_resources(const GameData& game) {
+    if (!device_) return Error{"Renderer::reload_gpu_resources called without device"};
     // Clear stale GPU IDs without calling glDelete* on a lost GL context.
     vao_ = 0;
     vbo_ = 0;
@@ -525,7 +525,7 @@ Result<void> Renderer2D::reload_gpu_resources(const GameData& game) {
     return Result<void>::success();
 }
 
-void Renderer2D::shutdown() noexcept {
+void Renderer::shutdown() noexcept {
     if (!initialized_) return;
 
     dx9_.shutdown();
@@ -579,7 +579,7 @@ void Renderer2D::shutdown() noexcept {
     initialized_ = false;
 }
 
-void Renderer2D::create_builtin_font_texture() {
+void Renderer::create_builtin_font_texture() {
     // 16 x 6 grid of 8x8 glyphs = 128x48 RGBA8 texture
     constexpr i32 kW = 128;
     constexpr i32 kH = 48;
@@ -613,7 +613,7 @@ void Renderer2D::create_builtin_font_texture() {
     }
 }
 
-void Renderer2D::upload_game_assets(const GameData& game) {
+void Renderer::upload_game_assets(const GameData& game) {
     recorded_d3d_ = game.meta.detected_version == VersionMode::GM81 || game.meta.detected_version == VersionMode::GM82;
     for (usize i = 0; i < game.particle_shapes.size(); ++i) {
         auto& tex = particle_shapes_[i];
@@ -648,7 +648,7 @@ void Renderer2D::upload_game_assets(const GameData& game) {
     }
 }
 
-void Renderer2D::upload_sprite(usize sprite_idx, const SpriteData& spr) {
+void Renderer::upload_sprite(usize sprite_idx, const SpriteData& spr) {
     if (sprite_idx >= sprites_.size()) {
         sprites_.resize(sprite_idx + 1);
     }
@@ -674,7 +674,7 @@ void Renderer2D::upload_sprite(usize sprite_idx, const SpriteData& spr) {
     }
 }
 
-void Renderer2D::free_sprite_textures(usize sprite_idx) {
+void Renderer::free_sprite_textures(usize sprite_idx) {
     if (sprite_idx >= sprites_.size()) return;
     for (auto t : sprites_[sprite_idx].subimages) {
         dx9_.clear_texture_handle(t);
@@ -683,7 +683,7 @@ void Renderer2D::free_sprite_textures(usize sprite_idx) {
     sprites_[sprite_idx].subimages.clear();
 }
 
-void Renderer2D::upload_background(usize bg_idx, const BackgroundData& bg) {
+void Renderer::upload_background(usize bg_idx, const BackgroundData& bg) {
     if (bg_idx >= backgrounds_.size()) {
         backgrounds_.resize(bg_idx + 1);
     }
@@ -705,14 +705,14 @@ void Renderer2D::upload_background(usize bg_idx, const BackgroundData& bg) {
     }
 }
 
-void Renderer2D::free_background_texture(usize bg_idx) {
+void Renderer::free_background_texture(usize bg_idx) {
     if (bg_idx >= backgrounds_.size()) return;
     dx9_.clear_texture_handle(backgrounds_[bg_idx]);
     device_->destroy_texture(backgrounds_[bg_idx]);
     backgrounds_[bg_idx] = {};
 }
 
-void Renderer2D::upload_font(usize font_idx, const FontData& font, VersionMode version) {
+void Renderer::upload_font(usize font_idx, const FontData& font, VersionMode version) {
     if (font_idx >= fonts_.size()) {
         fonts_.resize(font_idx + 1);
     }
@@ -757,7 +757,7 @@ void Renderer2D::upload_font(usize font_idx, const FontData& font, VersionMode v
     }
 }
 
-void Renderer2D::register_sprite_font(usize font_idx, i32 sprite_idx, i32 first_char, bool prop, i32 sep, const GameData& game) {
+void Renderer::register_sprite_font(usize font_idx, i32 sprite_idx, i32 first_char, bool prop, i32 sep, const GameData& game) {
     if (font_idx >= fonts_.size()) {
         fonts_.resize(font_idx + 1);
     }
@@ -774,7 +774,7 @@ void Renderer2D::register_sprite_font(usize font_idx, i32 sprite_idx, i32 first_
     }
 }
 
-bool Renderer2D::ensure_screen_fbo(i32 width, i32 height) {
+bool Renderer::ensure_screen_fbo(i32 width, i32 height) {
     const i32 w = std::max(1, width);
     const i32 h = std::max(1, height);
     if (screen_fbo_.valid() && screen_fbo_w_ == w && screen_fbo_h_ == h) {
@@ -803,7 +803,7 @@ bool Renderer2D::ensure_screen_fbo(i32 width, i32 height) {
     return true;
 }
 
-FramebufferHandle Renderer2D::active_target_fbo() const noexcept {
+FramebufferHandle Renderer::active_target_fbo() const noexcept {
     if (active_surface_id_ >= 0) {
         if (auto it = surfaces_.find(active_surface_id_); it != surfaces_.end()) {
             return it->second.fbo;
@@ -815,7 +815,7 @@ FramebufferHandle Renderer2D::active_target_fbo() const noexcept {
     return FramebufferHandle{};
 }
 
-void Renderer2D::reset_active_fbo_ext_state() {
+void Renderer::reset_active_fbo_ext_state() {
     const FramebufferHandle fbo = active_target_fbo();
     if (fbo.valid()) {
         if (active_fbo_has_ext_mrt_) {
@@ -831,11 +831,11 @@ void Renderer2D::reset_active_fbo_ext_state() {
     active_fbo_has_custom_depth_ = false;
 }
 
-void Renderer2D::bind_active_target_fbo() {
+void Renderer::bind_active_target_fbo() {
     device_->bind_framebuffer(active_target_fbo());
 }
 
-void Renderer2D::apply_d3d_depth_cull() {
+void Renderer::apply_d3d_depth_cull() {
     if (d3d_active_ && d3d_hidden_) {
         device_->set_depth_state(DepthState{true, d3d_zwrite_, d3d_zfunc_});
     } else {
@@ -854,7 +854,7 @@ void Renderer2D::apply_d3d_depth_cull() {
     }
 }
 
-void Renderer2D::begin_frame(i32 backbuffer_w, i32 backbuffer_h) {
+void Renderer::begin_frame(i32 backbuffer_w, i32 backbuffer_h) {
     vertices_.clear();
     using_screen_fbo_ = false;
     active_surface_id_ = -1;
@@ -864,7 +864,7 @@ void Renderer2D::begin_frame(i32 backbuffer_w, i32 backbuffer_h) {
     device_->set_blend_state(blend_state_);
 }
 
-void Renderer2D::begin_screen_pass(i32 canvas_w, i32 canvas_h, i32 backbuffer_w, i32 backbuffer_h, const ViewportRect& present_viewport) {
+void Renderer::begin_screen_pass(i32 canvas_w, i32 canvas_h, i32 backbuffer_w, i32 backbuffer_h, const ViewportRect& present_viewport) {
     flush();
     backbuffer_w_ = std::max(1, backbuffer_w);
     backbuffer_h_ = std::max(1, backbuffer_h);
@@ -883,7 +883,7 @@ void Renderer2D::begin_screen_pass(i32 canvas_w, i32 canvas_h, i32 backbuffer_w,
     device_->set_blend_state(blend_state_);
 }
 
-void Renderer2D::present_screen(u32 border_color_bgr, std::optional<u32> color_key) {
+void Renderer::present_screen(u32 border_color_bgr, std::optional<u32> color_key) {
     flush();
     if (!screen_fbo_tex_.valid() || (!using_screen_fbo_ && active_surface_id_ < 0)) {
         device_->bind_framebuffer(FramebufferHandle{});
@@ -997,7 +997,7 @@ void Renderer2D::present_screen(u32 border_color_bgr, std::optional<u32> color_k
     apply_d3d_depth_cull();
 }
 
-void Renderer2D::set_screen_region(i32 backbuffer_w, i32 backbuffer_h, i32 width, i32 height, const ViewportRect& viewport) {
+void Renderer::set_screen_region(i32 backbuffer_w, i32 backbuffer_h, i32 width, i32 height, const ViewportRect& viewport) {
     // Room creation code can draw and present before the next screen pass.
     if (using_screen_fbo_ && (screen_fbo_w_ != width || screen_fbo_h_ != height)) {
         flush();
@@ -1018,12 +1018,12 @@ void Renderer2D::set_screen_region(i32 backbuffer_w, i32 backbuffer_h, i32 width
     }
 }
 
-void Renderer2D::end_frame() {
+void Renderer::end_frame() {
     // SDL swaps the default framebuffer. Subsequent GML draws use the previous target.
     bind_active_target_fbo();
 }
 
-bool Renderer2D::resize_backbuffer(i32 width, i32 height) {
+bool Renderer::resize_backbuffer(i32 width, i32 height) {
     if (width <= 0 || height <= 0) return false;
     if (screen_fbo_.valid() && screen_fbo_w_ == width && screen_fbo_h_ == height &&
         screen_w_ == width && screen_h_ == height) {
@@ -1046,7 +1046,7 @@ bool Renderer2D::resize_backbuffer(i32 width, i32 height) {
     return true;
 }
 
-void Renderer2D::upload_shader_uniforms(const f32 tint_rgba[4], PixelCenter center) {
+void Renderer::upload_shader_uniforms(const f32 tint_rgba[4], PixelCenter center) {
     f32 gl_proj[16];
     std::memcpy(gl_proj, proj_matrix_, sizeof(gl_proj));
     if (rendering_to_fbo()) {
@@ -1187,7 +1187,7 @@ void Renderer2D::upload_shader_uniforms(const f32 tint_rgba[4], PixelCenter cent
     c.valid = true;
 }
 
-Dx9DrawContext Renderer2D::make_dx9_draw_context(const f32 tint_rgba[4], PixelCenter center) const noexcept {
+Dx9DrawContext Renderer::make_dx9_draw_context(const f32 tint_rgba[4], PixelCenter center) const noexcept {
     Dx9DrawContext ctx{};
     ctx.world_matrix = world_matrix_;
     ctx.view_matrix = view_matrix_;
@@ -1207,7 +1207,7 @@ Dx9DrawContext Renderer2D::make_dx9_draw_context(const f32 tint_rgba[4], PixelCe
     return ctx;
 }
 
-void Renderer2D::apply_stage0_ff_sampler(TextureHandle tex) {
+void Renderer::apply_stage0_ff_sampler(TextureHandle tex) {
     const auto& st0 = dx9_.ps_sampler(0);
     const bool is_present_tex = tex.valid() && tex == screen_fbo_tex_;
     const bool lin = (!is_present_tex && st0.has_explicit_filter) ? st0.linear_filter : linear_filter_;
@@ -1222,7 +1222,7 @@ void Renderer2D::apply_stage0_ff_sampler(TextureHandle tex) {
     }
 }
 
-void Renderer2D::flush() {
+void Renderer::flush() {
     if (vertices_.empty()) {
         return;
     }
@@ -1252,7 +1252,7 @@ void Renderer2D::flush() {
     vertices_.clear();
 }
 
-void Renderer2D::set_view_projection(f32 x, f32 y, f32 width, f32 height, f32 angle, const ViewportRect& port) {
+void Renderer::set_view_projection(f32 x, f32 y, f32 width, f32 height, f32 angle, const ViewportRect& port) {
     if (d3d_active_ && d3d_perspective_) {
         set_projection_perspective(x, y, width, height, angle, port.x, port.y, port.width, port.height);
     } else {
@@ -1260,7 +1260,7 @@ void Renderer2D::set_view_projection(f32 x, f32 y, f32 width, f32 height, f32 an
     }
 }
 
-void Renderer2D::set_projection_ortho(
+void Renderer::set_projection_ortho(
     f32 view_x, f32 view_y, f32 view_w, f32 view_h, f32 angle_deg,
     i32 port_x, i32 port_y, i32 port_w, i32 port_h) {
     flush();
@@ -1276,7 +1276,7 @@ void Renderer2D::set_projection_ortho(
     d3d_set_projection_ortho(view_x, view_y, view_w, view_h, angle_deg);
 }
 
-void Renderer2D::set_projection_perspective(
+void Renderer::set_projection_perspective(
     f32 view_x, f32 view_y, f32 view_w, f32 view_h, f32 angle_deg,
     i32 port_x, i32 port_y, i32 port_w, i32 port_h) {
     flush();
@@ -1292,7 +1292,7 @@ void Renderer2D::set_projection_perspective(
     d3d_set_projection_perspective(view_x, view_y, view_w, view_h, angle_deg);
 }
 
-void Renderer2D::clear_color(u32 gm_bgr, f32 alpha) {
+void Renderer::clear_color(u32 gm_bgr, f32 alpha) {
     flush();
     const ColorRGBA c = gm_bgr_to_rgba(gm_bgr);
     device_->clear(true, true, false,
@@ -1302,12 +1302,12 @@ void Renderer2D::clear_color(u32 gm_bgr, f32 alpha) {
                    alpha, 1.0f, 0);
 }
 
-void Renderer2D::clear_depth(f32 depth_val) {
+void Renderer::clear_depth(f32 depth_val) {
     flush();
     device_->clear(false, true, false, 0.0f, 0.0f, 0.0f, 1.0f, depth_val, 0);
 }
 
-void Renderer2D::set_blend_mode(i32 bm_mode) {
+void Renderer::set_blend_mode(i32 bm_mode) {
     flush();
     blend_state_.op_rgb = BlendOp::Add;
     blend_state_.op_alpha = BlendOp::Add;
@@ -1347,7 +1347,7 @@ void Renderer2D::set_blend_mode(i32 bm_mode) {
     }
 }
 
-void Renderer2D::set_blend_mode_ext(i32 src_bm, i32 dst_bm) {
+void Renderer::set_blend_mode_ext(i32 src_bm, i32 dst_bm) {
     flush();
     blend_state_.op_rgb = BlendOp::Add;
     blend_state_.op_alpha = BlendOp::Add;
@@ -1359,12 +1359,12 @@ void Renderer2D::set_blend_mode_ext(i32 src_bm, i32 dst_bm) {
     }
 }
 
-void Renderer2D::set_alpha_blend_enable(bool enabled) {
+void Renderer::set_alpha_blend_enable(bool enabled) {
     flush();
     blend_state_.enabled = enabled;
 }
 
-void Renderer2D::set_separate_alpha_blend(bool enabled, i32 src_bm, i32 dst_bm) {
+void Renderer::set_separate_alpha_blend(bool enabled, i32 src_bm, i32 dst_bm) {
     flush();
     separate_alpha_blend_ = enabled;
     if (enabled) {
@@ -1376,7 +1376,7 @@ void Renderer2D::set_separate_alpha_blend(bool enabled, i32 src_bm, i32 dst_bm) 
     }
 }
 
-void Renderer2D::set_interpolation(bool linear) {
+void Renderer::set_interpolation(bool linear) {
     if (linear_filter_ != linear || dx9_.ps_sampler(0).has_explicit_filter) {
         flush();
         linear_filter_ = linear;
@@ -1384,7 +1384,7 @@ void Renderer2D::set_interpolation(bool linear) {
     }
 }
 
-void Renderer2D::set_texcoord_mode(i32 mode) {
+void Renderer::set_texcoord_mode(i32 mode) {
     // D3DTSS_TEXCOORDINDEX stores the coordinate generation mode in the high word.
     const i32 generation = static_cast<u32>(mode) >> 16;
     if (generation > 4 || generation == texcoord_mode_) return;
@@ -1392,7 +1392,7 @@ void Renderer2D::set_texcoord_mode(i32 mode) {
     texcoord_mode_ = generation;
 }
 
-void Renderer2D::set_texture_repeat(bool repeat) {
+void Renderer::set_texture_repeat(bool repeat) {
     if (tex_repeat_ != repeat || dx9_.ps_sampler(0).has_explicit_wrap) {
         flush();
         tex_repeat_ = repeat;
@@ -1400,46 +1400,46 @@ void Renderer2D::set_texture_repeat(bool repeat) {
     }
 }
 
-void Renderer2D::set_texture_blending(bool enabled) {
+void Renderer::set_texture_blending(bool enabled) {
     if (tex_blending_ != enabled) {
         flush();
         tex_blending_ = enabled;
     }
 }
 
-void Renderer2D::set_alpha_test(bool enabled, u8 ref_val) {
+void Renderer::set_alpha_test(bool enabled, u8 ref_val) {
     flush();
     alpha_test_explicit_ = enabled;
     alpha_test_ref_ = static_cast<f32>(ref_val) / 255.0f;
     alpha_test_func_ = 5; // D3DCMP_GREATER
 }
 
-void Renderer2D::set_alpha_test_ext(bool enabled, u8 ref_val, i32 d3d_cmp_func) {
+void Renderer::set_alpha_test_ext(bool enabled, u8 ref_val, i32 d3d_cmp_func) {
     flush();
     alpha_test_explicit_ = enabled;
     alpha_test_ref_ = static_cast<f32>(ref_val) / 255.0f;
     alpha_test_func_ = std::clamp(d3d_cmp_func, 1, 8);
 }
 
-void Renderer2D::set_color_write_enable(bool r, bool g, bool b, bool a) {
+void Renderer::set_color_write_enable(bool r, bool g, bool b, bool a) {
     flush();
     color_mask_ = {r, g, b, a};
     device_->set_color_mask(r, g, b, a);
 }
 
-void Renderer2D::set_cull_mode_ext(i32 mode) {
+void Renderer::set_cull_mode_ext(i32 mode) {
     flush();
     d3d_cull_mode_ = std::clamp(mode, 0, 2);
     apply_d3d_depth_cull();
 }
 
-void Renderer2D::set_zcomp_mode(i32 d3d_cmp_func) {
+void Renderer::set_zcomp_mode(i32 d3d_cmp_func) {
     flush();
     d3d_zfunc_ = d3d_cmp_to_compare_func(d3d_cmp_func);
     apply_d3d_depth_cull();
 }
 
-void Renderer2D::set_viewport_ext(i32 x, i32 y, i32 w, i32 h) {
+void Renderer::set_viewport_ext(i32 x, i32 y, i32 w, i32 h) {
     flush();
     const bool to_fbo = rendering_to_fbo();
     const i32 target_h = (active_surface_id_ >= 0) ? surface_height(active_surface_id_)
@@ -1451,7 +1451,7 @@ void Renderer2D::set_viewport_ext(i32 x, i32 y, i32 w, i32 h) {
     device_->set_viewport(ViewportRect{x, gl_y, pw, ph});
 }
 
-void Renderer2D::ensure_batch(PrimitiveTopology topo, TextureHandle tex, PixelCenter center) {
+void Renderer::ensure_batch(PrimitiveTopology topo, TextureHandle tex, PixelCenter center) {
     if (vertices_.size() + 6 >= kMaxBatchVertices || batch_topo_ != topo || batch_tex_ != tex || batch_center_ != center) {
         flush();
         batch_center_ = center;
@@ -1460,7 +1460,7 @@ void Renderer2D::ensure_batch(PrimitiveTopology topo, TextureHandle tex, PixelCe
     }
 }
 
-void Renderer2D::push_quad(
+void Renderer::push_quad(
     TextureHandle tex,
     f32 x0, f32 y0, f32 u0, f32 v0, ColorRGBA c0,
     f32 x1, f32 y1, f32 u1, f32 v1, ColorRGBA c1,
@@ -1485,7 +1485,7 @@ void Renderer2D::push_quad(
 
 // ---- Surfaces ----
 
-i32 Renderer2D::surface_create(i32 width, i32 height) {
+i32 Renderer::surface_create(i32 width, i32 height) {
     if (width <= 0 || height <= 0) return -1;
     TextureDesc desc{};
     desc.width = width;
@@ -1515,7 +1515,7 @@ i32 Renderer2D::surface_create(i32 width, i32 height) {
     return id;
 }
 
-void Renderer2D::surface_free(i32 id) {
+void Renderer::surface_free(i32 id) {
     const auto it = surfaces_.find(id);
     if (it == surfaces_.end()) return;
     if (active_surface_id_ == id) {
@@ -1530,11 +1530,11 @@ void Renderer2D::surface_free(i32 id) {
     surface_tokens_.erase(id);
 }
 
-bool Renderer2D::surface_exists(i32 id) const noexcept {
+bool Renderer::surface_exists(i32 id) const noexcept {
     return surfaces_.contains(id);
 }
 
-i32 Renderer2D::surface_count() const noexcept {
+i32 Renderer::surface_count() const noexcept {
     i32 max_id = -1;
     for (const auto& [id, _] : surfaces_) {
         if (id > max_id) max_id = id;
@@ -1542,22 +1542,22 @@ i32 Renderer2D::surface_count() const noexcept {
     return max_id + 1;
 }
 
-u32 Renderer2D::surface_unique_token(i32 id) const noexcept {
+u32 Renderer::surface_unique_token(i32 id) const noexcept {
     const auto it = surface_tokens_.find(id);
     return it != surface_tokens_.end() ? it->second : 0u;
 }
 
-i32 Renderer2D::surface_width(i32 id) const noexcept {
+i32 Renderer::surface_width(i32 id) const noexcept {
     const auto it = surfaces_.find(id);
     return it != surfaces_.end() ? it->second.width : 0;
 }
 
-i32 Renderer2D::surface_height(i32 id) const noexcept {
+i32 Renderer::surface_height(i32 id) const noexcept {
     const auto it = surfaces_.find(id);
     return it != surfaces_.end() ? it->second.height : 0;
 }
 
-bool Renderer2D::surface_set_target(i32 id) {
+bool Renderer::surface_set_target(i32 id) {
     const auto it = surfaces_.find(id);
     if (it == surfaces_.end()) return false;
     flush();
@@ -1571,7 +1571,7 @@ bool Renderer2D::surface_set_target(i32 id) {
     return true;
 }
 
-bool Renderer2D::surface_set_target_ext(i32 target, i32 surf_id) {
+bool Renderer::surface_set_target_ext(i32 target, i32 surf_id) {
     flush();
     const u32 slot = static_cast<u32>(std::clamp(target, 1, 3));
     const FramebufferHandle fbo = active_target_fbo();
@@ -1591,7 +1591,7 @@ bool Renderer2D::surface_set_target_ext(i32 target, i32 surf_id) {
     return true;
 }
 
-bool Renderer2D::surface_set_depth(i32 surf_id) {
+bool Renderer::surface_set_depth(i32 surf_id) {
     flush();
     const FramebufferHandle dst_fbo = active_target_fbo();
     if (!dst_fbo.valid()) {
@@ -1613,7 +1613,7 @@ bool Renderer2D::surface_set_depth(i32 surf_id) {
     return ok;
 }
 
-bool Renderer2D::surface_reset_target() {
+bool Renderer::surface_reset_target() {
     if (active_surface_id_ < 0) return false;
     flush();
     reset_active_fbo_ext_state();
@@ -1627,7 +1627,7 @@ bool Renderer2D::surface_reset_target() {
     return true;
 }
 
-void Renderer2D::surface_fill_alpha_opaque(i32 id) {
+void Renderer::surface_fill_alpha_opaque(i32 id) {
     const auto it = surfaces_.find(id);
     if (it == surfaces_.end() || !device_) return;
     flush();
@@ -1640,7 +1640,7 @@ void Renderer2D::surface_fill_alpha_opaque(i32 id) {
     device_->restore_render_state(saved);
 }
 
-void Renderer2D::draw_builtin_transition(
+void Renderer::draw_builtin_transition(
     i32 kind, i32 surf_old, i32 surf_new,
     i32 width, i32 height, i32 steps, f64 fraction) {
     if (!device_ || width <= 0 || height <= 0) return;
@@ -1878,7 +1878,7 @@ void Renderer2D::draw_builtin_transition(
     apply_d3d_depth_cull();
 }
 
-void Renderer2D::apply_screen_projection() {
+void Renderer::apply_screen_projection() {
     // GM8 restores the whole logical screen even if a view was active before the surface.
     const ViewportRect port = using_screen_fbo_ ? ViewportRect{0, 0, screen_w_, screen_h_} : screen_viewport_;
     set_view_projection(0.0f, 0.0f, static_cast<f32>(screen_w_), static_cast<f32>(screen_h_), 0.0f, port);
@@ -1889,7 +1889,7 @@ void Renderer2D::apply_screen_projection() {
     }
 }
 
-void Renderer2D::draw_surface_ext(i32 id, f32 x, f32 y, f32 xscale, f32 yscale, f32 rot_deg, u32 color_bgr, f32 alpha) {
+void Renderer::draw_surface_ext(i32 id, f32 x, f32 y, f32 xscale, f32 yscale, f32 rot_deg, u32 color_bgr, f32 alpha) {
     const auto it = surfaces_.find(id);
     if (it == surfaces_.end()) return;
 
@@ -1898,7 +1898,7 @@ void Renderer2D::draw_surface_ext(i32 id, f32 x, f32 y, f32 xscale, f32 yscale, 
     draw_texture_ext(it->second.texture, x, y, 0, 0, w, h, rot_deg, color_bgr, alpha);
 }
 
-void Renderer2D::draw_surface_part_ext(i32 id, f32 left, f32 top, f32 w, f32 h, f32 x, f32 y, f32 xscale, f32 yscale, u32 color_bgr, f32 alpha) {
+void Renderer::draw_surface_part_ext(i32 id, f32 left, f32 top, f32 w, f32 h, f32 x, f32 y, f32 xscale, f32 yscale, u32 color_bgr, f32 alpha) {
     const auto it = surfaces_.find(id);
     if (it == surfaces_.end() || it->second.width <= 0 || it->second.height <= 0) return;
     const f32 inv_w = 1.0f / static_cast<f32>(it->second.width);
@@ -1913,13 +1913,13 @@ void Renderer2D::draw_surface_part_ext(i32 id, f32 left, f32 top, f32 w, f32 h, 
     draw_texture_region(it->second.texture, x, y, 0, 0, dw, dh, 0, u0, v0, u1, v1, col, col, col, col);
 }
 
-void Renderer2D::draw_surface_stretched_ext(i32 id, f32 x, f32 y, f32 w, f32 h, u32 color_bgr, f32 alpha) {
+void Renderer::draw_surface_stretched_ext(i32 id, f32 x, f32 y, f32 w, f32 h, u32 color_bgr, f32 alpha) {
     const auto it = surfaces_.find(id);
     if (it == surfaces_.end()) return;
     draw_texture_ext(it->second.texture, x, y, 0, 0, w, h, 0, color_bgr, alpha);
 }
 
-void Renderer2D::draw_surface_tiled_ext(
+void Renderer::draw_surface_tiled_ext(
     i32 id, f32 x, f32 y, f32 xscale, f32 yscale, u32 color_bgr, f32 alpha,
     f32 view_x, f32 view_y, f32 view_w, f32 view_h) {
     const auto it = surfaces_.find(id);
@@ -1940,7 +1940,7 @@ void Renderer2D::draw_surface_tiled_ext(
     }
 }
 
-void Renderer2D::draw_surface_general(
+void Renderer::draw_surface_general(
     i32 id, f32 left, f32 top, f32 w, f32 h, f32 x, f32 y,
     f32 xscale, f32 yscale, f32 rot_deg,
     u32 c1, u32 c2, u32 c3, u32 c4, f32 alpha) {
@@ -1959,7 +1959,7 @@ void Renderer2D::draw_surface_general(
                         make_vertex_color(c3, alpha), make_vertex_color(c4, alpha));
 }
 
-bool Renderer2D::surface_read_pixels_bgra(i32 id, i32 x, i32 y, i32 w, i32 h, std::vector<u8>& out_bgra) {
+bool Renderer::surface_read_pixels_bgra(i32 id, i32 x, i32 y, i32 w, i32 h, std::vector<u8>& out_bgra) {
     const auto it = surfaces_.find(id);
     if (it == surfaces_.end() || w <= 0 || h <= 0) return false;
     flush();
@@ -1979,7 +1979,7 @@ bool Renderer2D::surface_read_pixels_bgra(i32 id, i32 x, i32 y, i32 w, i32 h, st
     return true;
 }
 
-bool Renderer2D::surface_write_pixels_bgra(i32 id, i32 w, i32 h, std::span<const u8> bgra) {
+bool Renderer::surface_write_pixels_bgra(i32 id, i32 w, i32 h, std::span<const u8> bgra) {
     const auto it = surfaces_.find(id);
     if (it == surfaces_.end() || w <= 0 || h <= 0) return false;
     const i32 cw = std::min(w, it->second.width);
@@ -1991,7 +1991,7 @@ bool Renderer2D::surface_write_pixels_bgra(i32 id, i32 w, i32 h, std::span<const
     return true;
 }
 
-bool Renderer2D::screen_read_pixels_bgra(i32 x, i32 y, i32 w, i32 h, std::vector<u8>& out_bgra) {
+bool Renderer::screen_read_pixels_bgra(i32 x, i32 y, i32 w, i32 h, std::vector<u8>& out_bgra) {
     if (w <= 0 || h <= 0) return false;
     flush();
 
@@ -2038,7 +2038,7 @@ bool Renderer2D::screen_read_pixels_bgra(i32 x, i32 y, i32 w, i32 h, std::vector
     return true;
 }
 
-u32 Renderer2D::surface_getpixel(i32 id, i32 x, i32 y) {
+u32 Renderer::surface_getpixel(i32 id, i32 x, i32 y) {
     const auto it = surfaces_.find(id);
     if (it == surfaces_.end() || x < 0 || y < 0 || x >= it->second.width || y >= it->second.height) return 0u;
     std::vector<u8> bgra;
@@ -2046,7 +2046,7 @@ u32 Renderer2D::surface_getpixel(i32 id, i32 x, i32 y) {
     return static_cast<u32>(bgra[2]) | (static_cast<u32>(bgra[1]) << 8u) | (static_cast<u32>(bgra[0]) << 16u);
 }
 
-u32 Renderer2D::screen_getpixel(i32 x, i32 y) {
+u32 Renderer::screen_getpixel(i32 x, i32 y) {
     if (active_surface_id_ >= 0) {
         return surface_getpixel(active_surface_id_, x, y);
     }
@@ -2055,7 +2055,7 @@ u32 Renderer2D::screen_getpixel(i32 x, i32 y) {
     return static_cast<u32>(bgra[2]) | (static_cast<u32>(bgra[1]) << 8u) | (static_cast<u32>(bgra[0]) << 16u);
 }
 
-void Renderer2D::surface_copy_part(i32 dst_id, i32 x, i32 y, i32 src_id, i32 xs, i32 ys, i32 ws, i32 hs) {
+void Renderer::surface_copy_part(i32 dst_id, i32 x, i32 y, i32 src_id, i32 xs, i32 ys, i32 ws, i32 hs) {
     auto dst = surfaces_.find(dst_id);
     auto src = surfaces_.find(src_id);
     if (dst == surfaces_.end() || src == surfaces_.end()) return;
@@ -2080,7 +2080,7 @@ void Renderer2D::surface_copy_part(i32 dst_id, i32 x, i32 y, i32 src_id, i32 xs,
     bind_active_target_fbo();
 }
 
-bool Renderer2D::save_bitmap_bgra(const Bitmap32& bmp, std::string_view host_path) {
+bool Renderer::save_bitmap_bgra(const Bitmap32& bmp, std::string_view host_path) {
     if (bmp.width <= 0 || bmp.height <= 0 || bmp.bgra.size() < static_cast<usize>(bmp.width) * static_cast<usize>(bmp.height) * 4u) {
         return false;
     }
@@ -2094,13 +2094,13 @@ bool Renderer2D::save_bitmap_bgra(const Bitmap32& bmp, std::string_view host_pat
     return write_rgba_to_file(rgba.data(), bmp.width, bmp.height, host_path);
 }
 
-bool Renderer2D::surface_save(i32 id, std::string_view host_path) {
+bool Renderer::surface_save(i32 id, std::string_view host_path) {
     const auto it = surfaces_.find(id);
     if (it == surfaces_.end()) return false;
     return surface_save_part(id, host_path, 0, 0, it->second.width, it->second.height);
 }
 
-bool Renderer2D::surface_save_part(i32 id, std::string_view host_path, i32 x, i32 y, i32 w, i32 h) {
+bool Renderer::surface_save_part(i32 id, std::string_view host_path, i32 x, i32 y, i32 w, i32 h) {
     const auto it = surfaces_.find(id);
     if (it == surfaces_.end() || w <= 0 || h <= 0) return false;
     flush();
@@ -2111,13 +2111,13 @@ bool Renderer2D::surface_save_part(i32 id, std::string_view host_path, i32 x, i3
     return write_rgba_to_file(rgba.data(), w, h, host_path);
 }
 
-bool Renderer2D::screen_save(std::string_view host_path) {
+bool Renderer::screen_save(std::string_view host_path) {
     const i32 w = (screen_fbo_.valid() && screen_fbo_w_ > 0) ? screen_fbo_w_ : backbuffer_w_;
     const i32 h = (screen_fbo_.valid() && screen_fbo_h_ > 0) ? screen_fbo_h_ : backbuffer_h_;
     return screen_save_part(host_path, 0, 0, w, h);
 }
 
-bool Renderer2D::screen_save_part(std::string_view host_path, i32 x, i32 y, i32 w, i32 h) {
+bool Renderer::screen_save_part(std::string_view host_path, i32 x, i32 y, i32 w, i32 h) {
     std::vector<u8> bgra;
     if (!screen_read_pixels_bgra(x, y, w, h, bgra)) return false;
     Bitmap32 bmp{w, h, std::move(bgra)};
@@ -2126,7 +2126,7 @@ bool Renderer2D::screen_save_part(std::string_view host_path, i32 x, i32 y, i32 
 
 // ---- Sprites / Backgrounds / Tiles ----
 
-TextureHandle Renderer2D::sprite_texture(i32 sprite_id, i32 subimg) const noexcept {
+TextureHandle Renderer::sprite_texture(i32 sprite_id, i32 subimg) const noexcept {
     if (sprite_id < 0 || static_cast<usize>(sprite_id) >= sprites_.size()) return {};
     const auto& sub = sprites_[static_cast<usize>(sprite_id)].subimages;
     if (sub.empty()) return {};
@@ -2135,17 +2135,17 @@ TextureHandle Renderer2D::sprite_texture(i32 sprite_id, i32 subimg) const noexce
     return sub[static_cast<usize>(idx)];
 }
 
-TextureHandle Renderer2D::background_texture(i32 bg_id) const noexcept {
+TextureHandle Renderer::background_texture(i32 bg_id) const noexcept {
     if (bg_id < 0 || static_cast<usize>(bg_id) >= backgrounds_.size()) return {};
     return backgrounds_[static_cast<usize>(bg_id)];
 }
 
-TextureHandle Renderer2D::surface_texture(i32 surf_id) const noexcept {
+TextureHandle Renderer::surface_texture(i32 surf_id) const noexcept {
     const auto it = surfaces_.find(surf_id);
     return it != surfaces_.end() ? it->second.texture : TextureHandle{};
 }
 
-void Renderer2D::draw_particle_shape(i32 shape, f32 x, f32 y, f32 xscale, f32 yscale, f32 rot_deg,
+void Renderer::draw_particle_shape(i32 shape, f32 x, f32 y, f32 xscale, f32 yscale, f32 rot_deg,
                                      u32 color_bgr, f32 alpha) {
     if (shape < 0 || static_cast<usize>(shape) >= particle_shapes_.size()) return;
     const auto tex = particle_shapes_[static_cast<usize>(shape)];
@@ -2157,7 +2157,7 @@ void Renderer2D::draw_particle_shape(i32 shape, f32 x, f32 y, f32 xscale, f32 ys
     draw_texture_ext(tex, x, y, -hw, -hh, hw, hh, rot_deg, color_bgr, alpha);
 }
 
-void Renderer2D::draw_sprite_ext(
+void Renderer::draw_sprite_ext(
     const GameData& game, i32 sprite_id, i32 subimg,
     f32 x, f32 y, f32 xscale, f32 yscale, f32 rot_deg, u32 color_bgr, f32 alpha) {
     if (sprite_id < 0 || static_cast<usize>(sprite_id) >= game.sprites.size()) return;
@@ -2174,13 +2174,13 @@ void Renderer2D::draw_sprite_ext(
     draw_texture_ext(tex, x, y, lx0, ly0, lx1, ly1, rot_deg, color_bgr, alpha);
 }
 
-void Renderer2D::draw_texture_ext(TextureHandle tex, f32 x, f32 y, f32 lx0, f32 ly0, f32 lx1, f32 ly1,
+void Renderer::draw_texture_ext(TextureHandle tex, f32 x, f32 y, f32 lx0, f32 ly0, f32 lx1, f32 ly1,
                                   f32 rot_deg, u32 color_bgr, f32 alpha) {
     const ColorRGBA col = make_vertex_color(color_bgr, alpha);
     draw_texture_region(tex, x, y, lx0, ly0, lx1, ly1, rot_deg, 0, 0, 1, 1, col, col, col, col);
 }
 
-void Renderer2D::draw_texture_region(TextureHandle tex, f32 x, f32 y, f32 lx0, f32 ly0, f32 lx1, f32 ly1, f32 rot_deg,
+void Renderer::draw_texture_region(TextureHandle tex, f32 x, f32 y, f32 lx0, f32 ly0, f32 lx1, f32 ly1, f32 rot_deg,
                                      f32 u0, f32 v0, f32 u1, f32 v1, ColorRGBA c0, ColorRGBA c1, ColorRGBA c2, ColorRGBA c3) {
     // GM's image vertices include a local half-pixel offset,
     // after image scaling and before image rotation or the world transform.
@@ -2207,14 +2207,14 @@ void Renderer2D::draw_texture_region(TextureHandle tex, f32 x, f32 y, f32 lx0, f
               x + lx0 * c + ly1 * s, y - lx0 * s + ly1 * c, u0, v1, c3);
 }
 
-void Renderer2D::draw_sprite_part_ext(
+void Renderer::draw_sprite_part_ext(
     const GameData& game, i32 sprite_id, i32 subimg,
     f32 left, f32 top, f32 w, f32 h, f32 x, f32 y, f32 xscale, f32 yscale, u32 color_bgr, f32 alpha) {
     draw_sprite_general(game, sprite_id, subimg, left, top, w, h, x, y, xscale, yscale, 0.0f,
                         color_bgr, color_bgr, color_bgr, color_bgr, alpha);
 }
 
-void Renderer2D::draw_sprite_stretched_ext(
+void Renderer::draw_sprite_stretched_ext(
     const GameData& game, i32 sprite_id, i32 subimg,
     f32 x, f32 y, f32 w, f32 h, u32 color_bgr, f32 alpha) {
     const TextureHandle tex = sprite_texture(sprite_id, subimg);
@@ -2222,7 +2222,7 @@ void Renderer2D::draw_sprite_stretched_ext(
     draw_texture_ext(tex, x, y, 0, 0, w, h, 0, color_bgr, alpha);
 }
 
-void Renderer2D::draw_sprite_tiled_ext(
+void Renderer::draw_sprite_tiled_ext(
     const GameData& game, i32 sprite_id, i32 subimg,
     f32 x, f32 y, f32 xscale, f32 yscale, u32 color_bgr, f32 alpha,
     f32 view_x, f32 view_y, f32 view_w, f32 view_h) {
@@ -2243,7 +2243,7 @@ void Renderer2D::draw_sprite_tiled_ext(
     }
 }
 
-void Renderer2D::draw_sprite_general(
+void Renderer::draw_sprite_general(
     const GameData& game, i32 sprite_id, i32 subimg,
     f32 left, f32 top, f32 w, f32 h, f32 x, f32 y, f32 xscale, f32 yscale,
     f32 rot_deg, u32 c1, u32 c2, u32 c3, u32 c4, f32 alpha) {
@@ -2267,7 +2267,7 @@ void Renderer2D::draw_sprite_general(
                         make_vertex_color(c3, alpha), make_vertex_color(c4, alpha));
 }
 
-void Renderer2D::draw_background_ext(
+void Renderer::draw_background_ext(
     const GameData& game, i32 bg_id,
     f32 x, f32 y, f32 xscale, f32 yscale, f32 rot_deg, u32 color_bgr, f32 alpha) {
     if (bg_id < 0 || static_cast<usize>(bg_id) >= game.backgrounds.size()) return;
@@ -2281,13 +2281,13 @@ void Renderer2D::draw_background_ext(
     draw_texture_ext(tex, x, y, 0, 0, dw, dh, rot_deg, color_bgr, alpha);
 }
 
-void Renderer2D::draw_background_part_ext(
+void Renderer::draw_background_part_ext(
     const GameData& game, i32 bg_id,
     f32 left, f32 top, f32 w, f32 h, f32 x, f32 y, f32 xscale, f32 yscale, u32 color_bgr, f32 alpha) {
     draw_tile(game, bg_id, left, top, w, h, x, y, xscale, yscale, color_bgr, alpha);
 }
 
-void Renderer2D::draw_background_stretched_ext(
+void Renderer::draw_background_stretched_ext(
     const GameData& game, i32 bg_id,
     f32 x, f32 y, f32 w, f32 h, u32 color_bgr, f32 alpha) {
     const TextureHandle tex = background_texture(bg_id);
@@ -2295,7 +2295,7 @@ void Renderer2D::draw_background_stretched_ext(
     draw_texture_ext(tex, x, y, 0, 0, w, h, 0, color_bgr, alpha);
 }
 
-void Renderer2D::draw_background_tiled_ext(
+void Renderer::draw_background_tiled_ext(
     const GameData& game, i32 bg_id,
     f32 x, f32 y, f32 xscale, f32 yscale, u32 color_bgr, f32 alpha,
     f32 view_x, f32 view_y, f32 view_w, f32 view_h, bool htiled, bool vtiled) {
@@ -2319,7 +2319,7 @@ void Renderer2D::draw_background_tiled_ext(
     }
 }
 
-void Renderer2D::draw_tile(
+void Renderer::draw_tile(
     const GameData& game, i32 bg_id,
     f32 xo, f32 yo, f32 w, f32 h, f32 x, f32 y, f32 xscale, f32 yscale, u32 blend_bgr, f32 alpha) {
     if (bg_id < 0 || static_cast<usize>(bg_id) >= game.backgrounds.size()) return;
@@ -2343,7 +2343,7 @@ void Renderer2D::draw_tile(
 
 // ---- Text & Fonts ----
 
-f32 Renderer2D::current_font_line_height(const GameData& game) const {
+f32 Renderer::current_font_line_height(const GameData& game) const {
     if (draw_font_ >= 0 && static_cast<usize>(draw_font_) < fonts_.size() &&
         (fonts_[static_cast<usize>(draw_font_)].texture.valid() || fonts_[static_cast<usize>(draw_font_)].is_sprite_font)) {
         return static_cast<f32>(fonts_[static_cast<usize>(draw_font_)].line_height);
@@ -2352,14 +2352,14 @@ f32 Renderer2D::current_font_line_height(const GameData& game) const {
     return 12.0f;
 }
 
-u32 Renderer2D::font_codepage(const GameData& game) const noexcept {
+u32 Renderer::font_codepage(const GameData& game) const noexcept {
     const u32 ansi = system_ansi_codepage();
     if (draw_font_ < 0 || static_cast<usize>(draw_font_) >= game.fonts.size() || using_sprite_font()) return ansi;
     const auto& font = game.fonts[static_cast<usize>(draw_font_)];
     return font.exists ? gdi_charset_to_codepage(font.charset, ansi) : ansi;
 }
 
-f32 Renderer2D::measure_single_line_width(const GameData& game, std::string_view line) const {
+f32 Renderer::measure_single_line_width(const GameData& game, std::string_view line) const {
     f32 width = 0.0f;
     if (draw_font_ >= 0 && static_cast<usize>(draw_font_) < fonts_.size()) {
         const auto& fg = fonts_[static_cast<usize>(draw_font_)];
@@ -2380,7 +2380,7 @@ f32 Renderer2D::measure_single_line_width(const GameData& game, std::string_view
     return static_cast<f32>(line.size()) * 8.0f;
 }
 
-std::vector<std::string> Renderer2D::split_gm_lines(const GameData& game, std::string_view text, f32 max_w) const {
+std::vector<std::string> Renderer::split_gm_lines(const GameData& game, std::string_view text, f32 max_w) const {
     // Decode GM8 '#' newlines & '\#' literal '#' first.
     std::vector<std::string> hard_lines;
     std::string cur;
@@ -2445,7 +2445,7 @@ std::vector<std::string> Renderer2D::split_gm_lines(const GameData& game, std::s
     return wrapped;
 }
 
-f32 Renderer2D::measure_string_width(const GameData& game, std::string_view text) const {
+f32 Renderer::measure_string_width(const GameData& game, std::string_view text) const {
     const auto lines = split_gm_lines(game, text, -1.0f);
     f32 max_w = 0.0f;
     for (const auto& l : lines) {
@@ -2454,7 +2454,7 @@ f32 Renderer2D::measure_string_width(const GameData& game, std::string_view text
     return max_w;
 }
 
-f32 Renderer2D::measure_string_height(const GameData& game, std::string_view text, i32 sep, i32 max_w) const {
+f32 Renderer::measure_string_height(const GameData& game, std::string_view text, i32 sep, i32 max_w) const {
     const auto lines = split_gm_lines(game, text, max_w);
     if (lines.empty()) return 0.0f;
     const f32 lh = current_font_line_height(game);
@@ -2462,7 +2462,7 @@ f32 Renderer2D::measure_string_height(const GameData& game, std::string_view tex
     return lh + static_cast<f32>(lines.size() - 1) * step;
 }
 
-void Renderer2D::draw_text_ext_color(
+void Renderer::draw_text_ext_color(
     const GameData& game, f32 x, f32 y, std::string_view text,
     i32 sep, i32 max_w, u32 c1, u32 c2, u32 c3, u32 c4, f32 alpha,
     std::optional<TextTransform> transform) {
@@ -2593,18 +2593,18 @@ void Renderer2D::draw_text_ext_color(
 
 // ---- Primitives ----
 
-void Renderer2D::draw_point_color(f32 x, f32 y, u32 color_bgr, f32 alpha) {
+void Renderer::draw_point_color(f32 x, f32 y, u32 color_bgr, f32 alpha) {
     const ColorRGBA c = make_vertex_color(color_bgr, alpha);
     ensure_batch(PrimitiveTopology::Points, TextureHandle{});
     vertices_.push_back(Vertex3D{x, y, current_draw_z_, 0, 0, 0, 0, 0, c.r, c.g, c.b, c.a});
 }
 
-void Renderer2D::draw_line_color(f32 x1, f32 y1, f32 x2, f32 y2, u32 c1, u32 c2, f32 alpha) {
+void Renderer::draw_line_color(f32 x1, f32 y1, f32 x2, f32 y2, u32 c1, u32 c2, f32 alpha) {
     // GM8 adds 0.01 to standalone line endpoints before transforming them.
     push_line(x1 + 0.01f, y1 + 0.01f, x2 + 0.01f, y2 + 0.01f, c1, c2, alpha);
 }
 
-void Renderer2D::push_line(f32 x1, f32 y1, f32 x2, f32 y2, u32 c1, u32 c2, f32 alpha) {
+void Renderer::push_line(f32 x1, f32 y1, f32 x2, f32 y2, u32 c1, u32 c2, f32 alpha) {
     ensure_batch(PrimitiveTopology::Lines, TextureHandle{});
     const ColorRGBA col1 = make_vertex_color(c1, alpha);
     const ColorRGBA col2 = make_vertex_color(c2, alpha);
@@ -2612,7 +2612,7 @@ void Renderer2D::push_line(f32 x1, f32 y1, f32 x2, f32 y2, u32 c1, u32 c2, f32 a
     vertices_.push_back(Vertex3D{x2, y2, current_draw_z_, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, col2.r, col2.g, col2.b, col2.a});
 }
 
-void Renderer2D::draw_line_width_color(f32 x1, f32 y1, f32 x2, f32 y2, f32 width, u32 c1, u32 c2, f32 alpha) {
+void Renderer::draw_line_width_color(f32 x1, f32 y1, f32 x2, f32 y2, f32 width, u32 c1, u32 c2, f32 alpha) {
     const f32 dx = x2 - x1;
     const f32 dy = y2 - y1;
     const f32 len = std::hypot(dx, dy);
@@ -2631,7 +2631,7 @@ void Renderer2D::draw_line_width_color(f32 x1, f32 y1, f32 x2, f32 y2, f32 width
               x1 - nx, y1 - ny, 0.0f, 0.0f, col1);
 }
 
-void Renderer2D::draw_rectangle_color(f32 x1, f32 y1, f32 x2, f32 y2, u32 c1, u32 c2, u32 c3, u32 c4, bool outline, f32 alpha) {
+void Renderer::draw_rectangle_color(f32 x1, f32 y1, f32 x2, f32 y2, u32 c1, u32 c2, u32 c3, u32 c4, bool outline, f32 alpha) {
     if (x1 > x2) std::swap(x1, x2);
     if (y1 > y2) std::swap(y1, y2);
     // Include integral right and bottom edges at D3D's integer sample centers.
@@ -2651,7 +2651,7 @@ void Renderer2D::draw_rectangle_color(f32 x1, f32 y1, f32 x2, f32 y2, u32 c1, u3
               x1, y2, 0.0f, 0.0f, make_vertex_color(c4, alpha));
 }
 
-void Renderer2D::draw_triangle_color(f32 x1, f32 y1, f32 x2, f32 y2, f32 x3, f32 y3, u32 c1, u32 c2, u32 c3, bool outline, f32 alpha) {
+void Renderer::draw_triangle_color(f32 x1, f32 y1, f32 x2, f32 y2, f32 x3, f32 y3, u32 c1, u32 c2, u32 c3, bool outline, f32 alpha) {
     if (outline) {
         push_line(x1, y1, x2, y2, c1, c2, alpha);
         push_line(x2, y2, x3, y3, c2, c3, alpha);
@@ -2667,7 +2667,7 @@ void Renderer2D::draw_triangle_color(f32 x1, f32 y1, f32 x2, f32 y2, f32 x3, f32
     vertices_.push_back(Vertex3D{x3, y3, current_draw_z_, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, col3.r, col3.g, col3.b, col3.a});
 }
 
-void Renderer2D::draw_ellipse_color(f32 x1, f32 y1, f32 x2, f32 y2, u32 c1, u32 c2, bool outline, f32 alpha) {
+void Renderer::draw_ellipse_color(f32 x1, f32 y1, f32 x2, f32 y2, u32 c1, u32 c2, bool outline, f32 alpha) {
     const f32 cx = (x1 + x2) * 0.5f;
     const f32 cy = (y1 + y2) * 0.5f;
     const f32 rx = std::fabs(x2 - x1) * 0.5f;
@@ -2697,11 +2697,11 @@ void Renderer2D::draw_ellipse_color(f32 x1, f32 y1, f32 x2, f32 y2, u32 c1, u32 
     }
 }
 
-void Renderer2D::draw_circle_color(f32 x, f32 y, f32 r, u32 c1, u32 c2, bool outline, f32 alpha) {
+void Renderer::draw_circle_color(f32 x, f32 y, f32 r, u32 c1, u32 c2, bool outline, f32 alpha) {
     draw_ellipse_color(x - r, y - r, x + r, y + r, c1, c2, outline, alpha);
 }
 
-void Renderer2D::draw_sprite_pos(
+void Renderer::draw_sprite_pos(
     const GameData& game, i32 sprite_id, i32 subimg,
     f32 x1, f32 y1, f32 x2, f32 y2, f32 x3, f32 y3, f32 x4, f32 y4, f32 alpha) {
     if (sprite_id < 0 || static_cast<usize>(sprite_id) >= game.sprites.size()) return;
@@ -2716,7 +2716,7 @@ void Renderer2D::draw_sprite_pos(
               x4 - 0.5f, y4 - 0.5f, 0.0f, 1.0f, col);
 }
 
-void Renderer2D::draw_background_general(
+void Renderer::draw_background_general(
     const GameData& game, i32 bg_id,
     f32 left, f32 top, f32 w, f32 h, f32 x, f32 y, f32 xscale, f32 yscale,
     f32 rot_deg, u32 c1, u32 c2, u32 c3, u32 c4, f32 alpha) {
@@ -2740,7 +2740,7 @@ void Renderer2D::draw_background_general(
                         make_vertex_color(c3, alpha), make_vertex_color(c4, alpha));
 }
 
-void Renderer2D::draw_arrow(f32 x1, f32 y1, f32 x2, f32 y2, f32 tip_size, u32 color_bgr, f32 alpha) {
+void Renderer::draw_arrow(f32 x1, f32 y1, f32 x2, f32 y2, f32 tip_size, u32 color_bgr, f32 alpha) {
     draw_line_color(x1, y1, x2, y2, color_bgr, color_bgr, alpha);
     const f32 dx = x2 - x1;
     const f32 dy = y2 - y1;
@@ -2757,7 +2757,7 @@ void Renderer2D::draw_arrow(f32 x1, f32 y1, f32 x2, f32 y2, f32 tip_size, u32 co
                         color_bgr, color_bgr, color_bgr, false, alpha);
 }
 
-void Renderer2D::draw_button(f32 x1, f32 y1, f32 x2, f32 y2, bool up, u32 color_bgr, f32 alpha) {
+void Renderer::draw_button(f32 x1, f32 y1, f32 x2, f32 y2, bool up, u32 color_bgr, f32 alpha) {
     draw_rectangle_color(x1, y1, x2, y2, color_bgr, color_bgr, color_bgr, color_bgr, false, alpha);
     const u32 hi = up ? 0xFFFFFFu : 0x404040u;
     const u32 lo = up ? 0x404040u : 0xFFFFFFu;
@@ -2769,22 +2769,22 @@ void Renderer2D::draw_button(f32 x1, f32 y1, f32 x2, f32 y2, bool up, u32 color_
 
 // ---- Immediate Primitive Builder ----
 
-void Renderer2D::primitive_begin(i32 kind, TextureHandle tex) {
+void Renderer::primitive_begin(i32 kind, TextureHandle tex) {
     in_primitive_ = true;
     prim_kind_ = kind;
     prim_tex_ = tex;
     prim_verts_.clear();
 }
 
-void Renderer2D::primitive_vertex(f32 x, f32 y, f32 u, f32 v, u32 color_bgr, f32 alpha) {
+void Renderer::primitive_vertex(f32 x, f32 y, f32 u, f32 v, u32 color_bgr, f32 alpha) {
     primitive_vertex_3d(x, y, current_draw_z_, u, v, color_bgr, alpha);
 }
 
-void Renderer2D::primitive_vertex_3d(f32 x, f32 y, f32 z, f32 u, f32 v, u32 color_bgr, f32 alpha) {
+void Renderer::primitive_vertex_3d(f32 x, f32 y, f32 z, f32 u, f32 v, u32 color_bgr, f32 alpha) {
     primitive_vertex_normal_3d(x, y, z, 0.0f, 0.0f, 0.0f, u, v, color_bgr, alpha);
 }
 
-void Renderer2D::primitive_vertex_normal_3d(f32 x, f32 y, f32 z, f32 nx, f32 ny, f32 nz, f32 u, f32 v, u32 color_bgr, f32 alpha) {
+void Renderer::primitive_vertex_normal_3d(f32 x, f32 y, f32 z, f32 nx, f32 ny, f32 nz, f32 u, f32 v, u32 color_bgr, f32 alpha) {
     if (!in_primitive_) return;
     if (prim_verts_.size() >= 32001) return; // GM8 cap
     const ColorRGBA c = make_vertex_color(color_bgr, alpha);
@@ -2793,7 +2793,7 @@ void Renderer2D::primitive_vertex_normal_3d(f32 x, f32 y, f32 z, f32 nx, f32 ny,
 
 // ---- Fixed-Function D3D Mode, Lighting, Fog, Projection, Transforms & 3D Shapes ----
 
-void Renderer2D::d3d_start() {
+void Renderer::d3d_start() {
     if (d3d_active_) return;
     flush();
     d3d_active_ = true;
@@ -2802,7 +2802,7 @@ void Renderer2D::d3d_start() {
     apply_d3d_depth_cull();
 }
 
-void Renderer2D::d3d_end() {
+void Renderer::d3d_end() {
     if (!d3d_active_) return;
     flush();
     d3d_active_ = false;
@@ -2812,42 +2812,42 @@ void Renderer2D::d3d_end() {
     apply_d3d_depth_cull();
 }
 
-void Renderer2D::d3d_set_perspective(bool enable) {
+void Renderer::d3d_set_perspective(bool enable) {
     flush();
     d3d_perspective_ = enable;
 }
 
-void Renderer2D::d3d_set_hidden(bool enable) {
+void Renderer::d3d_set_hidden(bool enable) {
     flush();
     d3d_hidden_ = enable;
     apply_d3d_depth_cull();
 }
 
-void Renderer2D::d3d_set_depth(f32 depth) noexcept {
+void Renderer::d3d_set_depth(f32 depth) noexcept {
     current_draw_z_ = d3d_active_ ? std::clamp(depth, -16000.0f, 16000.0f) : 0.0f;
 }
 
-void Renderer2D::d3d_set_zwriteenable(bool enable) {
+void Renderer::d3d_set_zwriteenable(bool enable) {
     if (!d3d_active_) return; // GM8 00563B44 no-op when !d3d_active
     flush();
     d3d_zwrite_ = enable;
     apply_d3d_depth_cull();
 }
 
-void Renderer2D::d3d_set_culling(bool enable) {
+void Renderer::d3d_set_culling(bool enable) {
     flush();
     d3d_cull_mode_ = enable ? 2 : 0; // 2 = D3DCULL_CCW, 0 = D3DCULL_NONE
     apply_d3d_depth_cull();
 }
 
-void Renderer2D::d3d_set_lighting(bool enable) {
+void Renderer::d3d_set_lighting(bool enable) {
     if (d3d_lighting_ != enable) {
         flush();
         d3d_lighting_ = enable;
     }
 }
 
-void Renderer2D::d3d_set_shading(bool smooth) {
+void Renderer::d3d_set_shading(bool smooth) {
     const bool flat = !smooth;
     if (d3d_flat_shading_ != flat) {
         flush();
@@ -2855,11 +2855,11 @@ void Renderer2D::d3d_set_shading(bool smooth) {
     }
 }
 
-void Renderer2D::d3d_set_fog(bool enable, u32 color_bgr, f32 start, f32 end) {
+void Renderer::d3d_set_fog(bool enable, u32 color_bgr, f32 start, f32 end) {
     d3d_set_fog_ext(enable ? 1 : 0, color_bgr, start, end);
 }
 
-void Renderer2D::d3d_set_fog_ext(i32 mode, u32 color_bgr, f32 start, f32 end) {
+void Renderer::d3d_set_fog_ext(i32 mode, u32 color_bgr, f32 start, f32 end) {
     flush();
     fog_.mode = std::clamp(mode, 0, 2);
     if (fog_.mode != 0) {
@@ -2869,12 +2869,12 @@ void Renderer2D::d3d_set_fog_ext(i32 mode, u32 color_bgr, f32 start, f32 end) {
     }
 }
 
-void Renderer2D::d3d_light_define_ambient(u32 color_bgr) {
+void Renderer::d3d_light_define_ambient(u32 color_bgr) {
     flush();
     ambient_bgr_ = color_bgr & 0x00FFFFFFu;
 }
 
-void Renderer2D::d3d_light_define_direction(i32 ind, f32 dx, f32 dy, f32 dz, u32 color_bgr) {
+void Renderer::d3d_light_define_direction(i32 ind, f32 dx, f32 dy, f32 dz, u32 color_bgr) {
     if (ind < 0 || ind >= 8) return;
     flush();
     auto& l = lights_[static_cast<usize>(ind)];
@@ -2886,7 +2886,7 @@ void Renderer2D::d3d_light_define_direction(i32 ind, f32 dx, f32 dy, f32 dz, u32
     l.atten[0] = 1.0f; l.atten[1] = 0.0f; l.atten[2] = 0.0f;
 }
 
-void Renderer2D::d3d_light_define_point(i32 ind, f32 x, f32 y, f32 z, f32 range, u32 color_bgr) {
+void Renderer::d3d_light_define_point(i32 ind, f32 x, f32 y, f32 z, f32 range, u32 color_bgr) {
     if (ind < 0 || ind >= 8) return;
     flush();
     auto& l = lights_[static_cast<usize>(ind)];
@@ -2902,7 +2902,7 @@ void Renderer2D::d3d_light_define_point(i32 ind, f32 x, f32 y, f32 z, f32 range,
     l.atten[2] = 0.0f;
 }
 
-void Renderer2D::d3d_light_define_ext(
+void Renderer::d3d_light_define_ext(
     i32 ind, i32 type, f32 x, f32 y, f32 z, f32 dx, f32 dy, f32 dz,
     f32 range, f32 inner_deg, f32 outer_deg, u32 diff_bgr, f32 diff_factor,
     u32 spec_bgr, f32 /*spec_factor*/) {
@@ -2931,24 +2931,24 @@ void Renderer2D::d3d_light_define_ext(
     l.enabled = true;
 }
 
-void Renderer2D::d3d_light_enable(i32 ind, bool enable) {
+void Renderer::d3d_light_enable(i32 ind, bool enable) {
     if (ind < 0 || ind >= 8) return;
     flush();
     lights_[static_cast<usize>(ind)].enabled = enable;
 }
 
-bool Renderer2D::d3d_light_is_enabled(i32 ind) const noexcept {
+bool Renderer::d3d_light_is_enabled(i32 ind) const noexcept {
     if (ind < 0 || ind >= 8) return false;
     return lights_[static_cast<usize>(ind)].enabled;
 }
 
-void Renderer2D::d3d_set_projection(f32 xfrom, f32 yfrom, f32 zfrom, f32 xto, f32 yto, f32 zto, f32 xup, f32 yup, f32 zup) {
+void Renderer::d3d_set_projection(f32 xfrom, f32 yfrom, f32 zfrom, f32 xto, f32 yto, f32 zto, f32 xup, f32 yup, f32 zup) {
     // Exact GM8 sub_563B84: sets D3DTS_VIEW ONLY, preserving D3DTS_PROJECTION.
     flush();
     build_look_at_lh(view_matrix_, xfrom, yfrom, zfrom, xto, yto, zto, xup, yup, zup);
 }
 
-void Renderer2D::d3d_set_projection_ext(
+void Renderer::d3d_set_projection_ext(
     f32 xfrom, f32 yfrom, f32 zfrom,
     f32 xto, f32 yto, f32 zto,
     f32 xup, f32 yup, f32 zup,
@@ -2960,7 +2960,7 @@ void Renderer2D::d3d_set_projection_ext(
     }
 }
 
-void Renderer2D::d3d_set_projection_ortho(f32 x, f32 y, f32 w, f32 h, f32 angle_deg) {
+void Renderer::d3d_set_projection_ortho(f32 x, f32 y, f32 w, f32 h, f32 angle_deg) {
     // Exact GM8 sub_563D70: LookAtLH(cx,cy,-16000 -> cx,cy,0, up=(sin(-a),cos(-a),0)) + OrthoLH(w, -h, 1, 32000).
     flush();
     const f32 rw = (std::fabs(w) > 1e-4f) ? w : 1.0f;
@@ -2972,7 +2972,7 @@ void Renderer2D::d3d_set_projection_ortho(f32 x, f32 y, f32 w, f32 h, f32 angle_
     build_ortho_lh(proj_matrix_, rw, -rh, 1.0f, 32000.0f);
 }
 
-void Renderer2D::d3d_set_projection_perspective(f32 x, f32 y, f32 w, f32 h, f32 angle_deg) {
+void Renderer::d3d_set_projection_perspective(f32 x, f32 y, f32 w, f32 h, f32 angle_deg) {
     // Exact GM8 sub_563ECC: LookAtLH(cx,cy,-w -> cx,cy,0, up=(sin(-a),cos(-a),0)) + PerspectiveLH(1, h/w, 1, 32000).
     flush();
     const f32 rw = (std::fabs(w) > 1e-4f) ? w : 1.0f;
@@ -2984,22 +2984,22 @@ void Renderer2D::d3d_set_projection_perspective(f32 x, f32 y, f32 w, f32 h, f32 
     build_perspective_lh(proj_matrix_, 1.0f, rh / rw, 1.0f, 32000.0f);
 }
 
-void Renderer2D::d3d_transform_set_identity() {
+void Renderer::d3d_transform_set_identity() {
     flush();
     mat4_identity(world_matrix_);
 }
 
-void Renderer2D::d3d_transform_set_matrix(const f32 col_major[16]) {
+void Renderer::d3d_transform_set_matrix(const f32 col_major[16]) {
     flush();
     std::memcpy(world_matrix_, col_major, sizeof(world_matrix_));
 }
 
-void Renderer2D::d3d_transform_add_matrix(const f32 col_major[16]) {
+void Renderer::d3d_transform_add_matrix(const f32 col_major[16]) {
     flush();
     mat4_mul(world_matrix_, col_major, world_matrix_);
 }
 
-void Renderer2D::d3d_transform_set_translation(f32 xt, f32 yt, f32 zt) {
+void Renderer::d3d_transform_set_translation(f32 xt, f32 yt, f32 zt) {
     flush();
     mat4_identity(world_matrix_);
     world_matrix_[12] = xt;
@@ -3007,7 +3007,7 @@ void Renderer2D::d3d_transform_set_translation(f32 xt, f32 yt, f32 zt) {
     world_matrix_[14] = zt;
 }
 
-void Renderer2D::d3d_transform_set_scaling(f32 xs, f32 ys, f32 zs) {
+void Renderer::d3d_transform_set_scaling(f32 xs, f32 ys, f32 zs) {
     flush();
     mat4_identity(world_matrix_);
     world_matrix_[0] = xs;
@@ -3015,7 +3015,7 @@ void Renderer2D::d3d_transform_set_scaling(f32 xs, f32 ys, f32 zs) {
     world_matrix_[10] = zs;
 }
 
-void Renderer2D::d3d_transform_set_rotation_x(f32 angle_deg) {
+void Renderer::d3d_transform_set_rotation_x(f32 angle_deg) {
     flush();
     mat4_identity(world_matrix_);
     const f32 r = static_cast<f32>(deg_to_rad(angle_deg));
@@ -3024,7 +3024,7 @@ void Renderer2D::d3d_transform_set_rotation_x(f32 angle_deg) {
     world_matrix_[9] = s;  world_matrix_[10] = c;
 }
 
-void Renderer2D::d3d_transform_set_rotation_y(f32 angle_deg) {
+void Renderer::d3d_transform_set_rotation_y(f32 angle_deg) {
     flush();
     mat4_identity(world_matrix_);
     const f32 r = static_cast<f32>(deg_to_rad(angle_deg));
@@ -3033,7 +3033,7 @@ void Renderer2D::d3d_transform_set_rotation_y(f32 angle_deg) {
     world_matrix_[8] = -s;  world_matrix_[10] = c;
 }
 
-void Renderer2D::d3d_transform_set_rotation_z(f32 angle_deg) {
+void Renderer::d3d_transform_set_rotation_z(f32 angle_deg) {
     flush();
     mat4_identity(world_matrix_);
     const f32 r = static_cast<f32>(deg_to_rad(angle_deg));
@@ -3042,7 +3042,7 @@ void Renderer2D::d3d_transform_set_rotation_z(f32 angle_deg) {
     world_matrix_[4] = s;  world_matrix_[5] = c;
 }
 
-void Renderer2D::d3d_transform_set_rotation_axis(f32 xa, f32 ya, f32 za, f32 angle_deg) {
+void Renderer::d3d_transform_set_rotation_axis(f32 xa, f32 ya, f32 za, f32 angle_deg) {
     flush();
     mat4_identity(world_matrix_);
     const f32 len = std::sqrt(xa * xa + ya * ya + za * za);
@@ -3055,7 +3055,7 @@ void Renderer2D::d3d_transform_set_rotation_axis(f32 xa, f32 ya, f32 za, f32 ang
     world_matrix_[2] = t * x * z - s * y;  world_matrix_[6] = t * y * z + s * x;  world_matrix_[10] = t * z * z + c;
 }
 
-void Renderer2D::d3d_transform_add_translation(f32 xt, f32 yt, f32 zt) {
+void Renderer::d3d_transform_add_translation(f32 xt, f32 yt, f32 zt) {
     flush();
     f32 t[16];
     mat4_identity(t);
@@ -3063,7 +3063,7 @@ void Renderer2D::d3d_transform_add_translation(f32 xt, f32 yt, f32 zt) {
     mat4_mul(world_matrix_, t, world_matrix_);
 }
 
-void Renderer2D::d3d_transform_add_scaling(f32 xs, f32 ys, f32 zs) {
+void Renderer::d3d_transform_add_scaling(f32 xs, f32 ys, f32 zs) {
     flush();
     f32 t[16];
     mat4_identity(t);
@@ -3071,7 +3071,7 @@ void Renderer2D::d3d_transform_add_scaling(f32 xs, f32 ys, f32 zs) {
     mat4_mul(world_matrix_, t, world_matrix_);
 }
 
-void Renderer2D::d3d_transform_add_rotation_x(f32 angle_deg) {
+void Renderer::d3d_transform_add_rotation_x(f32 angle_deg) {
     flush();
     f32 t[16];
     mat4_identity(t);
@@ -3081,7 +3081,7 @@ void Renderer2D::d3d_transform_add_rotation_x(f32 angle_deg) {
     mat4_mul(world_matrix_, t, world_matrix_);
 }
 
-void Renderer2D::d3d_transform_add_rotation_y(f32 angle_deg) {
+void Renderer::d3d_transform_add_rotation_y(f32 angle_deg) {
     flush();
     f32 t[16];
     mat4_identity(t);
@@ -3091,7 +3091,7 @@ void Renderer2D::d3d_transform_add_rotation_y(f32 angle_deg) {
     mat4_mul(world_matrix_, t, world_matrix_);
 }
 
-void Renderer2D::d3d_transform_add_rotation_z(f32 angle_deg) {
+void Renderer::d3d_transform_add_rotation_z(f32 angle_deg) {
     flush();
     f32 t[16];
     mat4_identity(t);
@@ -3101,7 +3101,7 @@ void Renderer2D::d3d_transform_add_rotation_z(f32 angle_deg) {
     mat4_mul(world_matrix_, t, world_matrix_);
 }
 
-void Renderer2D::d3d_transform_add_rotation_axis(f32 xa, f32 ya, f32 za, f32 angle_deg) {
+void Renderer::d3d_transform_add_rotation_axis(f32 xa, f32 ya, f32 za, f32 angle_deg) {
     flush();
     const f32 len = std::sqrt(xa * xa + ya * ya + za * za);
     if (len < 1e-6f) return;
@@ -3116,11 +3116,11 @@ void Renderer2D::d3d_transform_add_rotation_axis(f32 xa, f32 ya, f32 za, f32 ang
     mat4_mul(world_matrix_, t, world_matrix_);
 }
 
-void Renderer2D::d3d_transform_stack_clear() {
+void Renderer::d3d_transform_stack_clear() {
     transform_stack_.clear();
 }
 
-bool Renderer2D::d3d_transform_stack_push() {
+bool Renderer::d3d_transform_stack_push() {
     if (transform_stack_.size() >= 1001) return false; // GM8 cap
     std::array<f32, 16> copy{};
     std::memcpy(copy.data(), world_matrix_, sizeof(world_matrix_));
@@ -3128,7 +3128,7 @@ bool Renderer2D::d3d_transform_stack_push() {
     return true;
 }
 
-bool Renderer2D::d3d_transform_stack_pop() {
+bool Renderer::d3d_transform_stack_pop() {
     if (transform_stack_.empty()) return false;
     flush();
     std::memcpy(world_matrix_, transform_stack_.back().data(), sizeof(world_matrix_));
@@ -3136,27 +3136,27 @@ bool Renderer2D::d3d_transform_stack_pop() {
     return true;
 }
 
-bool Renderer2D::d3d_transform_stack_top() {
+bool Renderer::d3d_transform_stack_top() {
     if (transform_stack_.empty()) return false;
     flush();
     std::memcpy(world_matrix_, transform_stack_.back().data(), sizeof(world_matrix_));
     return true;
 }
 
-bool Renderer2D::d3d_transform_stack_discard() {
+bool Renderer::d3d_transform_stack_discard() {
     if (transform_stack_.empty()) return false;
     transform_stack_.pop_back();
     return true;
 }
 
-bool Renderer2D::d3d_transform_add_stack_top() {
+bool Renderer::d3d_transform_add_stack_top() {
     if (transform_stack_.empty()) return false;
     flush();
     mat4_mul(world_matrix_, transform_stack_.back().data(), world_matrix_);
     return true;
 }
 
-void Renderer2D::d3d_transform_vertex(f32 x, f32 y, f32 z, f32& ox, f32& oy, f32& oz) const noexcept {
+void Renderer::d3d_transform_vertex(f32 x, f32 y, f32 z, f32& ox, f32& oy, f32& oz) const noexcept {
     const f32 rx = world_matrix_[0] * x + world_matrix_[4] * y + world_matrix_[8]  * z + world_matrix_[12];
     const f32 ry = world_matrix_[1] * x + world_matrix_[5] * y + world_matrix_[9]  * z + world_matrix_[13];
     const f32 rz = world_matrix_[2] * x + world_matrix_[6] * y + world_matrix_[10] * z + world_matrix_[14];
@@ -3168,7 +3168,7 @@ void Renderer2D::d3d_transform_vertex(f32 x, f32 y, f32 z, f32& ox, f32& oy, f32
     }
 }
 
-void Renderer2D::d3d_project_vertex(f32 x, f32 y, f32 z, f32& ox, f32& oy, f32& oz) const noexcept {
+void Renderer::d3d_project_vertex(f32 x, f32 y, f32 z, f32& ox, f32& oy, f32& oz) const noexcept {
     f32 vp[16];
     mat4_mul(vp, proj_matrix_, view_matrix_);
     const f32 rx = vp[0] * x + vp[4] * y + vp[8]  * z + vp[12];
@@ -3185,7 +3185,7 @@ void Renderer2D::d3d_project_vertex(f32 x, f32 y, f32 z, f32& ox, f32& oy, f32& 
     }
 }
 
-void Renderer2D::d3d_get_eye_pos(f32& ox, f32& oy, f32& oz) const noexcept {
+void Renderer::d3d_get_eye_pos(f32& ox, f32& oy, f32& oz) const noexcept {
     f32 inv[16];
     if (mat4_invert(view_matrix_, inv)) {
         ox = inv[12];
@@ -3196,15 +3196,15 @@ void Renderer2D::d3d_get_eye_pos(f32& ox, f32& oy, f32& oz) const noexcept {
     }
 }
 
-f32 Renderer2D::d3d_world_determinant() const noexcept {
+f32 Renderer::d3d_world_determinant() const noexcept {
     return mat4_det(world_matrix_);
 }
 
-f32 Renderer2D::d3d_projection_determinant() const noexcept {
+f32 Renderer::d3d_projection_determinant() const noexcept {
     return mat4_det(proj_matrix_);
 }
 
-void Renderer2D::d3d_draw_block(f32 x1, f32 y1, f32 z1, f32 x2, f32 y2, f32 z2, TextureHandle tex, f32 hr, f32 vr) {
+void Renderer::d3d_draw_block(f32 x1, f32 y1, f32 z1, f32 x2, f32 y2, f32 z2, TextureHandle tex, f32 hr, f32 vr) {
     const bool prev_rep = tex_repeat_;
     set_texture_repeat(true);
     std::vector<Vertex3D> tris;
@@ -3215,7 +3215,7 @@ void Renderer2D::d3d_draw_block(f32 x1, f32 y1, f32 z1, f32 x2, f32 y2, f32 z2, 
     set_texture_repeat(prev_rep);
 }
 
-void Renderer2D::d3d_draw_floor(f32 x1, f32 y1, f32 z1, f32 x2, f32 y2, f32 z2, TextureHandle tex, f32 hr, f32 vr) {
+void Renderer::d3d_draw_floor(f32 x1, f32 y1, f32 z1, f32 x2, f32 y2, f32 z2, TextureHandle tex, f32 hr, f32 vr) {
     const bool prev_rep = tex_repeat_;
     set_texture_repeat(true);
     std::vector<Vertex3D> tris;
@@ -3226,7 +3226,7 @@ void Renderer2D::d3d_draw_floor(f32 x1, f32 y1, f32 z1, f32 x2, f32 y2, f32 z2, 
     set_texture_repeat(prev_rep);
 }
 
-void Renderer2D::d3d_draw_wall(f32 x1, f32 y1, f32 z1, f32 x2, f32 y2, f32 z2, TextureHandle tex, f32 hr, f32 vr) {
+void Renderer::d3d_draw_wall(f32 x1, f32 y1, f32 z1, f32 x2, f32 y2, f32 z2, TextureHandle tex, f32 hr, f32 vr) {
     if (std::hypot(x2 - x1, y2 - y1) == 0.0f) return;
     const bool prev_rep = tex_repeat_;
     set_texture_repeat(true);
@@ -3238,7 +3238,7 @@ void Renderer2D::d3d_draw_wall(f32 x1, f32 y1, f32 z1, f32 x2, f32 y2, f32 z2, T
     set_texture_repeat(prev_rep);
 }
 
-void Renderer2D::d3d_draw_cylinder(f32 x1, f32 y1, f32 z1, f32 x2, f32 y2, f32 z2, TextureHandle tex, f32 hr, f32 vr, bool closed, i32 steps) {
+void Renderer::d3d_draw_cylinder(f32 x1, f32 y1, f32 z1, f32 x2, f32 y2, f32 z2, TextureHandle tex, f32 hr, f32 vr, bool closed, i32 steps) {
     const bool prev_rep = tex_repeat_;
     set_texture_repeat(true);
     std::vector<Vertex3D> tris;
@@ -3252,7 +3252,7 @@ void Renderer2D::d3d_draw_cylinder(f32 x1, f32 y1, f32 z1, f32 x2, f32 y2, f32 z
     set_texture_repeat(prev_rep);
 }
 
-void Renderer2D::d3d_draw_cone(f32 x1, f32 y1, f32 z1, f32 x2, f32 y2, f32 z2, TextureHandle tex, f32 hr, f32 vr, bool closed, i32 steps) {
+void Renderer::d3d_draw_cone(f32 x1, f32 y1, f32 z1, f32 x2, f32 y2, f32 z2, TextureHandle tex, f32 hr, f32 vr, bool closed, i32 steps) {
     const bool prev_rep = tex_repeat_;
     set_texture_repeat(true);
     std::vector<Vertex3D> tris;
@@ -3266,7 +3266,7 @@ void Renderer2D::d3d_draw_cone(f32 x1, f32 y1, f32 z1, f32 x2, f32 y2, f32 z2, T
     set_texture_repeat(prev_rep);
 }
 
-void Renderer2D::d3d_draw_ellipsoid(f32 x1, f32 y1, f32 z1, f32 x2, f32 y2, f32 z2, TextureHandle tex, f32 hr, f32 vr, i32 steps) {
+void Renderer::d3d_draw_ellipsoid(f32 x1, f32 y1, f32 z1, f32 x2, f32 y2, f32 z2, TextureHandle tex, f32 hr, f32 vr, i32 steps) {
     const bool prev_rep = tex_repeat_;
     set_texture_repeat(true);
     std::vector<Vertex3D> tris;
@@ -3280,7 +3280,7 @@ void Renderer2D::d3d_draw_ellipsoid(f32 x1, f32 y1, f32 z1, f32 x2, f32 y2, f32 
     set_texture_repeat(prev_rep);
 }
 
-void Renderer2D::draw_model_bucket(const Model3DMeshBucket& bucket, PrimitiveTopology topo, TextureHandle tex) {
+void Renderer::draw_model_bucket(const Model3DMeshBucket& bucket, PrimitiveTopology topo, TextureHandle tex) {
     if (bucket.verts.empty()) return;
 
     const ColorRGBA cur_col = make_vertex_color(d3d_vertex_color(), draw_alpha_);
@@ -3326,7 +3326,7 @@ void Renderer2D::draw_model_bucket(const Model3DMeshBucket& bucket, PrimitiveTop
     flush();
 }
 
-std::array<f32, 2> Renderer2D::pixel_center_offset(PixelCenter center) const noexcept {
+std::array<f32, 2> Renderer::pixel_center_offset(PixelCenter center) const noexcept {
     if (center == PixelCenter::OpenGL) return {};
     // D3D9 places pixel centers at integers. Shift raw vertices by half a
     // viewport pixel after projection, independent of the world transform.
@@ -3334,7 +3334,7 @@ std::array<f32, 2> Renderer2D::pixel_center_offset(PixelCenter center) const noe
             (rendering_to_fbo() ? 1.0f : -1.0f) / active_viewport_.height};
 }
 
-void Renderer2D::d3d_model_draw(i32 id, f32 x, f32 y, f32 z, TextureHandle tex) {
+void Renderer::d3d_model_draw(i32 id, f32 x, f32 y, f32 z, TextureHandle tex) {
     Model3DData* model = models_.prepare_for_draw(id, recorded_d3d_);
     if (!model) return;
     if (model->triangles.verts.empty() && model->lines.verts.empty() && model->points.verts.empty()) {
@@ -3360,7 +3360,7 @@ void Renderer2D::d3d_model_draw(i32 id, f32 x, f32 y, f32 z, TextureHandle tex) 
     std::memcpy(world_matrix_, saved_world, sizeof(saved_world));
 }
 
-void Renderer2D::primitive_end() {
+void Renderer::primitive_end() {
     if (!in_primitive_) return;
     in_primitive_ = false;
     const usize n = prim_verts_.size();
@@ -3390,7 +3390,7 @@ void Renderer2D::primitive_end() {
     flush();
 }
 
-void Renderer2D::dx9_set_shader_matrix(bool is_vs, u32 reg, i32 mask, i32 size) {
+void Renderer::dx9_set_shader_matrix(bool is_vs, u32 reg, i32 mask, i32 size) {
     flush();
     f32 m[16];
     if ((mask & 1) != 0) {
@@ -3412,7 +3412,7 @@ void Renderer2D::dx9_set_shader_matrix(bool is_vs, u32 reg, i32 mask, i32 size) 
     }
 }
 
-bool Renderer2D::dx9_draw_vertex_buffer(
+bool Renderer::dx9_draw_vertex_buffer(
     i32 vbuf_id, i32 vformat_id, i32 prim_type, TextureHandle tex, i32 vert_count, bool indexed) {
     flush();
     static constexpr f32 kWhiteTint[4] = {1.0f, 1.0f, 1.0f, 1.0f};
@@ -3425,7 +3425,7 @@ bool Renderer2D::dx9_draw_vertex_buffer(
         make_dx9_draw_context(kWhiteTint, PixelCenter::D3D9), shader_);
 }
 
-Result<Bitmap32> Renderer2D::decode_image_to_bgra(std::span<const u8> encoded_bytes) {
+Result<Bitmap32> Renderer::decode_image_to_bgra(std::span<const u8> encoded_bytes) {
     if (encoded_bytes.empty()) {
         return Error{"Empty image data"};
     }

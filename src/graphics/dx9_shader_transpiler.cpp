@@ -1442,7 +1442,7 @@ Result<std::string> transpile_d3d9_to_glsl(
     out << body_ss.str();
 
     if (is_vs) {
-        // Renderer2D projection matrices already map Z into OpenGL [-w, +w] clip space;
+        // Renderer projection matrices already map Z into OpenGL [-w, +w] clip space;
         // Keep rasterization adjustments separate from the D3D matrices visible to shaders.
         out << "    gl_Position = vec4(o_pos.x, o_pos.y * u_gm_yflip, o_pos.z, o_pos.w);\n"
             << "    gl_Position.xy += u_pixel_center_offset * gl_Position.w;\n";

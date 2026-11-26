@@ -1027,7 +1027,7 @@ void Runner::register_builtins_actions() {
         if (id < 0 || static_cast<usize>(id) >= r.game().sprites.size()) return RValue(0.0);
         auto bytes = r.vfs().read_all_bytes(arg_str(a, 1));
         if (!bytes) return RValue(0.0);
-        auto bmp = Renderer2D::decode_image_to_bgra(bytes.value());
+        auto bmp = Renderer::decode_image_to_bgra(bytes.value());
         if (!bmp) return RValue(0.0);
         auto& sp = r.game().sprites[static_cast<usize>(id)];
         const i32 n = std::max(1, arg_i32(a, 2, 1));
@@ -1057,7 +1057,7 @@ void Runner::register_builtins_actions() {
         if (id < 0 || static_cast<usize>(id) >= r.game().backgrounds.size()) return RValue(0.0);
         auto bytes = r.vfs().read_all_bytes(arg_str(a, 1));
         if (!bytes) return RValue(0.0);
-        auto bmp = Renderer2D::decode_image_to_bgra(bytes.value());
+        auto bmp = Renderer::decode_image_to_bgra(bytes.value());
         if (!bmp) return RValue(0.0);
         auto& bg = r.game().backgrounds[static_cast<usize>(id)];
         bg.exists = true; bg.width = bmp.value().width; bg.height = bmp.value().height; bg.bitmap = std::move(bmp.value());

@@ -2,7 +2,7 @@
 
 #include "base/math.h"
 #include "base/types.h"
-#include "graphics/renderer2d.h"
+#include "graphics/renderer.h"
 #include "loader/game_data.h"
 
 #include <array>
@@ -177,7 +177,7 @@ public:
 
     void update_all();
     void update_system(i32 ps);
-    void draw_system(i32 ps, Renderer2D& renderer, const GameData& game) const;
+    void draw_system(i32 ps, Renderer& renderer, const GameData& game) const;
 
     // Returns (ps_id, depth) for all auto-draw systems (used in 3-way depth-sorted render pass).
     [[nodiscard]] std::vector<std::pair<i32, f64>> auto_draw_systems() const;

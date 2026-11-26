@@ -85,7 +85,7 @@ struct Dx9ParsedShader {
 };
 
 // Maps a D3DDECLUSAGE + usage_index to canonical GLSL vertex attribute location (0..15).
-// Matches Renderer2D's Vertex3D layout: 0=POSITION0, 1=NORMAL0, 2=TEXCOORD0, 3=COLOR0.
+// Matches Renderer's Vertex3D layout: 0=POSITION0, 1=NORMAL0, 2=TEXCOORD0, 3=COLOR0.
 [[nodiscard]] i32 dx9_semantic_to_attrib_location(u8 usage, u8 usage_index) noexcept;
 
 // Returns canonical varying name (e.g. "TEXCOORD0", "COLOR0", "NORMAL0").

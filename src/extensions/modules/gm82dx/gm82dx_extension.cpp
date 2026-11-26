@@ -4,7 +4,7 @@
 #include "base/log.h"
 #include "graphics/dx9_shader_transpiler.h"
 #include "graphics/gl_graphics_device.h"
-#include "graphics/renderer2d.h"
+#include "graphics/renderer.h"
 #include "platform/clock.h"
 
 #include <algorithm>
