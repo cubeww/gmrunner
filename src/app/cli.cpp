@@ -19,7 +19,7 @@ void print_cli_help() {
         "  --compile-check        Compile all GML/D&D scripts and exit\n"
         "  --save-dir <path>      Override writable save overlay directory\n"
         "  --version <80|81|82>   Override auto-detected GameMaker version profile\n"
-        "  --codepage <id>        Windows codepage for GM 8.0 strings (auto: font charset, fallback 1252)\n"
+        "  --codepage <id>        Windows codepage for GM 8.0 strings (auto: game text and font charset)\n"
         "  --width <px>           Initial window width (default: 800)\n"
         "  --height <px>          Initial window height (default: 608)\n"
         "  --fullscreen           Start in fullscreen mode\n"

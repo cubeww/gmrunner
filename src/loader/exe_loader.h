@@ -12,7 +12,7 @@ namespace gm {
 
 struct LoadOptions {
     VersionMode version_override = VersionMode::Auto;
-    u32 codepage_override = 0; // 0 = auto-detect from version/fonts
+    u32 codepage_override = 0; // 0 = auto-detect from version, game text and fonts
 };
 
 struct SpriteMaskSettings {

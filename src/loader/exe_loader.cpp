@@ -5,6 +5,7 @@
 #include "base/hash.h"
 #include "base/log.h"
 #include "loader/antidecompiler.h"
+#include "loader/codepage_detection.h"
 #include "loader/crypto.h"
 #include "loader/upx_unpack.h"
 
@@ -1381,23 +1382,6 @@ Result<Gm82EventTables> parse_gm82_event_tables(BinaryReader& outer) {
     }
 
     return tables;
-}
-
-GameEncoding select_game_encoding(const GameData& game, u32 override_cp) noexcept {
-    if (game.meta.detected_version != VersionMode::GM80) {
-        return {EncodingMode::Utf8, 65001, "GM version"};
-    }
-    if (override_cp != 0) {
-        return {EncodingMode::LegacyAnsi, override_cp, "--codepage"};
-    }
-    for (const auto& f : game.fonts) {
-        if (!f.exists) continue;
-        const u32 cp = gdi_charset_to_codepage(f.charset);
-        if (cp != 1252u) {
-            return {EncodingMode::LegacyAnsi, cp, "font charset"};
-        }
-    }
-    return {};
 }
 
 template <typename T>

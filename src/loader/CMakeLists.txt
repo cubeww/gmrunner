@@ -1,5 +1,8 @@
 add_library(gm_loader STATIC
     game_data.h
+    codepage_detection.cpp
+    codepage_detection.h
+    codepage_words.inc
     path.cpp
     upx_unpack.h
     upx_unpack.cpp

@@ -12,7 +12,7 @@ struct CliOptions {
     std::string game_path;
     std::string save_dir;
     VersionMode version_override = VersionMode::Auto;
-    u32 codepage = 0; // 0 = auto-detect from version/fonts
+    u32 codepage = 0; // 0 = auto-detect from version, game text and fonts
     bool inspect_only = false;
     bool compile_check_only = false;
     bool show_help = false;

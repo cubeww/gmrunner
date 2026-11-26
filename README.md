@@ -40,7 +40,7 @@ On desktop, place the game EXE and its assets beside the runner (beside `gmrunne
 | `--compile-check` | Compile all GML/D&D scripts and exit |
 | `--save-dir <path>` | Override writable save overlay directory |
 | `--version <80\|81\|82>` | Override auto-detected GM version profile (`8.0`/`8.1`/`8.2` also accepted) |
-| `--codepage <id>` | Windows codepage for GM 8.0 strings (e.g. `936`, `932`; auto uses the first font charset mapping to a codepage other than 1252, then falls back to `1252`) |
+| `--codepage <id>` | Override automatic codepage detection for GM 8.0 strings (e.g. `932` for Japanese or `936` for Simplified Chinese) |
 | `--width <px>`, `--height <px>` | Initial window size (default `800` × `608`) |
 | `--fullscreen` | Start in fullscreen mode |
 | `--sharp-scale` | Nearest-neighbor at integer zoom; smooth pixel edges at fractional zoom |
@@ -51,6 +51,8 @@ On desktop, place the game EXE and its assets beside the runner (beside `gmrunne
 | `--trace-events` | Trace runtime event dispatch |
 | `--trace-dll` | Trace external DLL / extension module calls |
 | `--trace-vfs` | Trace virtual filesystem lookups |
+
+GM 8.0 detection samples text once at load time for Japanese, Simplified and Traditional Chinese, Korean, and Western encodings. Font charsets help resolve uncertain results. Close East Asian matches favor Japanese when the bytes support it. Games with no language clues default to Windows-1252. Run `gmrunner --inspect game.exe` to see the selected codepage and the reason.
 
 On WebAssembly, URL query parameters support `?game=path/to/game.zip`, `?sharp-scale`, and `?codepage=<id>` (e.g. `gmrunner.html?game=game.zip&sharp-scale&codepage=936`).
 
