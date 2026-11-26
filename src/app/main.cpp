@@ -673,7 +673,6 @@ int main(int argc, char** argv) {
     win_cfg.width = opts.window_width;
     win_cfg.height = opts.window_height;
     win_cfg.fullscreen = opts.fullscreen;
-    win_cfg.vsync = opts.vsync;
 #if defined(__ANDROID__)
     win_cfg.fullscreen = true;
 #endif
@@ -683,9 +682,10 @@ int main(int argc, char** argv) {
         win_cfg.show_icons = !loaded_game->options.no_buttons;
         win_cfg.show_cursor = loaded_game->options.show_cursor;
         win_cfg.resizable = true;
-        win_cfg.vsync = opts.vsync || (loaded_game->options.sync_vertex != 0);
+        win_cfg.vsync = loaded_game->options.vsync_enabled();
         compute_initial_window_size(*loaded_game, win_cfg.width, win_cfg.height);
     }
+    if (opts.vsync_override.has_value()) win_cfg.vsync = *opts.vsync_override;
 
     if (auto res = app.window.create(win_cfg); !res) {
         GM_LOG_FATAL("app", "%s", res.error_message().c_str());

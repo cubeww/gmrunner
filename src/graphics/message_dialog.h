@@ -22,6 +22,12 @@ struct MessageFontSpec {
     u8 charset = 1; // DEFAULT_CHARSET
 };
 
+struct MessageDialogViewport {
+    ViewportRect bounds; // Physical drawable pixels, top-left origin.
+    f32 scale;           // Physical pixels per game window unit.
+    bool mobile;
+};
+
 struct MessageDialogStyle {
     f32 alpha = 1.0f;
     MessageFontSpec text_font{"MS Sans Serif", 8, 0xFFFFFFu, false, false, 1};
@@ -94,8 +100,7 @@ public:
         i32 win_w, i32 win_h,
         i32 drawable_w, i32 drawable_h,
         i32 win_x, i32 win_y,
-        f32 display_scale,
-        bool mobile_touch,
+        const MessageDialogViewport& view,
         u64 now_us);
 
     // Renders the dialog directly onto the window backbuffer (default FBO),
@@ -104,8 +109,7 @@ public:
         i32 win_w, i32 win_h,
         i32 drawable_w, i32 drawable_h,
         i32 win_x, i32 win_y,
-        f32 display_scale,
-        bool mobile_touch,
+        const MessageDialogViewport& view,
         u64 now_us);
 
     [[nodiscard]] i32 result_button() const noexcept { return result_button_; }
@@ -121,8 +125,7 @@ public:
         i32 win_w, i32 win_h,
         i32 drawable_w, i32 drawable_h,
         i32 win_x, i32 win_y,
-        f32 display_scale,
-        bool mobile_touch,
+        const MessageDialogViewport& view,
         i32& out_x, i32& out_y, i32& out_w, i32& out_h, i32& out_caret_px);
 
 private:
@@ -207,6 +210,7 @@ private:
         f32 win_to_phys_x = 1.0f;
         f32 win_to_phys_y = 1.0f;
         // All rects below are in logical dialog-scaled coordinate space rooted at (0, 0) of the drawable.
+        RectF bounds{};
         RectF outer{};
         RectF title_bar{};
         RectF close_btn{};
@@ -224,8 +228,7 @@ private:
         i32 win_w, i32 win_h,
         i32 drawable_w, i32 drawable_h,
         i32 win_x, i32 win_y,
-        f32 display_scale,
-        bool mobile_touch);
+        const MessageDialogViewport& view);
 
     // Input editing helpers
     [[nodiscard]] bool has_selection() const noexcept { return caret_ != sel_anchor_; }

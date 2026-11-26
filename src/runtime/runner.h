@@ -445,7 +445,6 @@ public:
     i32 window_cursor_ = 0;
     u32 window_color_ = 0;
     bool auto_draw_ = true;
-    bool sync_vsync_ = false;
     bool error_occurred_ = false;
     std::string error_last_;
     bool action_relative_ = false;

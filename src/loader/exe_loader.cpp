@@ -1805,7 +1805,7 @@ void print_game_inspect(const GameData& game, bool verbose) {
                 hex_encode(m.guid).c_str());
     std::printf("Settings:     v%d, fullscreen=%d, interp=%d, scale=%d, vsync=%d, uninit_as_0=%d, create_order=%d\n",
                 o.version, o.fullscreen ? 1 : 0, o.interpolate_pixels ? 1 : 0, o.scale,
-                o.sync_vertex, o.treat_uninitialized_as_zero ? 1 : 0, o.creation_event_order ? 1 : 0);
+                o.vsync_enabled() ? 1 : 0, o.treat_uninitialized_as_zero ? 1 : 0, o.creation_event_order ? 1 : 0);
 
     std::printf("\n--- Assets ---\n");
     std::printf("  Extensions:     %zu\n", game.extensions.size());

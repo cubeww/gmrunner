@@ -86,7 +86,6 @@ Result<void> Runner::init(GameData game, CompiledProgram program, std::vector<st
     window_.set_cursor(window_cursor_);
     window_.set_show_icons(!game_.options.no_buttons);
     window_region_scale_ = game_.options.scale / 100.0;
-    sync_vsync_ = (game_.options.sync_vertex != 0);
 
     // Initialize renderer and upload all embedded sprites/backgrounds/fonts.
     if (auto res = renderer_.init(gfx_); !res) {
@@ -3448,9 +3447,9 @@ void Runner::run_message_dialog_modal(bool with_input) {
         const i32 dw = std::max(1, window_.drawable_width());
         const i32 dh = std::max(1, window_.drawable_height());
 
+        i32 vx, vy, vw, vh, cw, ch;
+        compute_canvas_viewport(vx, vy, vw, vh, cw, ch);
         if (wev.resized) {
-            i32 vx = 0, vy = 0, vw = 1, vh = 1, cw = 1, ch = 1;
-            compute_canvas_viewport(vx, vy, vw, vh, cw, ch);
             const i32 bw = requested_backbuffer_w_ > 0 ? requested_backbuffer_w_ : cw;
             const i32 bh = requested_backbuffer_h_ > 0 ? requested_backbuffer_h_ : ch;
             renderer_.set_screen_region(dw, dh, bw, bh, ViewportRect{vx, vy, vw, vh});
@@ -3458,20 +3457,27 @@ void Runner::run_message_dialog_modal(bool with_input) {
 
         const i32 wx = window_.x();
         const i32 wy = window_.y();
-        const f32 dscale = window_.display_scale();
+        MessageDialogViewport dialog_view{{0, 0, dw, dh}, std::max(1.0f, static_cast<f32>(dw) / ww), mobile_touch};
+        if (mobile_touch) {
+            dialog_view.bounds = {vx, vy, vw, vh};
+            const i32 region_w = window_region_w_ > 0 ? window_region_w_ : cw;
+            const i32 region_h = window_region_h_ > 0 ? window_region_h_ : ch;
+            dialog_view.scale = std::min(static_cast<f32>(vw) / std::max(1, region_w),
+                                         static_cast<f32>(vh) / std::max(1, region_h));
+        }
 
 #if defined(__EMSCRIPTEN__)
         if (web_editor) message_dialog_.poll_web_editor(minput);
 #endif
         const bool keep_open = message_dialog_.update(
-            minput, ww, wh, dw, dh, wx, wy, dscale, mobile_touch, frame_start);
+            minput, ww, wh, dw, dh, wx, wy, dialog_view, frame_start);
 
         if (with_input && message_dialog_.consume_text_input_focus_request()) {
             window_.set_text_input(true);
         }
         if (with_input && keep_open) {
             i32 ix = 0, iy = 0, iw = 0, ih = 0, icaret = 0;
-            if (message_dialog_.get_input_window_rect(ww, wh, dw, dh, wx, wy, dscale, mobile_touch,
+            if (message_dialog_.get_input_window_rect(ww, wh, dw, dh, wx, wy, dialog_view,
                                                       ix, iy, iw, ih, icaret)) {
 #if defined(__EMSCRIPTEN__)
                 if (web_editor) web_position_dialog_editor(ix, iy, iw, ih, ww, wh);
@@ -3497,7 +3503,7 @@ void Runner::run_message_dialog_modal(bool with_input) {
                 gfx_.restore_render_state(saved);
             }
             if (keep_open) {
-                message_dialog_.render(ww, wh, dw, dh, wx, wy, dscale, mobile_touch, frame_start);
+                message_dialog_.render(ww, wh, dw, dh, wx, wy, dialog_view, frame_start);
             }
             window_.swap_buffers();
             renderer_.end_frame();

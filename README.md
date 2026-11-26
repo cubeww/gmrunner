@@ -42,7 +42,7 @@ gmrunner [options] [game.exe | game_dir | game.zip]
 | `--width <px>`, `--height <px>` | Initial window size (default `800` × `608`) |
 | `--fullscreen` | Start in fullscreen mode |
 | `--sharp-scale` | Nearest-neighbor at integer zoom; smooth pixel edges at fractional zoom |
-| `--vsync` / `--no-vsync` | Enable or disable vertical sync (default: enabled) |
+| `--vsync` / `--no-vsync` | Override initial vertical sync on native platforms. Defaults to the game's setting. |
 | `--touch-overlay` | Enable on-screen virtual touch controller |
 | `--touch-layout <path>` | Load/save custom virtual touch layout file |
 | `-v`, `--verbose` | Enable debug-level logging |

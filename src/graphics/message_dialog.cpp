@@ -1138,8 +1138,7 @@ MessageDialog::Layout MessageDialog::compute_layout(
     i32 win_w, i32 win_h,
     i32 drawable_w, i32 drawable_h,
     i32 win_x, i32 win_y,
-    f32 display_scale,
-    bool mobile_touch) {
+    const MessageDialogViewport& view) {
     Layout L{};
     const i32 dw = std::max(1, drawable_w);
     const i32 dh = std::max(1, drawable_h);
@@ -1148,11 +1147,7 @@ MessageDialog::Layout MessageDialog::compute_layout(
     L.win_to_phys_x = static_cast<f32>(dw) / static_cast<f32>(ww);
     L.win_to_phys_y = static_cast<f32>(dh) / static_cast<f32>(wh);
 
-    f32 base_scale = std::max(1.0f, L.win_to_phys_x);
-    if (mobile_touch) {
-        const f32 touch_min = static_cast<f32>(std::min(dw, dh)) / 460.0f;
-        base_scale = std::max({base_scale, display_scale, touch_min});
-    }
+    const f32 base_scale = view.scale;
 
     // Natural logical client width & button size.
     const f32 bg_w = static_cast<f32>(std::max(1, bg_bitmap_.width));
@@ -1282,13 +1277,15 @@ MessageDialog::Layout MessageDialog::compute_layout(
     const f32 outer_h = client_h + title_h + border * 2.0f;
 
     // Clamp scale so the entire dialog fits comfortably inside the drawable area.
-    const f32 max_fit_w = (static_cast<f32>(dw) * 0.94f) / std::max(1.0f, outer_w);
-    const f32 max_fit_h = (static_cast<f32>(dh) * 0.94f) / std::max(1.0f, outer_h);
+    const f32 max_fit_w = (view.bounds.width * 0.94f) / std::max(1.0f, outer_w);
+    const f32 max_fit_h = (view.bounds.height * 0.94f) / std::max(1.0f, outer_h);
     L.scale = std::max(0.25f, std::min({base_scale, max_fit_w, max_fit_h}));
     L.raster_scale = std::clamp(std::round(L.scale * 4.0f) * 0.25f, 1.0f, 4.0f);
 
-    const f32 logical_view_w = static_cast<f32>(dw) / L.scale;
-    const f32 logical_view_h = static_cast<f32>(dh) / L.scale;
+    L.bounds = {view.bounds.x / L.scale, view.bounds.y / L.scale,
+                view.bounds.width / L.scale, view.bounds.height / L.scale};
+    const f32 logical_view_w = L.bounds.w;
+    const f32 logical_view_h = L.bounds.h;
 
     // Resolve dialog top-left position in logical view coordinates.
     f32 ox = 0.0f;
@@ -1297,7 +1294,9 @@ MessageDialog::Layout MessageDialog::compute_layout(
         ox = dragged_x_;
         oy = dragged_y_;
     } else {
-        if (style_.pos_x >= 0) {
+        if (view.mobile && style_.pos_x != -1) {
+            ox = (static_cast<f32>(style_.pos_x) - win_x) * view.scale / L.scale;
+        } else if (style_.pos_x >= 0) {
             f32 px = static_cast<f32>(style_.pos_x);
             if (win_x > 0 && px >= static_cast<f32>(win_x) && px <= static_cast<f32>(win_x + ww)) {
                 px -= static_cast<f32>(win_x);
@@ -1307,22 +1306,26 @@ MessageDialog::Layout MessageDialog::compute_layout(
             ox = std::floor((logical_view_w - outer_w) * 0.5f);
         }
 
-        if (style_.pos_y >= 0) {
+        if (view.mobile && style_.pos_y != -1) {
+            oy = (static_cast<f32>(style_.pos_y) - win_y) * view.scale / L.scale;
+        } else if (style_.pos_y >= 0) {
             f32 py = static_cast<f32>(style_.pos_y);
             if (win_y > 0 && py >= static_cast<f32>(win_y) && py <= static_cast<f32>(win_y + wh)) {
                 py -= static_cast<f32>(win_y);
             }
             oy = (py * L.win_to_phys_y) / L.scale;
-        } else if (with_input_ && mobile_touch) {
+        } else if (with_input_ && view.mobile) {
             // Keep input dialog in the upper portion so mobile virtual keyboards do not cover it.
             oy = std::floor(std::max(8.0f, (logical_view_h * 0.52f - outer_h) * 0.5f));
         } else {
             oy = std::floor((logical_view_h - outer_h) * 0.5f);
         }
+        ox += L.bounds.x;
+        oy += L.bounds.y;
     }
 
-    ox = std::clamp(ox, 0.0f, std::max(0.0f, logical_view_w - outer_w));
-    oy = std::clamp(oy, 0.0f, std::max(0.0f, logical_view_h - outer_h));
+    ox = std::clamp(ox, L.bounds.x, L.bounds.x + std::max(0.0f, logical_view_w - outer_w));
+    oy = std::clamp(oy, L.bounds.y, L.bounds.y + std::max(0.0f, logical_view_h - outer_h));
 
     L.outer = RectF{ox, oy, outer_w, outer_h};
     if (style_.show_caption) {
@@ -1424,11 +1427,10 @@ bool MessageDialog::get_input_window_rect(
     i32 win_w, i32 win_h,
     i32 drawable_w, i32 drawable_h,
     i32 win_x, i32 win_y,
-    f32 display_scale,
-    bool mobile_touch,
+    const MessageDialogViewport& view,
     i32& out_x, i32& out_y, i32& out_w, i32& out_h, i32& out_caret_px) {
     if (!with_input_) return false;
-    const Layout L = compute_layout(win_w, win_h, drawable_w, drawable_h, win_x, win_y, display_scale, mobile_touch);
+    const Layout L = compute_layout(win_w, win_h, drawable_w, drawable_h, win_x, win_y, view);
     const f32 to_win_x = L.scale / std::max(0.001f, L.win_to_phys_x);
     const f32 to_win_y = L.scale / std::max(0.001f, L.win_to_phys_y);
     out_x = static_cast<i32>(std::floor(L.input_rect.x * to_win_x));
@@ -1451,11 +1453,10 @@ bool MessageDialog::update(
     i32 win_w, i32 win_h,
     i32 drawable_w, i32 drawable_h,
     i32 win_x, i32 win_y,
-    f32 display_scale,
-    bool mobile_touch,
+    const MessageDialogViewport& view,
     u64 now_us) {
     if (!active_) return false;
-    const Layout L = compute_layout(win_w, win_h, drawable_w, drawable_h, win_x, win_y, display_scale, mobile_touch);
+    const Layout L = compute_layout(win_w, win_h, drawable_w, drawable_h, win_x, win_y, view);
     if (caret_reset_us_ == 0) {
         caret_reset_us_ = now_us;
         if (with_input_) ensure_caret_visible(L, L.raster_scale);
@@ -1703,10 +1704,8 @@ bool MessageDialog::update(
 
     if (input.left_down) {
         if (dragging_) {
-            const f32 logical_view_w = static_cast<f32>(std::max(1, drawable_w)) / L.scale;
-            const f32 logical_view_h = static_cast<f32>(std::max(1, drawable_h)) / L.scale;
-            dragged_x_ = std::clamp(mx - drag_offset_x_, 0.0f, std::max(0.0f, logical_view_w - L.outer.w));
-            dragged_y_ = std::clamp(my - drag_offset_y_, 0.0f, std::max(0.0f, logical_view_h - L.outer.h));
+            dragged_x_ = std::clamp(mx - drag_offset_x_, L.bounds.x, L.bounds.x + std::max(0.0f, L.bounds.w - L.outer.w));
+            dragged_y_ = std::clamp(my - drag_offset_y_, L.bounds.y, L.bounds.y + std::max(0.0f, L.bounds.h - L.outer.h));
         } else if (input_selecting_ && with_input_) {
             caret_ = hit_test_input_caret(L, mx);
             caret_reset_us_ = now_us;
@@ -1757,14 +1756,13 @@ void MessageDialog::render(
     i32 win_w, i32 win_h,
     i32 drawable_w, i32 drawable_h,
     i32 win_x, i32 win_y,
-    f32 display_scale,
-    bool mobile_touch,
+    const MessageDialogViewport& view,
     u64 now_us) {
     if (!initialized_ || !active_ || !device_ || drawable_w <= 0 || drawable_h <= 0) {
         return;
     }
 
-    const Layout L = compute_layout(win_w, win_h, drawable_w, drawable_h, win_x, win_y, display_scale, mobile_touch);
+    const Layout L = compute_layout(win_w, win_h, drawable_w, drawable_h, win_x, win_y, view);
     const f32 S = L.scale;
     const f32 dlg_alpha = style_.alpha;
     if (dlg_alpha <= 0.0f) return;

@@ -1152,8 +1152,7 @@ void Runner::register_builtins_graphics() {
         return RValue(0.0);
     });
     register_builtin("set_synchronization", [](Runner& r, i32, i32, std::span<const RValue> a) {
-        r.sync_vsync_ = arg_bool(a, 0, false);
-        r.window().set_vsync(r.sync_vsync_);
+        r.window().set_vsync(arg_bool(a, 0, false));
         return RValue(0.0);
     });
     register_builtin("set_application_title", [](Runner& r, i32, i32, std::span<const RValue> a) {

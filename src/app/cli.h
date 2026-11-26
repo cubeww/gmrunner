@@ -3,6 +3,7 @@
 #include "base/log.h"
 #include "base/types.h"
 
+#include <optional>
 #include <string>
 
 namespace gm {
@@ -18,7 +19,7 @@ struct CliOptions {
     bool verbose = false;
     bool fullscreen = false;
     bool sharp_scale = false;
-    bool vsync = true;
+    std::optional<bool> vsync_override;
     bool touch_overlay = false;
     std::string touch_layout_path;
     i32 window_width = 800;

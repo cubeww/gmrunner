@@ -68,6 +68,8 @@ struct GameOptions {
     bool error_on_arg_count = false;
     i32 webgl_mode = 0;
     bool creation_event_order = false;
+
+    [[nodiscard]] bool vsync_enabled() const noexcept { return (sync_vertex & 1) != 0; }
 };
 
 struct ExtensionFunction {
