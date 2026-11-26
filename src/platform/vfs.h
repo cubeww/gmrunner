@@ -65,7 +65,7 @@ public:
 
     [[nodiscard]] std::string working_directory_gm() const;
     [[nodiscard]] std::string program_directory_gm() const;
-    [[nodiscard]] std::string absolute_path_gm(std::string_view gm_path) const;
+    [[nodiscard]] std::filesystem::path capture_file_path(std::string_view gm_path) const;
     void set_working_directory(std::string_view gm_path);
     [[nodiscard]] std::string temp_directory_gm() const;
 
@@ -75,7 +75,7 @@ public:
     void unregister_virtual_pipe(std::string_view pipe_path);
 
     // GameMaker 8.0 paths use the game's Windows codepage. Host paths start in UTF-8.
-    void set_game_path_codepage(u32 codepage) noexcept { game_path_codepage_ = codepage; }
+    void set_game_path_codepage(u32 codepage) noexcept { game_path_codepage_ = codepage; directory_aliases_.clear(); }
     [[nodiscard]] static std::string normalize_separators(std::string_view path);
     [[nodiscard]] std::filesystem::path resolve_for_read(std::string_view gm_path) const;
     [[nodiscard]] std::filesystem::path resolve_for_write(std::string_view gm_path) const;
@@ -88,6 +88,7 @@ public:
     [[nodiscard]] std::optional<i64> last_write_time_unix(std::string_view gm_path) const;
     [[nodiscard]] Result<std::vector<u8>> read_all_bytes(std::string_view gm_path);
     [[nodiscard]] Result<void> write_all_bytes(std::string_view gm_path, std::span<const u8> data);
+    [[nodiscard]] Result<void> write_file_at(const std::filesystem::path& path, std::span<const u8> data);
     [[nodiscard]] Result<void> delete_file(std::string_view gm_path);
     [[nodiscard]] Result<void> create_directory(std::string_view gm_path);
 
@@ -126,6 +127,9 @@ private:
         const std::filesystem::path& base,
         std::string_view relative_norm) const;
     [[nodiscard]] FilePaths resolve_paths(std::string_view gm_path) const;
+    [[nodiscard]] FilePaths resolve_native_paths(const std::filesystem::path& path) const;
+    [[nodiscard]] std::string directory_name_gm(const std::filesystem::path& dir) const;
+    [[nodiscard]] Result<void> write_resolved_bytes(const FilePaths& paths, std::span<const u8> data);
     void invalidate_dir_cache_for(const std::filesystem::path& dir) const;
     [[nodiscard]] bool is_tombstoned(std::string_view rel_in_root) const;
 
@@ -140,6 +144,8 @@ private:
     std::filesystem::path temp_dir_;
     std::filesystem::path registry_dir_;
     bool owns_temp_dir_ = false;
+    // Only directories whose names cannot round-trip through the game's codepage.
+    mutable std::unordered_map<std::string, std::filesystem::path> directory_aliases_;
     u32 game_path_codepage_ = 65001;
 
     std::unique_ptr<IVfsReadSource> virtual_root_;

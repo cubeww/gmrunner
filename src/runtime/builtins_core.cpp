@@ -147,7 +147,7 @@ Result<RValue> Runner::close_legacy_text_file() {
     LegacyTextFile file = std::move(*legacy_text_file_);
     legacy_text_file_.reset();
     if (file.writable) {
-        auto written = vfs_.write_all_bytes(file.path, {
+        auto written = vfs_.write_file_at(file.path, {
             reinterpret_cast<const u8*>(file.contents.data()), file.contents.size()});
         if (!written) return written.error();
     }
@@ -158,7 +158,7 @@ Result<RValue> Runner::open_legacy_text_file(std::string_view path, i32 mode) {
     auto closed = close_legacy_text_file();
     if (!closed) return closed.error();
     LegacyTextFile file;
-    file.path = vfs_.absolute_path_gm(path);
+    file.path = vfs_.capture_file_path(path);
     file.writable = mode != 0;
     if (mode == 0 || (mode == 2 && vfs_.exists(path))) {
         auto contents = vfs_.read_all_bytes(path);

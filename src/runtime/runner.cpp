@@ -304,7 +304,7 @@ void Runner::shutdown() noexcept {
     }
     for (auto& [id, tf] : text_files_) {
         if (tf.open && tf.mode != 0) {
-            (void)vfs_.write_all_bytes(tf.gm_path,
+            (void)vfs_.write_file_at(tf.path,
                                        std::span<const u8>(reinterpret_cast<const u8*>(tf.write_buf.data()),
                                                            tf.write_buf.size()));
         }
@@ -312,7 +312,7 @@ void Runner::shutdown() noexcept {
     text_files_.clear();
     for (auto& [id, bf] : bin_files_) {
         if (bf.open && bf.dirty) {
-            (void)vfs_.write_all_bytes(bf.gm_path, bf.data);
+            (void)vfs_.write_file_at(bf.path, bf.data);
         }
     }
     bin_files_.clear();
@@ -3022,7 +3022,7 @@ i32 Runner::text_file_open(std::string_view gm_path, i32 mode) {
     TextFileHandle tf{};
     tf.open = true;
     tf.mode = mode;
-    tf.gm_path = vfs_.absolute_path_gm(gm_path);
+    tf.path = vfs_.capture_file_path(gm_path);
 
     if (mode == 0) { // read
         auto bytes = vfs_.read_all_bytes(gm_path);
@@ -3063,8 +3063,8 @@ void Runner::text_file_close(i32 handle) {
     auto it = text_files_.find(handle);
     if (it == text_files_.end()) return;
     if (it->second.open && it->second.mode != 0) {
-        (void)vfs_.write_all_bytes(
-            it->second.gm_path,
+        (void)vfs_.write_file_at(
+            it->second.path,
             std::span<const u8>(reinterpret_cast<const u8*>(it->second.write_buf.data()),
                                 it->second.write_buf.size()));
     }
@@ -3075,7 +3075,7 @@ i32 Runner::bin_file_open(std::string_view gm_path, i32 mode) {
     BinFileHandle bf{};
     bf.open = true;
     bf.mode = mode;
-    bf.gm_path = vfs_.absolute_path_gm(gm_path);
+    bf.path = vfs_.capture_file_path(gm_path);
 
     if (auto bytes = vfs_.read_all_bytes(gm_path); bytes) {
         bf.data = std::move(bytes.value());
@@ -3099,7 +3099,7 @@ void Runner::bin_file_close(i32 handle) {
     auto it = bin_files_.find(handle);
     if (it == bin_files_.end()) return;
     if (it->second.open && it->second.dirty) {
-        (void)vfs_.write_all_bytes(it->second.gm_path, it->second.data);
+        (void)vfs_.write_file_at(it->second.path, it->second.data);
     }
     bin_files_.erase(it);
 }
@@ -3154,7 +3154,8 @@ void Runner::ini_open(std::string_view gm_path) {
     ini_ = IniState{};
     ini_.open = true;
     // GM8.1/8.2 pass the supplied name to TMemIniFile and resolve it again at close.
-    ini_.gm_path = version_mode() == VersionMode::GM80 ? vfs_.absolute_path_gm(gm_path) : std::string(gm_path);
+    ini_.path = version_mode() == VersionMode::GM80 ? vfs_.capture_file_path(gm_path)
+                                                      : Vfs::path_from_utf8(Vfs::normalize_separators(gm_path));
     if (auto bytes = vfs_.read_all_bytes(gm_path); bytes) {
         parse_ini_text(std::string_view(reinterpret_cast<const char*>(bytes.value().data()), bytes.value().size()));
     }
@@ -3170,9 +3171,9 @@ void Runner::ini_open_from_string(std::string_view content) {
 std::string Runner::ini_close() {
     if (!ini_.open) return {};
     std::string out = serialize_ini();
-    if (ini_.dirty && !ini_.gm_path.empty()) {
-        (void)vfs_.write_all_bytes(
-            ini_.gm_path,
+    if (ini_.dirty && !ini_.path.empty()) {
+        (void)vfs_.write_file_at(
+            ini_.path,
             std::span<const u8>(reinterpret_cast<const u8*>(out.data()), out.size()));
     }
     ini_ = IniState{};

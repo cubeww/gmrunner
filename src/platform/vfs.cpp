@@ -253,17 +253,38 @@ void Vfs::cleanup_temp_dir() noexcept {
     }
 }
 
+std::string Vfs::directory_name_gm(const std::filesystem::path& dir) const {
+    const std::string native = path_to_utf8(dir);
+    if (game_path_codepage_ == 65001 || std::all_of(native.begin(), native.end(), [](unsigned char c) { return c < 128; })) {
+        return native;
+    }
+    std::string name = utf8_to_codepage(native, game_path_codepage_);
+    const std::string decoded = codepage_to_utf8(name, game_path_codepage_);
+    if (native == decoded) return name;
+
+    // A legacy script may append a filename to working_directory. Remember
+    // the native prefix even when its visible spelling contains replacements.
+    const auto key = ascii_to_lower(normalize_separators(decoded));
+    auto [it, inserted] = directory_aliases_.try_emplace(key, dir);
+    if (inserted || it->second == dir) return name;
+    for (unsigned i = 2; ; ++i) {
+        const auto suffix = "~" + std::to_string(i);
+        auto [alias, added] = directory_aliases_.try_emplace(key + suffix, dir);
+        if (added || alias->second == dir) return name + suffix;
+    }
+}
+
 std::string Vfs::working_directory_gm() const {
-    return utf8_to_codepage(path_to_utf8(working_directory_), game_path_codepage_);
+    return directory_name_gm(working_directory_);
 }
 
 std::string Vfs::program_directory_gm() const {
-    return utf8_to_codepage(path_to_utf8(game_root_), game_path_codepage_);
+    return directory_name_gm(game_root_);
 }
 
-std::string Vfs::absolute_path_gm(std::string_view gm_path) const {
-    if (gm_path.empty() || is_virtual_pipe(gm_path)) return std::string(gm_path);
-    return utf8_to_codepage(path_to_utf8(resolve_paths(gm_path).game), game_path_codepage_);
+std::filesystem::path Vfs::capture_file_path(std::string_view gm_path) const {
+    if (gm_path.empty()) return {};
+    return resolve_paths(gm_path).game;
 }
 
 void Vfs::set_working_directory(std::string_view gm_path) {
@@ -275,11 +296,7 @@ void Vfs::set_working_directory(std::string_view gm_path) {
 }
 
 std::string Vfs::temp_directory_gm() const {
-    std::string s = path_to_utf8(temp_dir_);
-    while (s.size() > 1 && (s.back() == '/' || s.back() == '\\')) {
-        s.pop_back();
-    }
-    return utf8_to_codepage(s, game_path_codepage_);
+    return directory_name_gm(temp_dir_);
 }
 
 std::filesystem::path Vfs::resolve_case_insensitive(
@@ -354,7 +371,24 @@ const std::filesystem::path& Vfs::FilePaths::for_read() const {
 
 Vfs::FilePaths Vfs::resolve_paths(std::string_view gm_path) const {
     const std::string norm = normalize_separators(codepage_to_utf8(gm_path, game_path_codepage_));
-    auto path = (working_directory_ / path_from_utf8(norm)).lexically_normal();
+    auto input = path_from_utf8(norm);
+    if (!directory_aliases_.empty() && input.has_root_directory()) {
+        // Walk upwards to match complete components and prefer the longest prefix.
+        std::filesystem::path suffix;
+        for (auto prefix = input; prefix != prefix.root_path(); prefix = prefix.parent_path()) {
+            const auto key = ascii_to_lower(normalize_separators(path_to_utf8(prefix)));
+            if (auto it = directory_aliases_.find(key); it != directory_aliases_.end()) {
+                input = suffix.empty() ? it->second : it->second / suffix;
+                break;
+            }
+            if (prefix.has_filename()) suffix = suffix.empty() ? prefix.filename() : prefix.filename() / suffix;
+        }
+    }
+    return resolve_native_paths(input);
+}
+
+Vfs::FilePaths Vfs::resolve_native_paths(const std::filesystem::path& input) const {
+    auto path = (working_directory_ / input).lexically_normal();
     if (!path.has_filename() && path.has_relative_path()) path = path.parent_path();
     auto part = path.begin();
     auto root = game_root_.begin();
@@ -521,7 +555,14 @@ Result<std::vector<u8>> Vfs::read_all_bytes(std::string_view gm_path) {
 }
 
 Result<void> Vfs::write_all_bytes(std::string_view gm_path, std::span<const u8> data) {
-    const auto paths = resolve_paths(gm_path);
+    return write_resolved_bytes(resolve_paths(gm_path), data);
+}
+
+Result<void> Vfs::write_file_at(const std::filesystem::path& path, std::span<const u8> data) {
+    return write_resolved_bytes(resolve_native_paths(path), data);
+}
+
+Result<void> Vfs::write_resolved_bytes(const FilePaths& paths, std::span<const u8> data) {
     const auto& path = paths.overlay.empty() ? paths.game : paths.overlay;
     std::error_code ec;
     if (path.has_parent_path()) {

@@ -35,7 +35,7 @@ namespace gm {
 struct TextFileHandle {
     bool open = false;
     i32 mode = 0; // 0=read, 1=write, 2=append
-    std::string gm_path;
+    std::filesystem::path path;
     std::vector<std::string> lines;
     usize line_idx = 0;
     usize col_idx = 0;
@@ -45,14 +45,14 @@ struct TextFileHandle {
 struct BinFileHandle {
     bool open = false;
     i32 mode = 0; // 0=read, 1=write, 2=rw
-    std::string gm_path;
+    std::filesystem::path path;
     std::vector<u8> data;
     usize pos = 0;
     bool dirty = false;
 };
 
 struct LegacyTextFile {
-    std::string path;
+    std::filesystem::path path;
     std::string contents;
     usize pos = 0;
     bool writable = false;
@@ -66,7 +66,7 @@ struct LegacyTextFile {
 
 struct IniState {
     bool open = false;
-    std::string gm_path;
+    std::filesystem::path path;
     bool dirty = false;
     // section_lower -> {orig_section, vector<{key_lower, orig_key, value}>}
     struct Entry {
