@@ -51,6 +51,14 @@ Result<RValue> append_text_real(std::string& out, f64 value, bool separate_sign)
     return RValue(0.0);
 }
 
+std::string game_string_slice(std::string_view text, usize start, usize count, EncodingMode mode) {
+    if (mode == EncodingMode::LegacyAnsi) {
+        return std::string(text.substr(std::min(start, text.size()), count));
+    }
+    const auto wide = utf8_to_utf16(text);
+    return utf16_to_utf8(std::u16string_view(wide).substr(std::min(start, wide.size()), count));
+}
+
 usize gm81_character_width(u8 lead) noexcept {
     // Delphi accepts five- and six-byte leads and ignores the following bytes.
     if (lead < 0xC2 || lead > 0xFD) return 1;
@@ -373,7 +381,7 @@ void Runner::register_builtins_core() {
         return RValue(std::string(buf));
     });
     register_builtin("chr", [](Runner& r, i32, i32, std::span<const RValue> a) -> Result<RValue> {
-        if (r.game().meta.encoding == EncodingMode::LegacyAnsi) {
+        if (r.game().meta.encoding.mode == EncodingMode::LegacyAnsi) {
             return RValue(std::string(1, static_cast<char>(arg_i32(a, 0) & 0xFF)));
         }
         const f64 rounded = delphi_round_f64(arg_real(a, 0));
@@ -390,7 +398,7 @@ void Runner::register_builtins_core() {
     register_builtin("ord", [](Runner& r, i32, i32, std::span<const RValue> a) {
         const std::string_view s = arg_str(a, 0);
         if (s.empty()) return RValue(0);
-        if (r.game().meta.encoding == EncodingMode::Utf8 && (static_cast<u8>(s[0]) & 0x80u) != 0u) {
+        if (r.game().meta.encoding.mode == EncodingMode::Utf8 && (static_cast<u8>(s[0]) & 0x80u) != 0u) {
             usize off = 0;
             return RValue(static_cast<i32>(utf8_decode_next(s, off)));
         }
@@ -398,7 +406,7 @@ void Runner::register_builtins_core() {
     });
     register_builtin("string_length", [](Runner& r, i32, i32, std::span<const RValue> a) {
         const std::string_view s = arg_str(a, 0);
-        if (r.game().meta.encoding == EncodingMode::LegacyAnsi) return RValue(static_cast<f64>(s.size()));
+        if (r.game().meta.encoding.mode == EncodingMode::LegacyAnsi) return RValue(static_cast<f64>(s.size()));
         usize count = 0;
         for (usize offset = 0; offset < s.size(); offset += gm81_character_width(static_cast<u8>(s[offset]))) {
             ++count;
@@ -414,35 +422,43 @@ void Runner::register_builtins_core() {
         if (idx < 0 || static_cast<usize>(idx) >= s.size()) return RValue(0);
         return RValue(static_cast<i32>(static_cast<u8>(s[static_cast<usize>(idx)])));
     });
-    register_builtin("string_pos", [](Runner&, i32, i32, std::span<const RValue> a) {
+    register_builtin("string_pos", [](Runner& r, i32, i32, std::span<const RValue> a) {
         const std::string_view sub = arg_str(a, 0);
         const std::string_view str = arg_str(a, 1);
         if (sub.empty()) return RValue(0);
-        const usize p = str.find(sub);
+        // Delphi Pos indexes a UnicodeString in GM8.1+.
+        const usize p = r.game().meta.encoding.mode == EncodingMode::Utf8
+            ? utf8_to_utf16(str).find(utf8_to_utf16(sub))
+            : str.find(sub);
         return RValue(p == std::string_view::npos ? 0 : static_cast<i32>(p + 1));
     });
-    register_builtin("string_copy", [](Runner&, i32, i32, std::span<const RValue> a) {
+    register_builtin("string_copy", [](Runner& r, i32, i32, std::span<const RValue> a) {
         const std::string_view s = arg_str(a, 0);
         const i32 idx = std::max(1, arg_i32(a, 1)) - 1;
         const i32 cnt = std::max(0, arg_i32(a, 2));
-        if (static_cast<usize>(idx) >= s.size() || cnt == 0) return RValue(std::string{});
-        return RValue(std::string(s.substr(static_cast<usize>(idx), static_cast<usize>(cnt))));
+        return RValue(game_string_slice(s, idx, cnt, r.game().meta.encoding.mode));
     });
-    register_builtin("string_char_at", [](Runner&, i32, i32, std::span<const RValue> a) {
+    register_builtin("string_char_at", [](Runner& r, i32, i32, std::span<const RValue> a) {
         const std::string_view s = arg_str(a, 0);
-        if (s.empty()) return RValue(std::string{});
-        const i32 idx = std::max(1, arg_i32(a, 1)) - 1;
-        if (static_cast<usize>(idx) >= s.size()) return RValue(std::string{});
-        return RValue(std::string(1, s[static_cast<usize>(idx)]));
+        const i32 index = arg_i32(a, 1);
+        const auto mode = r.game().meta.encoding.mode;
+        if (mode == EncodingMode::Utf8 && index < 1) return RValue(std::string{});
+        return RValue(game_string_slice(s, std::max(1, index) - 1, 1, mode));
     });
-    register_builtin("string_delete", [](Runner&, i32, i32, std::span<const RValue> a) {
-        std::string s(arg_str(a, 0));
-        const i32 idx = std::max(1, arg_i32(a, 1)) - 1;
-        const i32 cnt = std::max(0, arg_i32(a, 2));
-        if (static_cast<usize>(idx) < s.size() && cnt > 0) {
-            s.erase(static_cast<usize>(idx), static_cast<usize>(cnt));
+    register_builtin("string_delete", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        const auto text = arg_str(a, 0);
+        const i32 index = arg_i32(a, 1);
+        const usize start = std::max(1, index) - 1;
+        const usize count = std::max(0, arg_i32(a, 2));
+        if (r.game().meta.encoding.mode == EncodingMode::Utf8) {
+            if (index < 1) return RValue(std::string(text));
+            auto wide = utf8_to_utf16(text);
+            wide.erase(std::min(start, wide.size()), count);
+            return RValue(utf16_to_utf8(wide));
         }
-        return RValue(std::move(s));
+        std::string bytes(text);
+        bytes.erase(std::min(start, bytes.size()), count);
+        return RValue(std::move(bytes));
     });
     register_builtin("string_insert", [](Runner&, i32, i32, std::span<const RValue> a) {
         const std::string_view sub = arg_str(a, 0);
@@ -528,11 +544,11 @@ void Runner::register_builtins_core() {
     register_builtin("clipboard_has_text", [](Runner&, i32, i32, std::span<const RValue>) {
         return RValue(!PlatformWindow::clipboard_get_text().empty());
     });
-    register_builtin("clipboard_get_text", [](Runner&, i32, i32, std::span<const RValue>) {
-        return RValue(PlatformWindow::clipboard_get_text());
+    register_builtin("clipboard_get_text", [](Runner& r, i32, i32, std::span<const RValue>) {
+        return RValue(r.game().meta.encoding.from_utf8(PlatformWindow::clipboard_get_text()));
     });
-    register_builtin("clipboard_set_text", [](Runner&, i32, i32, std::span<const RValue> a) {
-        PlatformWindow::clipboard_set_text(arg_str(a, 0));
+    register_builtin("clipboard_set_text", [](Runner& r, i32, i32, std::span<const RValue> a) {
+        PlatformWindow::clipboard_set_text(r.game().meta.encoding.to_utf8(arg_str(a, 0)));
         return RValue(0.0);
     });
 
@@ -1535,21 +1551,21 @@ void Runner::register_builtins_core() {
         return RValue(0.0);
     });
     register_builtin("message_text_font", [](Runner& r, i32, i32, std::span<const RValue> a) {
-        const std::string name = codepage_to_utf8(arg_str(a, 0), r.game().meta.string_codepage());
+        const std::string name = r.game().meta.encoding.to_utf8(arg_str(a, 0));
         r.message_dialog().set_text_font(
             name, arg_real(a, 1, -1.0), arg_real(a, 2, -1.0),
             static_cast<i32>(delphi_round(arg_real(a, 3, -1.0))));
         return RValue(0.0);
     });
     register_builtin("message_button_font", [](Runner& r, i32, i32, std::span<const RValue> a) {
-        const std::string name = codepage_to_utf8(arg_str(a, 0), r.game().meta.string_codepage());
+        const std::string name = r.game().meta.encoding.to_utf8(arg_str(a, 0));
         r.message_dialog().set_button_font(
             name, arg_real(a, 1, -1.0), arg_real(a, 2, -1.0),
             static_cast<i32>(delphi_round(arg_real(a, 3, -1.0))));
         return RValue(0.0);
     });
     register_builtin("message_input_font", [](Runner& r, i32, i32, std::span<const RValue> a) {
-        const std::string name = codepage_to_utf8(arg_str(a, 0), r.game().meta.string_codepage());
+        const std::string name = r.game().meta.encoding.to_utf8(arg_str(a, 0));
         r.message_dialog().set_input_font(
             name, arg_real(a, 1, -1.0), arg_real(a, 2, -1.0),
             static_cast<i32>(delphi_round(arg_real(a, 3, -1.0))));
@@ -1565,7 +1581,7 @@ void Runner::register_builtins_core() {
     });
     register_builtin("message_caption", [](Runner& r, i32, i32, std::span<const RValue> a) {
         const bool show = arg_bool(a, 0, false);
-        const std::string cap = codepage_to_utf8(arg_str(a, 1), r.game().meta.string_codepage());
+        const std::string cap = r.game().meta.encoding.to_utf8(arg_str(a, 1));
         r.message_dialog().set_caption(show, cap);
         return RValue(0.0);
     });

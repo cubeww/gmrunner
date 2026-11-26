@@ -140,6 +140,7 @@ public:
     void destroy() noexcept;
     [[nodiscard]] bool is_open() const noexcept { return window_ != nullptr; }
 
+    void set_input_codepage(u32 codepage) noexcept { input_codepage_ = codepage; }
     WindowEvents poll_events();
     WindowEvents poll_events_accumulate();
     void poll_modal_events(ModalInputFrame& out);
@@ -276,6 +277,7 @@ private:
     std::optional<i64> modal_touch_finger_;
     f32 modal_mouse_x_ = 0.0f;
     f32 modal_mouse_y_ = 0.0f;
+    u32 input_codepage_ = 65001;
     InputState input_{};
 };
 

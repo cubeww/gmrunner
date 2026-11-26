@@ -1,5 +1,6 @@
 #include "platform/window.h"
 
+#include "base/encoding.h"
 #include "base/log.h"
 #include "platform/web_bridge.h"
 
@@ -403,8 +404,8 @@ WindowEvents PlatformWindow::poll_events_impl(bool clear_edges) {
 
             case SDL_EVENT_TEXT_INPUT:
                 if (ev.text.text && ev.text.text[0] != '\0') {
-                    input_.last_char = ev.text.text;
-                    input_.keyboard_string += ev.text.text;
+                    input_.last_char = utf8_to_codepage(ev.text.text, input_codepage_);
+                    input_.keyboard_string += input_.last_char;
                     if (input_.keyboard_string.size() > 1024) {
                         input_.keyboard_string.erase(0, input_.keyboard_string.size() - 1024);
                     }

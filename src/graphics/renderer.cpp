@@ -2403,7 +2403,7 @@ std::vector<std::string> Renderer::split_gm_lines(const GameData& game, std::str
     hard_lines.push_back(std::move(cur));
 
     // GM8.1+ converts each Unicode line to the selected font's byte-indexed glyphs.
-    if (game.meta.encoding == EncodingMode::Utf8) {
+    if (game.meta.encoding.mode == EncodingMode::Utf8) {
         const u32 codepage = font_codepage(game);
         for (auto& line : hard_lines) {
             const auto nul = line.find('\0');

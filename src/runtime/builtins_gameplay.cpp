@@ -2355,7 +2355,7 @@ void Runner::register_builtins_gameplay() {
         f.last = std::clamp(arg_i32(a, 5, 127), 0, 255);
         f.charset = 1;
         f.antialias = 3;
-        (void)rasterize_gm_font(f, r.game().meta.string_codepage());
+        (void)rasterize_gm_font(f, r.game().meta.encoding.codepage);
         r.game().fonts.push_back(std::move(f));
         r.renderer().upload_font(id, r.game().fonts[id], r.version_mode());
         return RValue(static_cast<i32>(id));
@@ -2375,7 +2375,7 @@ void Runner::register_builtins_gameplay() {
         f.last = std::clamp(arg_i32(a, 6, 127), 0, 255);
         f.charset = 1;
         f.antialias = 3;
-        (void)rasterize_gm_font(f, r.game().meta.string_codepage());
+        (void)rasterize_gm_font(f, r.game().meta.encoding.codepage);
         r.renderer().flush();
         r.renderer().upload_font(static_cast<usize>(id), f, r.version_mode());
         return RValue(true);

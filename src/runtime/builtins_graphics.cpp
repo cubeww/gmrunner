@@ -972,11 +972,11 @@ void Runner::register_builtins_graphics() {
     // Window, Display & Screen
     // -----------------------------------------------------------------------
     register_builtin("window_set_caption", [](Runner& r, i32, i32, std::span<const RValue> a) {
-        r.window().set_title(codepage_to_utf8(arg_str(a, 0), r.game().meta.string_codepage()));
+        r.window().set_title(r.game().meta.encoding.to_utf8(arg_str(a, 0)));
         return RValue(0.0);
     });
     register_builtin("window_get_caption", [](Runner& r, i32, i32, std::span<const RValue>) {
-        return RValue(utf8_to_codepage(r.window().title(), r.game().meta.string_codepage()));
+        return RValue(r.game().meta.encoding.from_utf8(r.window().title()));
     });
     register_builtin("window_set_fullscreen", [](Runner& r, i32, i32, std::span<const RValue> a) {
         r.window().set_fullscreen(arg_bool(a, 0));
@@ -1157,7 +1157,7 @@ void Runner::register_builtins_graphics() {
     });
     register_builtin("set_application_title", [](Runner& r, i32, i32, std::span<const RValue> a) {
         if (!a.empty() && a[0].is_string()) {
-            Platform::set_application_title(codepage_to_utf8(a[0].as_string(), r.game().meta.string_codepage()));
+            Platform::set_application_title(r.game().meta.encoding.to_utf8(a[0].as_string()));
         }
         return RValue(0.0);
     });

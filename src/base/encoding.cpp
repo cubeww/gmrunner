@@ -212,7 +212,8 @@ std::string utf16_to_utf8(std::u16string_view utf16) {
                 ++i;
             }
         }
-        utf8_append_codepoint(out, cp);
+        // A UTF-16 slice may contain just one half of a surrogate pair.
+        utf8_append_codepoint(out, cp >= 0xD800u && cp <= 0xDFFFu ? 0xFFFDu : cp);
     }
     return out;
 }

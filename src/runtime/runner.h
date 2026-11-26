@@ -606,8 +606,6 @@ private:
     void render_view(i32 view_idx, f32 vx, f32 vy, f32 vw, f32 vh, f32 angle, i32 px, i32 py, i32 pw, i32 ph);
     void run_message_dialog_modal(bool with_input);
     void run_ui_dialog_modal(bool show_cursor);
-    [[nodiscard]] std::string decode_dialog_string(std::string_view raw, u8 charset) const;
-    [[nodiscard]] std::string encode_dialog_string(std::string_view utf8, u8 charset) const;
 
     void parse_ini_text(std::string_view text);
     std::string serialize_ini() const;

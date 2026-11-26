@@ -40,7 +40,7 @@ On desktop, place the game EXE and its assets beside the runner (beside `gmrunne
 | `--compile-check` | Compile all GML/D&D scripts and exit |
 | `--save-dir <path>` | Override writable save overlay directory |
 | `--version <80\|81\|82>` | Override auto-detected GM version profile (`8.0`/`8.1`/`8.2` also accepted) |
-| `--codepage <id>` | Windows codepage for GM 8.0 strings (e.g. `936`, `932`; default `1252`) |
+| `--codepage <id>` | Windows codepage for GM 8.0 strings (e.g. `936`, `932`; auto uses the first font charset mapping to a codepage other than 1252, then falls back to `1252`) |
 | `--width <px>`, `--height <px>` | Initial window size (default `800` × `608`) |
 | `--fullscreen` | Start in fullscreen mode |
 | `--sharp-scale` | Nearest-neighbor at integer zoom; smooth pixel edges at fractional zoom |

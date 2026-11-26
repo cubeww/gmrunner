@@ -61,7 +61,7 @@ Runner::~Runner() {
 
 Result<void> Runner::init(GameData game, CompiledProgram program, std::vector<std::string> cmd_args) {
     game_ = std::move(game);
-    ds_.set_string_encoding(game_.meta.encoding);
+    ds_.set_string_encoding(game_.meta.encoding.mode);
     program_ = std::move(program);
     // Timeline wrappers can gain actions during play. Keep a copied program independent.
     for (auto& moments : program_.timeline_chunks) {
@@ -72,11 +72,12 @@ Result<void> Runner::init(GameData game, CompiledProgram program, std::vector<st
     use_precomputed_events_ = true;
     generated_event_tables_.reset();
     cmd_args_ = std::move(cmd_args);
-    const u32 game_codepage = game_.meta.string_codepage();
+    const u32 game_codepage = game_.meta.encoding.codepage;
     vfs_.set_game_path_codepage(game_codepage);
+    window_.set_input_codepage(game_codepage);
     vfs_.registry_init(game_.meta.game_id);
     if (game_codepage != 65001u) {
-        for (auto& arg : cmd_args_) arg = utf8_to_codepage(arg, game_codepage);
+        for (auto& arg : cmd_args_) arg = game_.meta.encoding.from_utf8(arg);
     }
 
     next_instance_id_ = std::max(100001, game_.room_max_id + 1);
@@ -2051,7 +2052,7 @@ void Runner::update_window_caption() {
     if (show_health_) {
         cap += " " + caption_health_ + std::to_string(delphi_round(health_));
     }
-    window_.set_title(codepage_to_utf8(cap, game_.meta.string_codepage()));
+    window_.set_title(game_.meta.encoding.to_utf8(cap));
 }
 
 // ---------------------------------------------------------------------------
@@ -3371,22 +3372,6 @@ bool Runner::wait_for_mouse() {
 // Cross-Platform Self-Drawn GM8 Modal Message & Input Dialogs
 // ---------------------------------------------------------------------------
 
-std::string Runner::decode_dialog_string(std::string_view raw, u8 charset) const {
-    if (game_.meta.encoding == EncodingMode::Utf8) {
-        return std::string(raw);
-    }
-    const u32 cp = gdi_charset_to_codepage(charset, game_.meta.string_codepage());
-    return codepage_to_utf8(raw, cp);
-}
-
-std::string Runner::encode_dialog_string(std::string_view utf8, u8 charset) const {
-    if (game_.meta.encoding == EncodingMode::Utf8) {
-        return std::string(utf8);
-    }
-    const u32 cp = gdi_charset_to_codepage(charset, game_.meta.string_codepage());
-    return utf8_to_codepage(utf8, cp);
-}
-
 void Runner::run_message_dialog_modal(bool with_input) {
     if (!window_.is_open()) {
         return;
@@ -3548,10 +3533,10 @@ i32 Runner::show_message_ext_dialog(
     std::string_view but3) {
     const auto& st = message_dialog_.style();
     message_dialog_.begin_message(
-        decode_dialog_string(text, st.text_font.charset),
-        decode_dialog_string(but1, st.button_font.charset),
-        decode_dialog_string(but2, st.button_font.charset),
-        decode_dialog_string(but3, st.button_font.charset));
+        game_.meta.encoding.to_utf8(text, st.text_font.charset),
+        game_.meta.encoding.to_utf8(but1, st.button_font.charset),
+        game_.meta.encoding.to_utf8(but2, st.button_font.charset),
+        game_.meta.encoding.to_utf8(but3, st.button_font.charset));
     run_message_dialog_modal(false);
     return message_dialog_.result_button();
 }
@@ -3563,11 +3548,11 @@ bool Runner::show_question_dialog(std::string_view text) {
 std::string Runner::get_string_dialog(std::string_view text, std::string_view def) {
     const auto& st = message_dialog_.style();
     message_dialog_.begin_input(
-        decode_dialog_string(text, st.text_font.charset),
-        decode_dialog_string(def, st.input_font.charset));
+        game_.meta.encoding.to_utf8(text, st.text_font.charset),
+        game_.meta.encoding.to_utf8(def, st.input_font.charset));
     run_message_dialog_modal(true);
     if (message_dialog_.result_button() == 0) return std::string(def);
-    return encode_dialog_string(message_dialog_.result_text_utf8(), st.input_font.charset);
+    return game_.meta.encoding.from_utf8(message_dialog_.result_text_utf8(), st.input_font.charset);
 }
 
 f64 Runner::get_integer_dialog(std::string_view text, f64 def) {
@@ -3634,7 +3619,7 @@ f64 Runner::get_integer_dialog(std::string_view text, f64 def) {
 
 namespace {
 
-std::string resolve_dialog_default_location(const Vfs& vfs, std::string_view raw_path, u32 codepage, bool is_dir) {
+std::string resolve_dialog_default_location(const Vfs& vfs, std::string_view raw_path, const GameEncoding& encoding, bool is_dir) {
     if (raw_path.empty()) {
         std::string dir = Vfs::path_to_utf8(vfs.resolve_for_read("."));
         if (!dir.empty() && dir.back() != '/' && dir.back() != '\\') {
@@ -3647,7 +3632,7 @@ std::string resolve_dialog_default_location(const Vfs& vfs, std::string_view raw
         return dir;
     }
 
-    const std::string utf8_in = codepage_to_utf8(raw_path, codepage);
+    const std::string utf8_in = encoding.to_utf8(raw_path);
     const std::filesystem::path p = Vfs::path_from_utf8(utf8_in);
     if (p.is_absolute()) {
         return utf8_in;
@@ -3667,9 +3652,8 @@ std::string resolve_dialog_default_location(const Vfs& vfs, std::string_view raw
 } // namespace
 
 std::string Runner::get_open_filename_dialog(std::string_view filter, std::string_view fname) {
-    const u32 cp = game_.meta.string_codepage();
-    const std::string filter_utf8 = codepage_to_utf8(filter, cp);
-    const std::string def_loc = resolve_dialog_default_location(vfs_, fname, cp, false);
+    const std::string filter_utf8 = game_.meta.encoding.to_utf8(filter);
+    const std::string def_loc = resolve_dialog_default_location(vfs_, fname, game_.meta.encoding, false);
 
     const i32 prev_cursor = window_.cursor();
     window_.set_cursor(0);
@@ -3680,14 +3664,12 @@ std::string Runner::get_open_filename_dialog(std::string_view filter, std::strin
     mouse_button_ = 0;
     mouse_lastbutton_ = 0;
 
-    if (selected.empty()) return {};
-    return (game_.meta.encoding == EncodingMode::Utf8) ? selected : utf8_to_codepage(selected, cp);
+    return game_.meta.encoding.from_utf8(selected);
 }
 
 std::string Runner::get_save_filename_dialog(std::string_view filter, std::string_view fname) {
-    const u32 cp = game_.meta.string_codepage();
-    const std::string filter_utf8 = codepage_to_utf8(filter, cp);
-    const std::string def_loc = resolve_dialog_default_location(vfs_, fname, cp, false);
+    const std::string filter_utf8 = game_.meta.encoding.to_utf8(filter);
+    const std::string def_loc = resolve_dialog_default_location(vfs_, fname, game_.meta.encoding, false);
 
     const i32 prev_cursor = window_.cursor();
     window_.set_cursor(0);
@@ -3698,13 +3680,11 @@ std::string Runner::get_save_filename_dialog(std::string_view filter, std::strin
     mouse_button_ = 0;
     mouse_lastbutton_ = 0;
 
-    if (selected.empty()) return {};
-    return (game_.meta.encoding == EncodingMode::Utf8) ? selected : utf8_to_codepage(selected, cp);
+    return game_.meta.encoding.from_utf8(selected);
 }
 
 std::string Runner::get_directory_dialog(std::string_view dname) {
-    const u32 cp = game_.meta.string_codepage();
-    const std::string def_loc = resolve_dialog_default_location(vfs_, dname, cp, true);
+    const std::string def_loc = resolve_dialog_default_location(vfs_, dname, game_.meta.encoding, true);
 
     const i32 prev_cursor = window_.cursor();
     window_.set_cursor(0);
@@ -3715,14 +3695,12 @@ std::string Runner::get_directory_dialog(std::string_view dname) {
     mouse_button_ = 0;
     mouse_lastbutton_ = 0;
 
-    if (selected.empty()) return {};
-    return (game_.meta.encoding == EncodingMode::Utf8) ? selected : utf8_to_codepage(selected, cp);
+    return game_.meta.encoding.from_utf8(selected);
 }
 
 std::string Runner::get_directory_alt_dialog(std::string_view capt, std::string_view root) {
-    const u32 cp = game_.meta.string_codepage();
-    const std::string capt_utf8 = codepage_to_utf8(capt, cp);
-    const std::string def_loc = resolve_dialog_default_location(vfs_, root, cp, true);
+    const std::string capt_utf8 = game_.meta.encoding.to_utf8(capt);
+    const std::string def_loc = resolve_dialog_default_location(vfs_, root, game_.meta.encoding, true);
 
     const i32 prev_cursor = window_.cursor();
     window_.set_cursor(0);
@@ -3733,8 +3711,7 @@ std::string Runner::get_directory_alt_dialog(std::string_view capt, std::string_
     mouse_button_ = 0;
     mouse_lastbutton_ = 0;
 
-    if (selected.empty()) return {};
-    return (game_.meta.encoding == EncodingMode::Utf8) ? selected : utf8_to_codepage(selected, cp);
+    return game_.meta.encoding.from_utf8(selected);
 }
 
 // ---------------------------------------------------------------------------
@@ -3881,7 +3858,6 @@ i32 Runner::highscore_add_entry(std::string_view name, f64 score) {
 }
 
 void Runner::highscore_show_dialog(f64 score_val) {
-    const u32 cp = game_.meta.string_codepage();
     const i64 rounded = delphi_round(score_val);
     i32 edit_rank = -1;
     if (rounded >= 0 && static_cast<f64>(rounded) > highscores_.back().score) {
@@ -3894,11 +3870,11 @@ void Runner::highscore_show_dialog(f64 score_val) {
     params.col_back_bgr = highscore_col_back_ & 0xFFFFFFu;
     params.col_new_bgr = highscore_col_new_ & 0xFFFFFFu;
     params.col_other_bgr = highscore_col_other_ & 0xFFFFFFu;
-    params.font_name = codepage_to_utf8(highscore_font_name_, cp);
+    params.font_name = game_.meta.encoding.to_utf8(highscore_font_name_);
     params.font_size = highscore_font_size_;
     params.font_style = highscore_font_style_;
-    params.caption_utf8 = codepage_to_utf8(highscore_caption_, cp);
-    params.escape_text_utf8 = codepage_to_utf8(highscore_escape_, cp);
+    params.caption_utf8 = game_.meta.encoding.to_utf8(highscore_caption_);
+    params.escape_text_utf8 = game_.meta.encoding.to_utf8(highscore_escape_);
 
     if (highscore_bg_ >= 0 && static_cast<usize>(highscore_bg_) < game_.backgrounds.size() &&
         game_.backgrounds[static_cast<usize>(highscore_bg_)].exists) {
@@ -3906,7 +3882,7 @@ void Runner::highscore_show_dialog(f64 score_val) {
     }
     for (usize i = 0; i < highscores_.size(); ++i) {
         const std::string& raw_name = highscores_[i].name.empty() ? highscore_nobody_ : highscores_[i].name;
-        params.rows[i].name_utf8 = codepage_to_utf8(raw_name, cp);
+        params.rows[i].name_utf8 = game_.meta.encoding.to_utf8(raw_name);
         params.rows[i].score = delphi_round(highscores_[i].score);
     }
 
@@ -3919,7 +3895,7 @@ void Runner::highscore_show_dialog(f64 score_val) {
             highscores_[static_cast<usize>(edit_rank)].name = highscore_nobody_;
         } else {
             highscores_[static_cast<usize>(edit_rank)].name =
-                (game_.meta.encoding == EncodingMode::Utf8) ? entered_utf8 : utf8_to_codepage(entered_utf8, cp);
+                game_.meta.encoding.from_utf8(entered_utf8);
         }
     }
 }
@@ -3936,7 +3912,6 @@ RValue Runner::show_menu_dialog(
     std::string_view items_str,
     const RValue& default_val,
     std::optional<std::pair<i32, i32>> screen_pos) {
-    const u32 cp = game_.meta.string_codepage();
     MenuDialogParams params{};
 
     // Match GM8 sub_628BB0: split by '|' (char 124); a trailing '|' does not create an extra item.
@@ -3946,7 +3921,7 @@ RValue Runner::show_menu_dialog(
         const std::string_view seg = (bar == std::string_view::npos)
             ? items_str.substr(pos)
             : items_str.substr(pos, bar - pos);
-        params.items_utf8.push_back(codepage_to_utf8(seg, cp));
+        params.items_utf8.push_back(game_.meta.encoding.to_utf8(seg));
         if (bar == std::string_view::npos) break;
         pos = bar + 1;
     }
@@ -3994,7 +3969,6 @@ bool Runner::splash_show_image_dialog(std::string_view fname, i32 delay_ms) {
         return false;
     }
 
-    const u32 cp = game_.meta.string_codepage();
     SplashDialogParams params{};
     params.is_image = true;
     params.image_bitmap = std::move(bmp.value());
@@ -4004,7 +3978,7 @@ bool Runner::splash_show_image_dialog(std::string_view fname, i32 delay_ms) {
     params.in_main_window = splash_main_;
     params.fullscreen = splash_fullscreen_;
     params.show_border = splash_border_;
-    params.caption_utf8 = codepage_to_utf8(splash_caption_, cp);
+    params.caption_utf8 = game_.meta.encoding.to_utf8(splash_caption_);
     params.size_w = splash_size_w_ > 0 ? splash_size_w_ : 640;
     params.size_h = splash_size_h_ > 0 ? splash_size_h_ : 480;
     params.pos_x = splash_pos_x_;
@@ -4027,7 +4001,7 @@ bool Runner::splash_show_text_dialog(std::string_view fname, i32 delay_ms) {
         return false;
     }
 
-    const u32 cp = game_.meta.string_codepage();
+    const u32 cp = game_.meta.encoding.codepage;
     const u32 bg_bgr = splash_color_ & 0xFFFFFFu;
     const u32 r = bg_bgr & 0xFFu;
     const u32 g = (bg_bgr >> 8u) & 0xFFu;
@@ -4045,7 +4019,7 @@ bool Runner::splash_show_text_dialog(std::string_view fname, i32 delay_ms) {
     params.in_main_window = splash_main_;
     params.fullscreen = splash_fullscreen_;
     params.show_border = splash_border_;
-    params.caption_utf8 = codepage_to_utf8(splash_caption_, cp);
+    params.caption_utf8 = game_.meta.encoding.to_utf8(splash_caption_);
     params.size_w = splash_size_w_ > 0 ? splash_size_w_ : 640;
     params.size_h = splash_size_h_ > 0 ? splash_size_h_ : 480;
     params.pos_x = splash_pos_x_;
@@ -4072,7 +4046,7 @@ bool Runner::load_info_file(std::string_view fname) {
 }
 
 void Runner::show_info_dialog() {
-    const u32 cp = game_.meta.string_codepage();
+    const u32 cp = game_.meta.encoding.codepage;
     const u32 bg_bgr = game_.help.bg_color & 0xFFFFFFu;
     const u32 r = bg_bgr & 0xFFu;
     const u32 g = (bg_bgr >> 8u) & 0xFFu;
@@ -4085,7 +4059,7 @@ void Runner::show_info_dialog() {
     params.bg_color_bgr = bg_bgr;
     params.caption_utf8 = game_.help.caption.empty()
         ? std::string("Game Information")
-        : codepage_to_utf8(game_.help.caption, cp);
+        : game_.meta.encoding.to_utf8(game_.help.caption);
     params.left = game_.help.left;
     params.top = game_.help.top;
     params.width = game_.help.width > 0 ? game_.help.width : 600;

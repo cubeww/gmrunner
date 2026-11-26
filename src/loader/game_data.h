@@ -1,6 +1,6 @@
 #pragma once
 
-#include "base/types.h"
+#include "base/encoding.h"
 
 #include <array>
 #include <string>
@@ -9,9 +9,27 @@
 
 namespace gm {
 
+struct GameEncoding {
+    EncodingMode mode = EncodingMode::LegacyAnsi;
+    u32 codepage = 1252;
+    std::string_view source = "default";
+
+    [[nodiscard]] std::string to_utf8(std::string_view text, u8 charset = 1) const {
+        return codepage_to_utf8(text, text_codepage(charset));
+    }
+    [[nodiscard]] std::string from_utf8(std::string_view text, u8 charset = 1) const {
+        return utf8_to_codepage(text, text_codepage(charset));
+    }
+
+private:
+    [[nodiscard]] u32 text_codepage(u8 charset) const noexcept {
+        return mode == EncodingMode::LegacyAnsi ? gdi_charset_to_codepage(charset, codepage) : codepage;
+    }
+};
+
 struct GameMetadata {
     VersionMode detected_version = VersionMode::GM80;
-    EncodingMode encoding = EncodingMode::LegacyAnsi;
+    GameEncoding encoding;
     i32 format_version = 800; // 800 (GM 8.0) or 810 (GM 8.1 / 8.2)
     bool debug_mode = false;
     bool pro_edition = true;
@@ -22,11 +40,6 @@ struct GameMetadata {
     usize pe_overlay_offset = 0;
     usize payload_offset = 0;
     bool has_gm82_event_tables = false;
-    u32 inferred_codepage = 1252;
-
-    [[nodiscard]] u32 string_codepage() const noexcept {
-        return encoding == EncodingMode::Utf8 ? 65001u : inferred_codepage;
-    }
 };
 
 struct GameOptions {

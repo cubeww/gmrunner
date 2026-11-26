@@ -1383,15 +1383,21 @@ Result<Gm82EventTables> parse_gm82_event_tables(BinaryReader& outer) {
     return tables;
 }
 
-u32 infer_codepage_from_fonts(const std::vector<FontData>& fonts) noexcept {
-    for (const auto& f : fonts) {
+GameEncoding select_game_encoding(const GameData& game, u32 override_cp) noexcept {
+    if (game.meta.detected_version != VersionMode::GM80) {
+        return {EncodingMode::Utf8, 65001, "GM version"};
+    }
+    if (override_cp != 0) {
+        return {EncodingMode::LegacyAnsi, override_cp, "--codepage"};
+    }
+    for (const auto& f : game.fonts) {
         if (!f.exists) continue;
         const u32 cp = gdi_charset_to_codepage(f.charset);
         if (cp != 1252u) {
-            return cp;
+            return {EncodingMode::LegacyAnsi, cp, "font charset"};
         }
     }
-    return 1252u;
+    return {};
 }
 
 template <typename T>
@@ -1596,7 +1602,6 @@ Result<GameData> ExeLoader::load_from_bytes(std::vector<u8> exe_bytes, const Loa
         game.meta.format_version = ver.value();
         game.meta.debug_mode = dbg.value();
         game.meta.detected_version = VersionMode::GM80;
-        game.meta.encoding = EncodingMode::LegacyAnsi;
     } else {
         auto ver = outer.read_i32();
         auto build_days = outer.read_i32();
@@ -1610,7 +1615,6 @@ Result<GameData> ExeLoader::load_from_bytes(std::vector<u8> exe_bytes, const Loa
         game.meta.format_version = ver.value();
         game.meta.debug_mode = dbg.value();
         game.meta.detected_version = VersionMode::GM81;
-        game.meta.encoding = EncodingMode::Utf8;
     }
 
     auto opts_res = parse_options(outer);
@@ -1740,9 +1744,6 @@ Result<GameData> ExeLoader::load_from_bytes(std::vector<u8> exe_bytes, const Loa
 
     if (options.version_override != VersionMode::Auto) {
         game.meta.detected_version = options.version_override;
-        game.meta.encoding = (options.version_override == VersionMode::GM80)
-                                 ? EncodingMode::LegacyAnsi
-                                 : EncodingMode::Utf8;
     }
 
     // Only GM8.2 honors an explicitly packed ANSI_CHARSET (zero).
@@ -1763,12 +1764,7 @@ Result<GameData> ExeLoader::load_from_bytes(std::vector<u8> exe_bytes, const Loa
         }
     }
 
-    // Infer legacy codepage for GM 8.0 from font GDI charsets.
-    game.meta.inferred_codepage = (options.codepage_override != 0)
-                                      ? options.codepage_override
-                                      : ((game.meta.encoding == EncodingMode::Utf8)
-                                             ? 65001u
-                                             : infer_codepage_from_fonts(game.fonts));
+    game.meta.encoding = select_game_encoding(game, options.codepage_override);
 
     if (r.remaining() > 0) {
         GM_LOG_DEBUG("loader", "StreamE parsed with %zu unread trailing bytes", r.remaining());
@@ -1790,12 +1786,13 @@ void print_game_inspect(const GameData& game, bool verbose) {
     const auto& o = game.options;
 
     std::printf("=== GameMaker Executable Inspection ===\n");
-    std::printf("Version:      GM %.*s (stream v%d, encoding=%s, codepage=%u)\n",
+    std::printf("Version:      GM %.*s (stream v%d, encoding=%s, codepage=%u, source=%.*s)\n",
                 static_cast<int>(version_mode_name(m.detected_version).size()),
                 version_mode_name(m.detected_version).data(),
                 m.format_version,
-                m.encoding == EncodingMode::Utf8 ? "UTF-8" : "LegacyANSI",
-                m.inferred_codepage);
+                m.encoding.mode == EncodingMode::Utf8 ? "UTF-8" : "LegacyANSI",
+                m.encoding.codepage,
+                static_cast<int>(m.encoding.source.size()), m.encoding.source.data());
     std::printf("EXE Size:     %zu bytes (PE overlay @ 0x%zx, payload @ 0x%zx)\n",
                 m.exe_size, m.pe_overlay_offset, m.payload_offset);
     std::printf("Game ID:      %d (Pro=%s, Debug=%s, GUID=%s)\n",

@@ -574,7 +574,7 @@ int main(int argc, char** argv) {
     }
     gm::Logger::set_trace_flags(opts.trace);
 
-    GM_LOG_INFO("app", "gmrunner (%s, version_override=%s, codepage=%u)",
+    GM_LOG_INFO("app", "gmrunner (%s, version_override=%s, codepage_override=%u)",
                 gm::Platform::platform_name(),
                 std::string(gm::version_mode_name(opts.version_override)).c_str(),
                 opts.codepage);
