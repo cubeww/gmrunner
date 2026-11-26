@@ -966,7 +966,7 @@ void Renderer2D::present_screen(u32 border_color_bgr, std::optional<u32> color_k
               0.0f, 0.0f, 0.0f, 0.0f, white,
               static_cast<f32>(screen_w_), 0.0f, 1.0f, 0.0f, white,
               static_cast<f32>(screen_w_), static_cast<f32>(screen_h_), 1.0f, 1.0f, white,
-              0.0f, static_cast<f32>(screen_h_), 0.0f, 1.0f, white);
+              0.0f, static_cast<f32>(screen_h_), 0.0f, 1.0f, white, PixelCenter::OpenGL);
     flush();
 
     if (sharp_scale_ && linear_filter_) glUniform1f(loc_sharp_factor_, 0.0f);
@@ -1046,7 +1046,7 @@ bool Renderer2D::resize_backbuffer(i32 width, i32 height) {
     return true;
 }
 
-void Renderer2D::upload_shader_uniforms(const f32 tint_rgba[4]) {
+void Renderer2D::upload_shader_uniforms(const f32 tint_rgba[4], PixelCenter center) {
     f32 gl_proj[16];
     std::memcpy(gl_proj, proj_matrix_, sizeof(gl_proj));
     if (rendering_to_fbo()) {
@@ -1080,10 +1080,11 @@ void Renderer2D::upload_shader_uniforms(const f32 tint_rgba[4]) {
         std::memcpy(c.proj, gl_proj, sizeof(c.proj));
         glUniformMatrix4fv(loc_proj_, 1, GL_FALSE, gl_proj);
     }
-    if (force || c.pixel_center[0] != pixel_center_offset_[0] || c.pixel_center[1] != pixel_center_offset_[1]) {
-        c.pixel_center[0] = pixel_center_offset_[0];
-        c.pixel_center[1] = pixel_center_offset_[1];
-        glUniform2fv(loc_pixel_center_offset_, 1, pixel_center_offset_.data());
+    const auto offset = pixel_center_offset(center);
+    if (force || c.pixel_center[0] != offset[0] || c.pixel_center[1] != offset[1]) {
+        c.pixel_center[0] = offset[0];
+        c.pixel_center[1] = offset[1];
+        glUniform2fv(loc_pixel_center_offset_, 1, offset.data());
     }
     if (force || std::memcmp(c.tint, tint_rgba, sizeof(c.tint)) != 0) {
         std::memcpy(c.tint, tint_rgba, sizeof(c.tint));
@@ -1186,7 +1187,7 @@ void Renderer2D::upload_shader_uniforms(const f32 tint_rgba[4]) {
     c.valid = true;
 }
 
-Dx9DrawContext Renderer2D::make_dx9_draw_context(const f32 tint_rgba[4]) const noexcept {
+Dx9DrawContext Renderer2D::make_dx9_draw_context(const f32 tint_rgba[4], PixelCenter center) const noexcept {
     Dx9DrawContext ctx{};
     ctx.world_matrix = world_matrix_;
     ctx.view_matrix = view_matrix_;
@@ -1194,7 +1195,7 @@ Dx9DrawContext Renderer2D::make_dx9_draw_context(const f32 tint_rgba[4]) const n
     ctx.model_tint = tint_rgba;
     ctx.rendering_to_fbo = rendering_to_fbo();
     ctx.viewport = active_viewport_;
-    ctx.pixel_center_offset = pixel_center_offset_;
+    ctx.pixel_center_offset = pixel_center_offset(center);
     ctx.tex_blending = tex_blending_;
     ctx.texcoord_mode = texcoord_mode_;
     ctx.alpha_test_enabled = alpha_test_explicit_ || (d3d_active_ && d3d_hidden_);
@@ -1231,10 +1232,10 @@ void Renderer2D::flush() {
 
     bool used_custom_shader = false;
     if (dx9_.has_active_shader()) {
-        used_custom_shader = dx9_.bind_and_upload(make_dx9_draw_context(kWhiteTint), batch_tex_);
+        used_custom_shader = dx9_.bind_and_upload(make_dx9_draw_context(kWhiteTint, batch_center_), batch_tex_);
     }
     if (!used_custom_shader) {
-        upload_shader_uniforms(kWhiteTint);
+        upload_shader_uniforms(kWhiteTint, batch_center_);
         apply_stage0_ff_sampler(batch_tex_);
         device_->bind_texture(0, batch_tex_);
     }
@@ -1450,9 +1451,10 @@ void Renderer2D::set_viewport_ext(i32 x, i32 y, i32 w, i32 h) {
     device_->set_viewport(ViewportRect{x, gl_y, pw, ph});
 }
 
-void Renderer2D::ensure_batch(PrimitiveTopology topo, TextureHandle tex) {
-    if (vertices_.size() + 6 >= kMaxBatchVertices || batch_topo_ != topo || batch_tex_ != tex) {
+void Renderer2D::ensure_batch(PrimitiveTopology topo, TextureHandle tex, PixelCenter center) {
+    if (vertices_.size() + 6 >= kMaxBatchVertices || batch_topo_ != topo || batch_tex_ != tex || batch_center_ != center) {
         flush();
+        batch_center_ = center;
         batch_topo_ = topo;
         batch_tex_ = tex;
     }
@@ -1463,7 +1465,7 @@ void Renderer2D::push_quad(
     f32 x0, f32 y0, f32 u0, f32 v0, ColorRGBA c0,
     f32 x1, f32 y1, f32 u1, f32 v1, ColorRGBA c1,
     f32 x2, f32 y2, f32 u2, f32 v2, ColorRGBA c2,
-    f32 x3, f32 y3, f32 u3, f32 v3, ColorRGBA c3) {
+    f32 x3, f32 y3, f32 u3, f32 v3, ColorRGBA c3, PixelCenter center) {
     // GM's textured 2D quads set ADDRESSU/V to CLAMP on the device without changing the GML repeat flag.
     if (tex.valid() && tex != screen_fbo_tex_) {
         const auto& sampler = dx9_.ps_sampler(0);
@@ -1472,7 +1474,7 @@ void Renderer2D::push_quad(
             dx9_.set_ps_sampler_wrap(0, 3, 3, sampler.border_bgr);
         }
     }
-    ensure_batch(PrimitiveTopology::Triangles, tex);
+    ensure_batch(PrimitiveTopology::Triangles, tex, center);
     vertices_.push_back(Vertex3D{x0, y0, current_draw_z_, 0.0f, 0.0f, 0.0f, u0, v0, c0.r, c0.g, c0.b, c0.a});
     vertices_.push_back(Vertex3D{x1, y1, current_draw_z_, 0.0f, 0.0f, 0.0f, u1, v1, c1.r, c1.g, c1.b, c1.a});
     vertices_.push_back(Vertex3D{x2, y2, current_draw_z_, 0.0f, 0.0f, 0.0f, u2, v2, c2.r, c2.g, c2.b, c2.a});
@@ -1893,27 +1895,7 @@ void Renderer2D::draw_surface_ext(i32 id, f32 x, f32 y, f32 xscale, f32 yscale, 
 
     const f32 w = static_cast<f32>(it->second.width) * xscale;
     const f32 h = static_cast<f32>(it->second.height) * yscale;
-    const f32 rad = static_cast<f32>(deg_to_rad(rot_deg));
-    const f32 c = std::cos(rad);
-    const f32 s = std::sin(rad);
-
-    auto xf = [&](f32 lx, f32 ly, f32& ox, f32& oy) {
-        ox = x + lx * c + ly * s;
-        oy = y - lx * s + ly * c;
-    };
-
-    f32 x0, y0, x1, y1, x2, y2, x3, y3;
-    xf(0.0f, 0.0f, x0, y0);
-    xf(w,    0.0f, x1, y1);
-    xf(w,    h,    x2, y2);
-    xf(0.0f, h,    x3, y3);
-
-    const ColorRGBA col = make_vertex_color(color_bgr, alpha);
-    push_quad(it->second.texture,
-              x0, y0, 0.0f, 0.0f, col,
-              x1, y1, 1.0f, 0.0f, col,
-              x2, y2, 1.0f, 1.0f, col,
-              x3, y3, 0.0f, 1.0f, col);
+    draw_texture_ext(it->second.texture, x, y, 0, 0, w, h, rot_deg, color_bgr, alpha);
 }
 
 void Renderer2D::draw_surface_part_ext(i32 id, f32 left, f32 top, f32 w, f32 h, f32 x, f32 y, f32 xscale, f32 yscale, u32 color_bgr, f32 alpha) {
@@ -1928,22 +1910,13 @@ void Renderer2D::draw_surface_part_ext(i32 id, f32 left, f32 top, f32 w, f32 h, 
     const f32 dw = w * xscale;
     const f32 dh = h * yscale;
     const ColorRGBA col = make_vertex_color(color_bgr, alpha);
-    push_quad(it->second.texture,
-              x, y, u0, v0, col,
-              x + dw, y, u1, v0, col,
-              x + dw, y + dh, u1, v1, col,
-              x, y + dh, u0, v1, col);
+    draw_texture_region(it->second.texture, x, y, 0, 0, dw, dh, 0, u0, v0, u1, v1, col, col, col, col);
 }
 
 void Renderer2D::draw_surface_stretched_ext(i32 id, f32 x, f32 y, f32 w, f32 h, u32 color_bgr, f32 alpha) {
     const auto it = surfaces_.find(id);
     if (it == surfaces_.end()) return;
-    const ColorRGBA col = make_vertex_color(color_bgr, alpha);
-    push_quad(it->second.texture,
-              x, y, 0.0f, 0.0f, col,
-              x + w, y, 1.0f, 0.0f, col,
-              x + w, y + h, 1.0f, 1.0f, col,
-              x, y + h, 0.0f, 1.0f, col);
+    draw_texture_ext(it->second.texture, x, y, 0, 0, w, h, 0, color_bgr, alpha);
 }
 
 void Renderer2D::draw_surface_tiled_ext(
@@ -1960,14 +1933,9 @@ void Renderer2D::draw_surface_tiled_ext(
     f32 sy = y - std::floor((y - view_y) / th) * th;
     if (sy > view_y) sy -= th;
 
-    const ColorRGBA col = make_vertex_color(color_bgr, alpha);
     for (f32 py = sy; py < view_y + view_h; py += th) {
         for (f32 px = sx; px < view_x + view_w; px += tw) {
-            push_quad(it->second.texture,
-                      px, py, 0.0f, 0.0f, col,
-                      px + tw, py, 1.0f, 0.0f, col,
-                      px + tw, py + th, 1.0f, 1.0f, col,
-                      px, py + th, 0.0f, 1.0f, col);
+            draw_texture_ext(it->second.texture, px, py, 0, 0, tw, th, 0, color_bgr, alpha);
         }
     }
 }
@@ -1986,23 +1954,9 @@ void Renderer2D::draw_surface_general(
     const f32 v1 = (top + h) * inv_h;
     const f32 dw = w * xscale;
     const f32 dh = h * yscale;
-    const f32 rad = static_cast<f32>(deg_to_rad(rot_deg));
-    const f32 c = std::cos(rad);
-    const f32 s = std::sin(rad);
-    auto xf = [&](f32 lx, f32 ly, f32& ox, f32& oy) {
-        ox = x + lx * c + ly * s;
-        oy = y - lx * s + ly * c;
-    };
-    f32 x0, y0, x1, y1, x2, y2, x3, y3;
-    xf(0.0f, 0.0f, x0, y0);
-    xf(dw,   0.0f, x1, y1);
-    xf(dw,   dh,   x2, y2);
-    xf(0.0f, dh,   x3, y3);
-    push_quad(it->second.texture,
-              x0, y0, u0, v0, make_vertex_color(c1, alpha),
-              x1, y1, u1, v0, make_vertex_color(c2, alpha),
-              x2, y2, u1, v1, make_vertex_color(c3, alpha),
-              x3, y3, u0, v1, make_vertex_color(c4, alpha));
+    draw_texture_region(it->second.texture, x, y, 0, 0, dw, dh, rot_deg, u0, v0, u1, v1,
+                        make_vertex_color(c1, alpha), make_vertex_color(c2, alpha),
+                        make_vertex_color(c3, alpha), make_vertex_color(c4, alpha));
 }
 
 bool Renderer2D::surface_read_pixels_bgra(i32 id, i32 x, i32 y, i32 w, i32 h, std::vector<u8>& out_bgra) {
@@ -2223,34 +2177,34 @@ void Renderer2D::draw_sprite_ext(
 void Renderer2D::draw_texture_ext(TextureHandle tex, f32 x, f32 y, f32 lx0, f32 ly0, f32 lx1, f32 ly1,
                                   f32 rot_deg, u32 color_bgr, f32 alpha) {
     const ColorRGBA col = make_vertex_color(color_bgr, alpha);
-    if (std::fabs(rot_deg) < 1e-5f) {
+    draw_texture_region(tex, x, y, lx0, ly0, lx1, ly1, rot_deg, 0, 0, 1, 1, col, col, col, col);
+}
+
+void Renderer2D::draw_texture_region(TextureHandle tex, f32 x, f32 y, f32 lx0, f32 ly0, f32 lx1, f32 ly1, f32 rot_deg,
+                                     f32 u0, f32 v0, f32 u1, f32 v1, ColorRGBA c0, ColorRGBA c1, ColorRGBA c2, ColorRGBA c3) {
+    // GM's image vertices include a local half-pixel offset,
+    // after image scaling and before image rotation or the world transform.
+    lx0 -= 0.5f;
+    ly0 -= 0.5f;
+    lx1 -= 0.5f;
+    ly1 -= 0.5f;
+    if (rot_deg == 0.0f) {
         push_quad(tex,
-                  x + lx0, y + ly0, 0.0f, 0.0f, col,
-                  x + lx1, y + ly0, 1.0f, 0.0f, col,
-                  x + lx1, y + ly1, 1.0f, 1.0f, col,
-                  x + lx0, y + ly1, 0.0f, 1.0f, col);
+                  x + lx0, y + ly0, u0, v0, c0,
+                  x + lx1, y + ly0, u1, v0, c1,
+                  x + lx1, y + ly1, u1, v1, c2,
+                  x + lx0, y + ly1, u0, v1, c3);
         return;
     }
 
     const f32 rad = static_cast<f32>(deg_to_rad(rot_deg));
     const f32 c = std::cos(rad);
     const f32 s = std::sin(rad);
-    auto xf = [&](f32 lx, f32 ly, f32& ox, f32& oy) {
-        // GM offsets sprite vertices by half a pixel before rotating them.
-        ox = x + 0.5f + (lx - 0.5f) * c + (ly - 0.5f) * s;
-        oy = y + 0.5f - (lx - 0.5f) * s + (ly - 0.5f) * c;
-    };
-
-    f32 x0, y0, x1, y1, x2, y2, x3, y3;
-    xf(lx0, ly0, x0, y0);
-    xf(lx1, ly0, x1, y1);
-    xf(lx1, ly1, x2, y2);
-    xf(lx0, ly1, x3, y3);
     push_quad(tex,
-              x0, y0, 0.0f, 0.0f, col,
-              x1, y1, 1.0f, 0.0f, col,
-              x2, y2, 1.0f, 1.0f, col,
-              x3, y3, 0.0f, 1.0f, col);
+              x + lx0 * c + ly0 * s, y - lx0 * s + ly0 * c, u0, v0, c0,
+              x + lx1 * c + ly0 * s, y - lx1 * s + ly0 * c, u1, v0, c1,
+              x + lx1 * c + ly1 * s, y - lx1 * s + ly1 * c, u1, v1, c2,
+              x + lx0 * c + ly1 * s, y - lx0 * s + ly1 * c, u0, v1, c3);
 }
 
 void Renderer2D::draw_sprite_part_ext(
@@ -2265,12 +2219,7 @@ void Renderer2D::draw_sprite_stretched_ext(
     f32 x, f32 y, f32 w, f32 h, u32 color_bgr, f32 alpha) {
     const TextureHandle tex = sprite_texture(sprite_id, subimg);
     if (!tex.valid()) return;
-    const ColorRGBA col = make_vertex_color(color_bgr, alpha);
-    push_quad(tex,
-              x, y, 0.0f, 0.0f, col,
-              x + w, y, 1.0f, 0.0f, col,
-              x + w, y + h, 1.0f, 1.0f, col,
-              x, y + h, 0.0f, 1.0f, col);
+    draw_texture_ext(tex, x, y, 0, 0, w, h, 0, color_bgr, alpha);
 }
 
 void Renderer2D::draw_sprite_tiled_ext(
@@ -2313,25 +2262,9 @@ void Renderer2D::draw_sprite_general(
     const f32 dw = w * xscale;
     const f32 dh = h * yscale;
 
-    const f32 rad = static_cast<f32>(deg_to_rad(rot_deg));
-    const f32 c = std::cos(rad);
-    const f32 s = std::sin(rad);
-    auto xf = [&](f32 lx, f32 ly, f32& ox, f32& oy) {
-        ox = x + lx * c + ly * s;
-        oy = y - lx * s + ly * c;
-    };
-
-    f32 x0, y0, x1, y1, x2, y2, x3, y3;
-    xf(0.0f, 0.0f, x0, y0);
-    xf(dw,   0.0f, x1, y1);
-    xf(dw,   dh,   x2, y2);
-    xf(0.0f, dh,   x3, y3);
-
-    push_quad(tex,
-              x0, y0, u0, v0, make_vertex_color(c1, alpha),
-              x1, y1, u1, v0, make_vertex_color(c2, alpha),
-              x2, y2, u1, v1, make_vertex_color(c3, alpha),
-              x3, y3, u0, v1, make_vertex_color(c4, alpha));
+    draw_texture_region(tex, x, y, 0, 0, dw, dh, rot_deg, u0, v0, u1, v1,
+                        make_vertex_color(c1, alpha), make_vertex_color(c2, alpha),
+                        make_vertex_color(c3, alpha), make_vertex_color(c4, alpha));
 }
 
 void Renderer2D::draw_background_ext(
@@ -2345,26 +2278,7 @@ void Renderer2D::draw_background_ext(
 
     const f32 dw = static_cast<f32>(bg.width) * xscale;
     const f32 dh = static_cast<f32>(bg.height) * yscale;
-    const f32 rad = static_cast<f32>(deg_to_rad(rot_deg));
-    const f32 c = std::cos(rad);
-    const f32 s = std::sin(rad);
-    auto xf = [&](f32 lx, f32 ly, f32& ox, f32& oy) {
-        ox = x + lx * c + ly * s;
-        oy = y - lx * s + ly * c;
-    };
-
-    f32 x0, y0, x1, y1, x2, y2, x3, y3;
-    xf(0.0f, 0.0f, x0, y0);
-    xf(dw,   0.0f, x1, y1);
-    xf(dw,   dh,   x2, y2);
-    xf(0.0f, dh,   x3, y3);
-
-    const ColorRGBA col = make_vertex_color(color_bgr, alpha);
-    push_quad(tex,
-              x0, y0, 0.0f, 0.0f, col,
-              x1, y1, 1.0f, 0.0f, col,
-              x2, y2, 1.0f, 1.0f, col,
-              x3, y3, 0.0f, 1.0f, col);
+    draw_texture_ext(tex, x, y, 0, 0, dw, dh, rot_deg, color_bgr, alpha);
 }
 
 void Renderer2D::draw_background_part_ext(
@@ -2378,12 +2292,7 @@ void Renderer2D::draw_background_stretched_ext(
     f32 x, f32 y, f32 w, f32 h, u32 color_bgr, f32 alpha) {
     const TextureHandle tex = background_texture(bg_id);
     if (!tex.valid()) return;
-    const ColorRGBA col = make_vertex_color(color_bgr, alpha);
-    push_quad(tex,
-              x, y, 0.0f, 0.0f, col,
-              x + w, y, 1.0f, 0.0f, col,
-              x + w, y + h, 1.0f, 1.0f, col,
-              x, y + h, 0.0f, 1.0f, col);
+    draw_texture_ext(tex, x, y, 0, 0, w, h, 0, color_bgr, alpha);
 }
 
 void Renderer2D::draw_background_tiled_ext(
@@ -2429,11 +2338,7 @@ void Renderer2D::draw_tile(
     const f32 dh = h * yscale;
 
     const ColorRGBA col = make_vertex_color(blend_bgr, alpha);
-    push_quad(tex,
-              x, y, u0, v0, col,
-              x + dw, y, u1, v0, col,
-              x + dw, y + dh, u1, v1, col,
-              x, y + dh, u0, v1, col);
+    draw_texture_region(tex, x, y, 0, 0, dw, dh, 0, u0, v0, u1, v1, col, col, col, col);
 }
 
 // ---- Text & Fonts ----
@@ -2601,9 +2506,11 @@ void Renderer2D::draw_text_ext_color(
         const f64 width_offset = align_pixels(aligned_extent(draw_halign_, static_cast<f64>(lw) * xscale));
         const f64 line_x = base_x - width_offset * cs;
         const f64 line_y = base_y + width_offset * sn;
+        // Bitmap glyphs use the same local offset as a textured region.
+        const f64 glyph_offset = has_spr_font ? 0.0 : -0.5;
         auto xf = [&](f32 lx, f32 ly, f32& ox, f32& oy) {
-            const f64 sx = static_cast<f64>(lx) * xscale;
-            const f64 sy = static_cast<f64>(ly) * yscale;
+            const f64 sx = static_cast<f64>(lx) * xscale + glyph_offset;
+            const f64 sy = static_cast<f64>(ly) * yscale + glyph_offset;
             ox = static_cast<f32>(line_x + sx * cs + sy * sn);
             oy = static_cast<f32>(line_y - sx * sn + sy * cs);
         };
@@ -2688,19 +2595,21 @@ void Renderer2D::draw_text_ext_color(
 
 void Renderer2D::draw_point_color(f32 x, f32 y, u32 color_bgr, f32 alpha) {
     const ColorRGBA c = make_vertex_color(color_bgr, alpha);
-    push_quad(TextureHandle{},
-              x, y, 0.0f, 0.0f, c,
-              x + 1.0f, y, 0.0f, 0.0f, c,
-              x + 1.0f, y + 1.0f, 0.0f, 0.0f, c,
-              x, y + 1.0f, 0.0f, 0.0f, c);
+    ensure_batch(PrimitiveTopology::Points, TextureHandle{});
+    vertices_.push_back(Vertex3D{x, y, current_draw_z_, 0, 0, 0, 0, 0, c.r, c.g, c.b, c.a});
 }
 
 void Renderer2D::draw_line_color(f32 x1, f32 y1, f32 x2, f32 y2, u32 c1, u32 c2, f32 alpha) {
+    // GM8 adds 0.01 to standalone line endpoints before transforming them.
+    push_line(x1 + 0.01f, y1 + 0.01f, x2 + 0.01f, y2 + 0.01f, c1, c2, alpha);
+}
+
+void Renderer2D::push_line(f32 x1, f32 y1, f32 x2, f32 y2, u32 c1, u32 c2, f32 alpha) {
     ensure_batch(PrimitiveTopology::Lines, TextureHandle{});
     const ColorRGBA col1 = make_vertex_color(c1, alpha);
     const ColorRGBA col2 = make_vertex_color(c2, alpha);
-    vertices_.push_back(Vertex3D{x1 + 0.5f, y1 + 0.5f, current_draw_z_, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, col1.r, col1.g, col1.b, col1.a});
-    vertices_.push_back(Vertex3D{x2 + 0.5f, y2 + 0.5f, current_draw_z_, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, col2.r, col2.g, col2.b, col2.a});
+    vertices_.push_back(Vertex3D{x1, y1, current_draw_z_, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, col1.r, col1.g, col1.b, col1.a});
+    vertices_.push_back(Vertex3D{x2, y2, current_draw_z_, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, col2.r, col2.g, col2.b, col2.a});
 }
 
 void Renderer2D::draw_line_width_color(f32 x1, f32 y1, f32 x2, f32 y2, f32 width, u32 c1, u32 c2, f32 alpha) {
@@ -2723,25 +2632,30 @@ void Renderer2D::draw_line_width_color(f32 x1, f32 y1, f32 x2, f32 y2, f32 width
 }
 
 void Renderer2D::draw_rectangle_color(f32 x1, f32 y1, f32 x2, f32 y2, u32 c1, u32 c2, u32 c3, u32 c4, bool outline, f32 alpha) {
+    if (x1 > x2) std::swap(x1, x2);
+    if (y1 > y2) std::swap(y1, y2);
+    // Include integral right and bottom edges at D3D's integer sample centers.
+    if (x2 == std::trunc(x2)) x2 += 0.01f;
+    if (y2 == std::trunc(y2)) y2 += 0.01f;
     if (outline) {
-        draw_line_color(x1, y1, x2, y1, c1, c2, alpha);
-        draw_line_color(x2, y1, x2, y2, c2, c3, alpha);
-        draw_line_color(x2, y2, x1, y2, c3, c4, alpha);
-        draw_line_color(x1, y2, x1, y1, c4, c1, alpha);
+        push_line(x1, y1, x2, y1, c1, c2, alpha);
+        push_line(x2, y1, x2, y2, c2, c3, alpha);
+        push_line(x2, y2, x1, y2, c3, c4, alpha);
+        push_line(x1, y2, x1, y1, c4, c1, alpha);
         return;
     }
     push_quad(TextureHandle{},
               x1, y1, 0.0f, 0.0f, make_vertex_color(c1, alpha),
-              x2 + 1.0f, y1, 0.0f, 0.0f, make_vertex_color(c2, alpha),
-              x2 + 1.0f, y2 + 1.0f, 0.0f, 0.0f, make_vertex_color(c3, alpha),
-              x1, y2 + 1.0f, 0.0f, 0.0f, make_vertex_color(c4, alpha));
+              x2, y1, 0.0f, 0.0f, make_vertex_color(c2, alpha),
+              x2, y2, 0.0f, 0.0f, make_vertex_color(c3, alpha),
+              x1, y2, 0.0f, 0.0f, make_vertex_color(c4, alpha));
 }
 
 void Renderer2D::draw_triangle_color(f32 x1, f32 y1, f32 x2, f32 y2, f32 x3, f32 y3, u32 c1, u32 c2, u32 c3, bool outline, f32 alpha) {
     if (outline) {
-        draw_line_color(x1, y1, x2, y2, c1, c2, alpha);
-        draw_line_color(x2, y2, x3, y3, c2, c3, alpha);
-        draw_line_color(x3, y3, x1, y1, c3, c1, alpha);
+        push_line(x1, y1, x2, y2, c1, c2, alpha);
+        push_line(x2, y2, x3, y3, c2, c3, alpha);
+        push_line(x3, y3, x1, y1, c3, c1, alpha);
         return;
     }
     ensure_batch(PrimitiveTopology::Triangles, TextureHandle{});
@@ -2765,7 +2679,7 @@ void Renderer2D::draw_ellipse_color(f32 x1, f32 y1, f32 x2, f32 y2, u32 c1, u32 
         for (i32 i = 0; i < segs; ++i) {
             const f32 a0 = static_cast<f32>(i) * step;
             const f32 a1 = static_cast<f32>(i + 1) * step;
-            draw_line_color(cx + std::cos(a0) * rx, cy + std::sin(a0) * ry,
+            push_line(cx + std::cos(a0) * rx, cy + std::sin(a0) * ry,
                             cx + std::cos(a1) * rx, cy + std::sin(a1) * ry, c2, c2, alpha);
         }
         return;
@@ -2796,10 +2710,10 @@ void Renderer2D::draw_sprite_pos(
     if (!tex.valid()) return;
     const ColorRGBA col = make_vertex_color(0xFFFFFFu, alpha);
     push_quad(tex,
-              x1, y1, 0.0f, 0.0f, col,
-              x2, y2, 1.0f, 0.0f, col,
-              x3, y3, 1.0f, 1.0f, col,
-              x4, y4, 0.0f, 1.0f, col);
+              x1 - 0.5f, y1 - 0.5f, 0.0f, 0.0f, col,
+              x2 - 0.5f, y2 - 0.5f, 1.0f, 0.0f, col,
+              x3 - 0.5f, y3 - 0.5f, 1.0f, 1.0f, col,
+              x4 - 0.5f, y4 - 0.5f, 0.0f, 1.0f, col);
 }
 
 void Renderer2D::draw_background_general(
@@ -2821,23 +2735,9 @@ void Renderer2D::draw_background_general(
     const f32 dw = w * xscale;
     const f32 dh = h * yscale;
 
-    const f32 rad = static_cast<f32>(deg_to_rad(rot_deg));
-    const f32 c = std::cos(rad);
-    const f32 s = std::sin(rad);
-    auto xf = [&](f32 lx, f32 ly, f32& ox, f32& oy) {
-        ox = x + lx * c + ly * s;
-        oy = y - lx * s + ly * c;
-    };
-    f32 x0, y0, x1, y1, x2, y2, x3, y3;
-    xf(0.0f, 0.0f, x0, y0);
-    xf(dw,   0.0f, x1, y1);
-    xf(dw,   dh,   x2, y2);
-    xf(0.0f, dh,   x3, y3);
-    push_quad(tex,
-              x0, y0, u0, v0, make_vertex_color(c1, alpha),
-              x1, y1, u1, v0, make_vertex_color(c2, alpha),
-              x2, y2, u1, v1, make_vertex_color(c3, alpha),
-              x3, y3, u0, v1, make_vertex_color(c4, alpha));
+    draw_texture_region(tex, x, y, 0, 0, dw, dh, rot_deg, u0, v0, u1, v1,
+                        make_vertex_color(c1, alpha), make_vertex_color(c2, alpha),
+                        make_vertex_color(c3, alpha), make_vertex_color(c4, alpha));
 }
 
 void Renderer2D::draw_arrow(f32 x1, f32 y1, f32 x2, f32 y2, f32 tip_size, u32 color_bgr, f32 alpha) {
@@ -3395,10 +3295,10 @@ void Renderer2D::draw_model_bucket(const Model3DMeshBucket& bucket, PrimitiveTop
         device_->set_blend_state(blend_state_);
         bool used_custom_shader = false;
         if (dx9_.has_active_shader()) {
-            used_custom_shader = dx9_.bind_and_upload(make_dx9_draw_context(tint), tex);
+            used_custom_shader = dx9_.bind_and_upload(make_dx9_draw_context(tint, PixelCenter::D3D9), tex);
         }
         if (!used_custom_shader) {
-            upload_shader_uniforms(tint);
+            upload_shader_uniforms(tint, PixelCenter::D3D9);
             apply_stage0_ff_sampler(tex);
             device_->bind_texture(0, tex);
         }
@@ -3426,6 +3326,14 @@ void Renderer2D::draw_model_bucket(const Model3DMeshBucket& bucket, PrimitiveTop
     flush();
 }
 
+std::array<f32, 2> Renderer2D::pixel_center_offset(PixelCenter center) const noexcept {
+    if (center == PixelCenter::OpenGL) return {};
+    // D3D9 places pixel centers at integers. Shift raw vertices by half a
+    // viewport pixel after projection, independent of the world transform.
+    return {1.0f / active_viewport_.width,
+            (rendering_to_fbo() ? 1.0f : -1.0f) / active_viewport_.height};
+}
+
 void Renderer2D::d3d_model_draw(i32 id, f32 x, f32 y, f32 z, TextureHandle tex) {
     Model3DData* model = models_.prepare_for_draw(id, recorded_d3d_);
     if (!model) return;
@@ -3445,14 +3353,9 @@ void Renderer2D::d3d_model_draw(i32 id, f32 x, f32 y, f32 z, TextureHandle tex) 
         mat4_mul(world_matrix_, saved_world, trans);
     }
 
-    // Model vertices use D3D's integer pixel centers. Shift by half a viewport
-    // pixel after projection so scaling and perspective do not change the offset.
-    pixel_center_offset_ = {1.0f / active_viewport_.width,
-                            (rendering_to_fbo() ? 1.0f : -1.0f) / active_viewport_.height};
     draw_model_bucket(model->triangles, PrimitiveTopology::Triangles, tex);
     draw_model_bucket(model->lines, PrimitiveTopology::Lines, tex);
     draw_model_bucket(model->points, PrimitiveTopology::Points, tex);
-    pixel_center_offset_ = {};
 
     std::memcpy(world_matrix_, saved_world, sizeof(saved_world));
 }
@@ -3481,8 +3384,7 @@ void Renderer2D::primitive_end() {
     }
 
     flush();
-    batch_topo_ = topo;
-    batch_tex_ = prim_tex_;
+    ensure_batch(topo, prim_tex_);
     vertices_ = std::move(prim_verts_);
     prim_verts_.clear();
     flush();
@@ -3516,11 +3418,11 @@ bool Renderer2D::dx9_draw_vertex_buffer(
     static constexpr f32 kWhiteTint[4] = {1.0f, 1.0f, 1.0f, 1.0f};
     device_->set_blend_state(blend_state_);
     if (!dx9_.has_active_shader()) {
-        upload_shader_uniforms(kWhiteTint);
+        upload_shader_uniforms(kWhiteTint, PixelCenter::D3D9);
     }
     return dx9_.draw_vertex_buffer(
         vbuf_id, vformat_id, prim_type, tex, vert_count, indexed,
-        make_dx9_draw_context(kWhiteTint), shader_);
+        make_dx9_draw_context(kWhiteTint, PixelCenter::D3D9), shader_);
 }
 
 Result<Bitmap32> Renderer2D::decode_image_to_bgra(std::span<const u8> encoded_bytes) {

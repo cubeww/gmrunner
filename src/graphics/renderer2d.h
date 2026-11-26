@@ -360,24 +360,29 @@ public:
     [[nodiscard]] static Result<Bitmap32> decode_image_to_bgra(std::span<const u8> encoded_bytes);
 
 private:
+    enum class PixelCenter { D3D9, OpenGL };
     void draw_texture_ext(TextureHandle tex, f32 x, f32 y, f32 lx0, f32 ly0, f32 lx1, f32 ly1,
                           f32 rot_deg, u32 color_bgr, f32 alpha);
-    void ensure_batch(PrimitiveTopology topo, TextureHandle tex);
+    void draw_texture_region(TextureHandle tex, f32 x, f32 y, f32 lx0, f32 ly0, f32 lx1, f32 ly1, f32 rot_deg,
+                             f32 u0, f32 v0, f32 u1, f32 v1, ColorRGBA c0, ColorRGBA c1, ColorRGBA c2, ColorRGBA c3);
+    void push_line(f32 x1, f32 y1, f32 x2, f32 y2, u32 c1, u32 c2, f32 alpha);
+    void ensure_batch(PrimitiveTopology topo, TextureHandle tex, PixelCenter center = PixelCenter::D3D9);
     bool ensure_screen_fbo(i32 width, i32 height);
     void bind_active_target_fbo();
     [[nodiscard]] FramebufferHandle active_target_fbo() const noexcept;
     void reset_active_fbo_ext_state();
-    [[nodiscard]] Dx9DrawContext make_dx9_draw_context(const f32 tint_rgba[4]) const noexcept;
+    [[nodiscard]] Dx9DrawContext make_dx9_draw_context(const f32 tint_rgba[4], PixelCenter center) const noexcept;
     void apply_stage0_ff_sampler(TextureHandle tex);
     void apply_d3d_depth_cull();
-    void upload_shader_uniforms(const f32 tint_rgba[4]);
+    void upload_shader_uniforms(const f32 tint_rgba[4], PixelCenter center);
     void draw_model_bucket(const Model3DMeshBucket& bucket, PrimitiveTopology topo, TextureHandle tex);
+    [[nodiscard]] std::array<f32, 2> pixel_center_offset(PixelCenter center) const noexcept;
     void push_quad(
         TextureHandle tex,
         f32 x0, f32 y0, f32 u0, f32 v0, ColorRGBA c0,
         f32 x1, f32 y1, f32 u1, f32 v1, ColorRGBA c1,
         f32 x2, f32 y2, f32 u2, f32 v2, ColorRGBA c2,
-        f32 x3, f32 y3, f32 u3, f32 v3, ColorRGBA c3);
+        f32 x3, f32 y3, f32 u3, f32 v3, ColorRGBA c3, PixelCenter center = PixelCenter::D3D9);
 
     void create_builtin_font_texture();
     void apply_screen_projection();
@@ -444,6 +449,7 @@ private:
     TextureHandle builtin_font_tex_;
 
     std::vector<Vertex3D> vertices_;
+    PixelCenter batch_center_ = PixelCenter::D3D9;
     PrimitiveTopology batch_topo_ = PrimitiveTopology::Triangles;
     TextureHandle batch_tex_{};
     BlendState blend_state_{};
@@ -484,7 +490,6 @@ private:
     i32 screen_h_ = 608;
     ViewportRect screen_viewport_{0, 0, 800, 608};
     ViewportRect active_viewport_{0, 0, 800, 608};
-    std::array<f32, 2> pixel_center_offset_{};
 
     // Persistent logical-resolution screen FBO (for crisp screen captures & transitions)
     TextureHandle screen_fbo_tex_{};

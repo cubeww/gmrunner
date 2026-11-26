@@ -1759,34 +1759,31 @@ void Runner::update_mouse_room_coords() {
 
 void Runner::update_view_following() {
     if (!view_enabled_) return;
+    // GM8 rounds the instance position before applying the view border. A
+    // fractional camera can sample the neighbouring tile when scrolling.
+    const auto follow_axis = [](f64 origin, f64 target_pos, f64 size, i32 border, i32 speed, i32 room_size) {
+        const f64 target = static_cast<f64>(delphi_round(target_pos));
+        f64 next = origin;
+        if (2.0 * border >= size) {
+            next = target - std::trunc(size * 0.5);
+        } else if (target < origin + border) {
+            next = target - border;
+        } else if (target > origin + size - border) {
+            next = target + border - size;
+        }
+        next = std::min(std::max(next, 0.0), room_size - size);
+        if (speed < 0) return next;
+        return std::clamp(next, origin - speed, origin + speed);
+    };
+
     for (auto& v : views_) {
         if (!v.visible || v.follow_object < 0) continue;
 
         const Instance* target = find_instance(find_matching_instance(v.follow_object, [](const Instance&) { return true; }));
         if (!target) continue;
 
-        const f64 hb = std::min(static_cast<f64>(v.hborder), v.wview * 0.5);
-        const f64 vb = std::min(static_cast<f64>(v.vborder), v.hview * 0.5);
-        f64 tx = v.xview;
-        f64 ty = v.yview;
-        if (target->x < v.xview + hb) tx = target->x - hb;
-        else if (target->x > v.xview + v.wview - hb) tx = target->x + hb - v.wview;
-        if (target->y < v.yview + vb) ty = target->y - vb;
-        else if (target->y > v.yview + v.hview - vb) ty = target->y + vb - v.hview;
-
-        tx = std::clamp(tx, 0.0, std::max(0.0, static_cast<f64>(room_width_) - v.wview));
-        ty = std::clamp(ty, 0.0, std::max(0.0, static_cast<f64>(room_height_) - v.hview));
-
-        if (v.hspeed >= 0) {
-            const f64 dx = tx - v.xview;
-            if (std::fabs(dx) > v.hspeed) tx = v.xview + (dx > 0.0 ? v.hspeed : -v.hspeed);
-        }
-        if (v.vspeed >= 0) {
-            const f64 dy = ty - v.yview;
-            if (std::fabs(dy) > v.vspeed) ty = v.yview + (dy > 0.0 ? v.vspeed : -v.vspeed);
-        }
-        v.xview = tx;
-        v.yview = ty;
+        v.xview = follow_axis(v.xview, target->x, v.wview, v.hborder, v.hspeed, room_width_);
+        v.yview = follow_axis(v.yview, target->y, v.hview, v.vborder, v.vspeed, room_height_);
     }
 }
 
